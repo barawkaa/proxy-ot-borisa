@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.3"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -476,9 +476,29 @@ def validate_servers(servers):
 
 
 def fetch_text(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.5"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="ignore")
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.6"})
+    errors = []
+
+    # 1) Пробуем напрямую. Это работает, если подписка доступна с Raspberry/HAOS.
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        errors.append(f"direct: {e}")
+
+    # 2) Если прямой доступ к подписке заблокирован, пробуем скачать через наш HTTP proxy.
+    # Это сработает после того, как серверы уже один раз добавлены вручную и sing-box запущен.
+    try:
+        options = load_options()
+        http_port = int(options.get("http_proxy_port", 2081))
+        proxy_url = f"http://127.0.0.1:{http_port}"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        errors.append(f"via local http proxy: {e}")
+
+    raise RuntimeError("Не удалось загрузить подписку: " + " | ".join(errors))
 
 
 def selector_outbounds(servers):
@@ -799,8 +819,47 @@ def close_all_connections():
         return False
 
 
+def normalize_request_path(raw_path):
+    """Return the path as the backend should handle it.
+
+    Home Assistant Ingress normally strips /api/hassio_ingress/<token>
+    before proxying the request to the add-on, but in practice different
+    entry points and browser navigation can still leave the prefix in the
+    path.  All handlers use this normalizer so /api/... works both directly
+    and through an ingress-prefixed URL.
+    """
+    parsed = urllib.parse.urlparse(raw_path)
+    path = parsed.path or "/"
+
+    marker = "/api/hassio_ingress/"
+    if marker in path:
+        before, after = path.split(marker, 1)
+        parts = after.split("/", 1)
+        if len(parts) == 1:
+            path = "/"
+        else:
+            suffix = parts[1]
+            path = "/" + suffix.lstrip("/")
+            if path == "//":
+                path = "/"
+
+    # Be tolerant if HA forwards /ingress/<token>/...
+    marker2 = "/ingress/"
+    if marker2 in path:
+        before, after = path.split(marker2, 1)
+        parts = after.split("/", 1)
+        if len(parts) == 1:
+            path = "/"
+        else:
+            path = "/" + parts[1].lstrip("/")
+
+    if not path.startswith("/"):
+        path = "/" + path
+    return path
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.6.0"
+    server_version = "ProxyOtBorisa/1.6.3"
 
     def log_message(self, fmt, *args):
         return
@@ -829,8 +888,12 @@ class Handler(BaseHTTPRequestHandler):
         if path in ["", "/"]:
             p = UI_DIR / "index.html"
         if not p.exists() or not p.is_file():
-            self.send_error(404)
-            return
+            # For Home Assistant Ingress and simple browser refreshes, serve
+            # the SPA index instead of returning a static-file 404.
+            p = UI_DIR / "index.html"
+            if not p.exists() or not p.is_file():
+                self.send_error(404)
+                return
         content = p.read_bytes()
         ctype = "text/html; charset=utf-8" if p.suffix == ".html" else "application/octet-stream"
         if p.suffix == ".js":
@@ -846,7 +909,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            path = urllib.parse.urlparse(self.path).path
+            path = normalize_request_path(self.path)
             if not path.startswith("/api"):
                 return self.serve_file(path)
             if path == "/api/status":
@@ -878,7 +941,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            path = urllib.parse.urlparse(self.path).path
+            path = normalize_request_path(self.path)
             body = self.read_body()
             if path == "/api/power":
                 settings = load_settings()
@@ -1016,7 +1079,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         try:
-            path = urllib.parse.urlparse(self.path).path
+            path = normalize_request_path(self.path)
             if path.startswith("/api/blocklist/"):
                 cidr_or_ip = urllib.parse.unquote(path.split("/api/blocklist/", 1)[1])
                 items = [x for x in load_blocked() if x.get("cidr") != cidr_or_ip and x.get("ip") != cidr_or_ip]

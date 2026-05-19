@@ -1,16 +1,12 @@
 # Proxy от Бориса
 
-Home Assistant add-on для управления HTTP/SOCKS5/Telegram MTProto прокси на базе sing-box.
+Управляемый Home Assistant add-on для HTTP/SOCKS/Telegram MTProto прокси на базе sing-box.
 
-## Основные функции
+## Возможности
 
-- HTTP proxy
-- SOCKS5 proxy
-- Telegram MTProto proxy через sing-box/VLESS upstream
-- импорт серверов через JSON, vless:// ссылки и подписку
-- блокировка IP клиентов
-- доверенные клиенты
-- мониторинг соединений и трафика
-- управление через Home Assistant Ingress
+- HTTP/SOCKS5 прокси через VLESS/Reality серверы.
+- Telegram MTProto через VPN-серверы.
+- Пользователи, блокировки, клиенты, трафик и логи.
+- Режим split-routing: весь трафик через VPN или только заблокированные/ручные ресурсы через VPN.
+- Обновляемые списки Re:filter / AntiFilter / sing-box rule-set.
 
-Реальные серверы и пароли не храните в GitHub. Они сохраняются в `/data` внутри add-on.

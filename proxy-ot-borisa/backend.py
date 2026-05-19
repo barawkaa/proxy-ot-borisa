@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.8.4"
+APP_VERSION = "1.9.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -34,6 +34,101 @@ SESSION_BREAK_SECONDS = 60
 RECENT_CLIENT_SECONDS = 300
 OFFLINE_CLIENT_KEEP_SECONDS = 30 * 24 * 3600
 EVENT_LOG_LIMIT = 1000
+
+RULES_DIR = DATA_DIR / "rules"
+RULES_DIR.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_ROUTING = {
+    "mode": "all_proxy",  # all_proxy | blocked_plus_manual | manual_only | all_direct
+    "updated_at": 0,
+    "last_apply_at": 0,
+    "auto_update_enabled": False,
+    "auto_update_interval_hours": 24,
+    "manual_include_domains": [],
+    "manual_include_ips": [],
+    "manual_exclude_domains": [],
+    "manual_exclude_ips": [],
+    "presets": {
+        "youtube": False,
+        "openai": False,
+        "instagram_meta": False,
+        "discord": False,
+        "telegram": False,
+        "nintendo": False,
+        "tiktok": False,
+        "spotify": False,
+    },
+    "sources": [
+        {
+            "tag": "refilter_domains",
+            "name": "Re:filter — домены РФ .srs",
+            "kind": "domain_suffix",
+            "format": "remote_srs",
+            "enabled": True,
+            "url": "https://github.com/1andrevich/Re-filter-lists/releases/latest/download/ruleset-domain-refilter_domains.srs",
+            "description": "Готовый бинарный rule-set Sing-Box: заблокированные/ограниченные домены РФ. Основной источник."
+        },
+        {
+            "tag": "refilter_ipsum",
+            "name": "Re:filter — IP/CIDR РФ .srs",
+            "kind": "ip_cidr",
+            "format": "remote_srs",
+            "enabled": True,
+            "url": "https://github.com/1andrevich/Re-filter-lists/releases/latest/download/ruleset-ip-refilter_ipsum.srs",
+            "description": "Готовый бинарный rule-set Sing-Box: суммированный список IP/подсетей Re:filter. Основной источник."
+        },
+        {
+            "tag": "legiz_ru_bundle",
+            "name": "legiz-ru ru-bundle.srs",
+            "kind": "mixed",
+            "format": "remote_srs",
+            "enabled": False,
+            "url": "https://github.com/legiz-ru/sb-rule-sets/raw/main/ru-bundle.srs",
+            "description": "Готовый sing-box rule-set для RU-blocked/unban ресурсов. Дополнительный источник."
+        },
+        {
+            "tag": "legiz_rknasnblock",
+            "name": "legiz-ru rknasnblock.srs",
+            "kind": "ip_cidr",
+            "format": "remote_srs",
+            "enabled": False,
+            "url": "https://github.com/legiz-ru/sb-rule-sets/raw/main/rknasnblock.srs",
+            "description": "Готовый sing-box rule-set по ASN/IP блокировкам. Дополнительный источник."
+        },
+        {
+            "tag": "antifilter_domains",
+            "name": "AntiFilter — домены TXT",
+            "kind": "domain_suffix",
+            "format": "text",
+            "enabled": False,
+            "url": "https://antifilter.download/list/domains.lst",
+            "path": "/data/rules/antifilter_domains.json",
+            "description": "Текстовый список доменов antifilter.download, конвертируется backend'ом в source rule-set."
+        },
+        {
+            "tag": "antifilter_ips",
+            "name": "AntiFilter — IP/CIDR TXT",
+            "kind": "ip_cidr",
+            "format": "text",
+            "enabled": False,
+            "url": "https://antifilter.download/list/ipsum.lst",
+            "path": "/data/rules/antifilter_ips.json",
+            "description": "Текстовый список IP/CIDR antifilter.download, конвертируется backend'ом в source rule-set."
+        }
+    ]
+}
+
+PRESET_DOMAINS = {
+    "youtube": ["youtube.com", "youtu.be", "googlevideo.com", "ytimg.com", "youtubei.googleapis.com", "ggpht.com"],
+    "openai": ["openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", "auth0.openai.com"],
+    "instagram_meta": ["instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net", "meta.com", "threads.net"],
+    "discord": ["discord.com", "discord.gg", "discordapp.com", "discordapp.net", "discord.media"],
+    "telegram": ["telegram.org", "t.me", "tdesktop.com"],
+    "nintendo": ["nintendo.com", "nintendo.net", "nintendo-europe.com", "nintendowifi.net"],
+    "tiktok": ["tiktok.com", "tiktokcdn.com", "byteoversea.com", "ibyteimg.com"],
+    "spotify": ["spotify.com", "scdn.co", "spotifycdn.com", "spoti.fi"],
+}
+
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -166,6 +261,196 @@ def load_settings():
 def save_settings(settings):
     settings["updated_at"] = time.time()
     write_json(data_path("settings.json"), settings)
+
+
+def merge_routing_defaults(value):
+    base = json.loads(json.dumps(DEFAULT_ROUTING))
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == "sources" and isinstance(v, list):
+                by_tag = {s.get("tag"): s for s in base["sources"]}
+                for item in v:
+                    if not isinstance(item, dict) or not item.get("tag"):
+                        continue
+                    tag = item["tag"]
+                    if tag in by_tag:
+                        by_tag[tag].update(item)
+                    else:
+                        base["sources"].append(item)
+            elif k == "presets" and isinstance(v, dict):
+                base["presets"].update(v)
+            else:
+                base[k] = v
+    # normalize arrays
+    for key in ["manual_include_domains", "manual_include_ips", "manual_exclude_domains", "manual_exclude_ips"]:
+        base[key] = normalize_list(base.get(key, []))
+    return base
+
+
+def load_routing():
+    return merge_routing_defaults(read_json(data_path("routing.json"), {}))
+
+
+def save_routing(routing):
+    routing = merge_routing_defaults(routing)
+    routing["updated_at"] = time.time()
+    write_json(data_path("routing.json"), routing)
+    return routing
+
+
+def normalize_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = re.split(r"[\n,;\s]+", value)
+    elif isinstance(value, list):
+        raw = value
+    else:
+        raw = [str(value)]
+    out = []
+    seen = set()
+    for item in raw:
+        item = str(item).strip().lower()
+        item = item.replace("http://", "").replace("https://", "")
+        item = item.split("/", 1)[0]
+        item = item.strip(" .")
+        if not item or item.startswith("#"):
+            continue
+        if item not in seen:
+            out.append(item); seen.add(item)
+    return out
+
+
+def normalize_domains(value):
+    result = []
+    for item in normalize_list(value):
+        if re.match(r"^[a-z0-9а-яё_.-]+$", item, re.I) and "." in item:
+            result.append(item.lstrip("."))
+    return result
+
+
+def normalize_cidrs(value):
+    result = []
+    for item in normalize_list(value):
+        try:
+            if "/" in item:
+                result.append(str(ipaddress.ip_network(item, strict=False)))
+            else:
+                ip = ipaddress.ip_address(item)
+                result.append(str(ipaddress.ip_network(item + ("/32" if ip.version == 4 else "/128"), strict=False)))
+        except Exception:
+            continue
+    return result
+
+
+def source_to_ruleset_json(tag, kind, values):
+    if kind == "ip_cidr":
+        rules = [{"ip_cidr": normalize_cidrs(values)}]
+    else:
+        rules = [{"domain_suffix": normalize_domains(values)}]
+    rules = [r for r in rules if list(r.values())[0]]
+    return {"version": 3, "rules": rules, "tag": tag, "generated_at": iso_time()}
+
+
+def write_source_ruleset(path, tag, kind, values):
+    p = Path(path)
+    data = source_to_ruleset_json(tag, kind, values)
+    write_json(p, data)
+    return {"path": str(p), "rules": len(data.get("rules", [])), "items": sum(len(list(r.values())[0]) for r in data.get("rules", []))}
+
+
+def fetch_text_with_fallback(url, timeout=35):
+    errors = []
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.9"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="ignore"), "direct"
+    except Exception as e:
+        errors.append(f"direct: {e}")
+    try:
+        options = load_options()
+        http_port = int(options.get("http_proxy_port", 2081))
+        proxy_url = f"http://127.0.0.1:{http_port}"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="ignore"), "local_proxy"
+    except Exception as e:
+        errors.append(f"via local proxy: {e}")
+    raise RuntimeError(" | ".join(errors))
+
+
+def update_routing_sources(selected_tags=None):
+    routing = load_routing()
+    selected = set(selected_tags or [])
+    updated = []
+    for src in routing.get("sources", []):
+        if selected and src.get("tag") not in selected:
+            continue
+        if not src.get("enabled"):
+            continue
+        if src.get("format") == "remote_srs":
+            src["last_status"] = "remote"
+            src["last_update_at"] = time.time()
+            updated.append({"tag": src.get("tag"), "status": "remote", "url": src.get("url")})
+            continue
+        try:
+            txt, method = fetch_text_with_fallback(src.get("url", ""))
+            lines = []
+            for line in txt.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("!"):
+                    continue
+                lines.append(line)
+            info = write_source_ruleset(src.get("path") or str(RULES_DIR / (src.get("tag") + ".json")), src.get("tag"), src.get("kind"), lines)
+            src.update({
+                "last_status": "ok",
+                "last_error": "",
+                "last_update_at": time.time(),
+                "last_items": info.get("items", 0),
+                "last_bytes": len(txt.encode("utf-8")),
+                "download_method": method,
+            })
+            updated.append({"tag": src.get("tag"), "status": "ok", **info})
+        except Exception as e:
+            src["last_status"] = "error"
+            src["last_error"] = str(e)
+            src["last_update_at"] = time.time()
+            updated.append({"tag": src.get("tag"), "status": "error", "error": str(e)})
+    routing["last_sources_update_at"] = time.time()
+    save_routing(routing)
+    log("ROUTING", "UPDATE", f"Routing sources updated: {len(updated)}", actor="ui", action="routing_update", extra={"updated": updated})
+    return {"routing": routing, "updated": updated}
+
+
+def build_manual_routing_rules(routing):
+    include_domains = normalize_domains(routing.get("manual_include_domains", []))
+    include_ips = normalize_cidrs(routing.get("manual_include_ips", []))
+    exclude_domains = normalize_domains(routing.get("manual_exclude_domains", []))
+    exclude_ips = normalize_cidrs(routing.get("manual_exclude_ips", []))
+    for preset, enabled in (routing.get("presets") or {}).items():
+        if enabled:
+            include_domains.extend(PRESET_DOMAINS.get(preset, []))
+    include_domains = sorted(set(include_domains))
+    include_ips = sorted(set(include_ips))
+    exclude_domains = sorted(set(exclude_domains))
+    exclude_ips = sorted(set(exclude_ips))
+    return include_domains, include_ips, exclude_domains, exclude_ips
+
+
+def routing_summary(routing=None):
+    routing = routing or load_routing()
+    enabled = [s for s in routing.get("sources", []) if s.get("enabled")]
+    ok = [s for s in enabled if s.get("format") == "remote_srs" or s.get("last_status") == "ok" or Path(str(s.get("path", ""))).exists()]
+    return {
+        "mode": routing.get("mode"),
+        "enabled_sources": len(enabled),
+        "ready_sources": len(ok),
+        "manual_include_domains": len(normalize_domains(routing.get("manual_include_domains", []))),
+        "manual_include_ips": len(normalize_cidrs(routing.get("manual_include_ips", []))),
+        "manual_exclude_domains": len(normalize_domains(routing.get("manual_exclude_domains", []))),
+        "manual_exclude_ips": len(normalize_cidrs(routing.get("manual_exclude_ips", []))),
+        "last_sources_update_at": routing.get("last_sources_update_at"),
+    }
 
 
 def make_mtproto_secret(hostname):
@@ -1204,6 +1489,7 @@ def selector_outbounds(servers):
 def make_singbox_config():
     options = load_options()
     settings = load_settings()
+    routing = load_routing()
     servers = load_servers()
     blocked = load_blocked()
     server_tags = [s.get("tag") for s in servers if s.get("tag")]
@@ -1251,6 +1537,8 @@ def make_singbox_config():
         outbounds.append({"type": "urltest", "tag": "auto", "outbounds": server_tags, "url": "https://www.gstatic.com/generate_204", "interval": options.get("urltest_interval", "2m"), "tolerance": int(options.get("urltest_tolerance", 50))})
     outbounds.extend(servers)
     outbounds.extend([{"type": "block", "tag": "block"}, {"type": "direct", "tag": "direct"}])
+
+    route_rule_sets = []
     rules = []
     blocked_auth_users = [u.get("username") for u in users if u.get("username") and is_user_block_active(u)]
     if blocked_auth_users:
@@ -1258,17 +1546,60 @@ def make_singbox_config():
     blocked_cidrs = [item.get("cidr") for item in blocked if item.get("cidr")]
     if blocked_cidrs:
         rules.append({"source_ip_cidr": blocked_cidrs, "outbound": "block"})
-    rules.extend([
-        {"inbound": [mtg_upstream_tag], "outbound": "Proxy"},
-        {"inbound": [socks_tag], "outbound": "SOCKS_POWER"},
-        {"inbound": [http_tag], "outbound": "HTTP_POWER"},
-    ])
+
+    # Power switches: if a port is disabled, block it before any routing logic.
+    if not settings.get("socks_enabled", True):
+        rules.append({"inbound": [socks_tag], "outbound": "block"})
+    if not settings.get("http_enabled", True):
+        rules.append({"inbound": [http_tag], "outbound": "block"})
+
+    # Telegram MTProto must always use VPN path; otherwise Raspberry would reach Telegram directly from RU.
+    rules.append({"inbound": [mtg_upstream_tag], "outbound": "Proxy"})
+
+    include_domains, include_ips, exclude_domains, exclude_ips = build_manual_routing_rules(routing)
+    if exclude_domains:
+        rules.append({"domain_suffix": exclude_domains, "outbound": "direct"})
+    if exclude_ips:
+        rules.append({"ip_cidr": exclude_ips, "outbound": "direct"})
+    if include_domains:
+        rules.append({"domain_suffix": include_domains, "outbound": "Proxy"})
+    if include_ips:
+        rules.append({"ip_cidr": include_ips, "outbound": "Proxy"})
+
+    enabled_rule_tags = []
+    if routing.get("mode") in ["blocked_plus_manual", "blocked_only"]:
+        for src in routing.get("sources", []):
+            if not src.get("enabled"):
+                continue
+            tag = src.get("tag")
+            if src.get("format") == "remote_srs":
+                route_rule_sets.append({"type": "remote", "tag": tag, "format": "binary", "url": src.get("url"), "download_detour": "Proxy" if server_tags else "direct"})
+                enabled_rule_tags.append(tag)
+            else:
+                p = Path(str(src.get("path") or ""))
+                if p.exists():
+                    route_rule_sets.append({"type": "local", "tag": tag, "format": "source", "path": str(p)})
+                    enabled_rule_tags.append(tag)
+    if enabled_rule_tags:
+        rules.append({"rule_set": enabled_rule_tags, "outbound": "Proxy"})
+
+    mode = routing.get("mode", "all_proxy")
+    if mode == "all_direct":
+        final_out = "direct"
+    elif mode in ["blocked_plus_manual", "blocked_only", "manual_only"]:
+        final_out = "direct"
+    else:
+        final_out = "Proxy"
+
+    route = {"rules": rules, "final": final_out, "auto_detect_interface": True}
+    if route_rule_sets:
+        route["rule_set"] = route_rule_sets
     return {
         "log": {"level": options.get("log_level", "info"), "timestamp": True},
-        "experimental": {"clash_api": {"external_controller": "127.0.0.1:9090", "secret": options.get("secret", "")}},
+        "experimental": {"clash_api": {"external_controller": "127.0.0.1:9090", "secret": options.get("secret", "")}, "cache_file": {"enabled": True, "path": "/data/sing-box-cache.db"}},
         "inbounds": inbounds,
         "outbounds": outbounds,
-        "route": {"rules": rules, "final": "Proxy", "auto_detect_interface": True},
+        "route": route,
     }
 
 
@@ -1985,7 +2316,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_file(path)
             if path == "/api/status":
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_connections_raw(); update_traffic(conns)
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/proxies":
                 return self.send_json(get_proxies())
             if path == "/api/connections":
@@ -1994,6 +2325,8 @@ class Handler(BaseHTTPRequestHandler):
                 conns = get_connections_raw(); update_traffic(conns); return self.send_json({"clients": build_clients(conns)})
             if path == "/api/servers":
                 settings = load_settings(); return self.send_json({"servers": load_servers(), "subscription_url": settings.get("subscription_url", "")})
+            if path == "/api/routing":
+                return self.send_json({"routing": load_routing(), "summary": routing_summary()})
             if path == "/api/telegram":
                 host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or ""
                 return self.send_json({"telegram": mtg_status(), "detected_host": host.split(":")[0] if host else ""})
@@ -2241,6 +2574,19 @@ class Handler(BaseHTTPRequestHandler):
                 trusted = load_trusted(); trusted[ip] = {"name": name, "trusted_at": time.time()}; save_trusted(trusted)
                 log("TRUSTED", "ADD", f"Trusted client {ip} as {name}", actor="ui", action="trusted_add", target=ip)
                 return self.send_json({"ok": True, "trusted": trusted})
+            if path == "/api/routing":
+                routing = load_routing()
+                for key in ["mode", "auto_update_enabled", "auto_update_interval_hours", "manual_include_domains", "manual_include_ips", "manual_exclude_domains", "manual_exclude_ips", "presets", "sources"]:
+                    if key in body:
+                        routing[key] = body[key]
+                routing = save_routing(routing)
+                log("ROUTING", "SAVE", "Routing settings saved", actor="ui", action="routing_save", extra={"mode": routing.get("mode")})
+                restart_singbox()
+                return self.send_json({"ok": True, "routing": routing, "summary": routing_summary(routing)})
+            if path == "/api/routing/update_sources":
+                result = update_routing_sources(body.get("tags") or None)
+                restart_singbox()
+                return self.send_json({"ok": True, **result, "summary": routing_summary(result.get("routing"))})
             if path == "/api/servers/import":
                 mode = body.get("mode", "json")
                 append = bool(body.get("append", False))

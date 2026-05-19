@@ -847,47 +847,79 @@ def mtg_status():
 
 
 def get_mtg_client_connections():
-    result = []
+    """Return real MTProto client peers.
+
+    Important: registered Telegram users/secrets are NOT clients by themselves.
+    A client is shown only when there is a real TCP peer connected to the shared
+    MTProto port. Older builds created synthetic clients like telegram:<user> from
+    mtg-multi stats; that made newly created users appear online without traffic.
+    """
+    real_peers = list_tcp_peers_for_local_port(telegram_shared_port())
+    if not real_peers:
+        return []
+
     status = mtg_status()
     stats = status.get('stats') or {}
     stats_users = stats.get('users') if isinstance(stats, dict) else {}
     users_by_name = user_by_username_map()
+
+    active_stats = []
     if isinstance(stats_users, dict):
         for username, su in stats_users.items():
+            if not isinstance(su, dict):
+                continue
             user = users_by_name.get(username)
             if not user:
                 continue
-            connections = int(su.get('connections') or 0) if isinstance(su, dict) else 0
-            if connections <= 0:
-                continue
-            result.append({
-                'ip': 'telegram:' + str(username),
-                'port': 0,
-                'state': 'ESTABLISHED',
-                'state_code': '01',
-                'local_port': telegram_shared_port(),
-                'source': 'telegram_mtproto',
-                'user_id': user.get('id'),
-                'username': user.get('username'),
-                'user_name': user.get('name'),
-                'telegram_port': telegram_shared_port(),
-                'connections': connections,
-                'bytes_in': su.get('bytes_in', 0) if isinstance(su, dict) else 0,
-                'bytes_out': su.get('bytes_out', 0) if isinstance(su, dict) else 0,
-                'last_seen': su.get('last_seen') if isinstance(su, dict) else '',
-            })
-    # Дополнительно показываем реальные IP, подключенные к общему MTProto-порту.
-    # Их невозможно надежно сопоставить с пользователем без статистики mtg-multi,
-    # но это полезно для контроля входящих адресов.
-    for peer in list_tcp_peers_for_local_port(telegram_shared_port()):
-        peer['user_id'] = ''
-        peer['username'] = ''
-        peer['user_name'] = ''
+            connections = int(su.get('connections') or 0)
+            bytes_in = int(su.get('bytes_in') or 0)
+            bytes_out = int(su.get('bytes_out') or 0)
+            last_seen = su.get('last_seen') or ''
+            # Treat stats as useful only as identity metadata. Do not create a
+            # client from stats alone. Some mtg-multi builds expose configured
+            # secrets in stats even before a real network peer is active.
+            if connections > 0 or bytes_in > 0 or bytes_out > 0 or last_seen:
+                active_stats.append({
+                    'user': user,
+                    'username': username,
+                    'connections': connections,
+                    'bytes_in': bytes_in,
+                    'bytes_out': bytes_out,
+                    'last_seen': last_seen,
+                })
+
+    mapped_user = None
+    mapped_stat = None
+    # Safe automatic mapping: only one active user in mtg stats. If multiple
+    # users are active on one shared port, do not guess; show real IP as
+    # Telegram MTProto unknown user. Later this can be improved with mtg logs.
+    if len(active_stats) == 1:
+        mapped_stat = active_stats[0]
+        mapped_user = mapped_stat.get('user')
+
+    result = []
+    for peer in real_peers:
+        if mapped_user:
+            peer['user_id'] = mapped_user.get('id')
+            peer['username'] = mapped_user.get('username')
+            peer['user_name'] = mapped_user.get('name')
+            peer['connections'] = max(1, int(mapped_stat.get('connections') or 1))
+            peer['bytes_in'] = int(mapped_stat.get('bytes_in') or 0)
+            peer['bytes_out'] = int(mapped_stat.get('bytes_out') or 0)
+            peer['last_seen'] = mapped_stat.get('last_seen') or ''
+            peer['unmapped'] = False
+        else:
+            peer['user_id'] = ''
+            peer['username'] = ''
+            peer['user_name'] = ''
+            peer['connections'] = 1
+            peer['bytes_in'] = 0
+            peer['bytes_out'] = 0
+            peer['last_seen'] = ''
+            peer['unmapped'] = True
         peer['telegram_port'] = telegram_shared_port()
-        peer['unmapped'] = True
         result.append(peer)
     return result
-
 
 def load_servers():
     path = data_path("servers.json")
@@ -1651,10 +1683,15 @@ def build_clients(connections):
     for key, old in list(history.items()):
         if key in active_keys:
             continue
+        ip = old.get('ip') or (key.split(':', 1)[-1] if key.startswith('ip:') else '—')
+        # Remove stale synthetic Telegram clients created by older builds.
+        # Registered users must not appear in Clients until real network activity exists.
+        if str(ip).startswith('telegram:') or is_loopback_ip(str(ip)):
+            history.pop(key, None)
+            continue
         if old.get('last_seen') and now - old['last_seen'] > OFFLINE_CLIENT_KEEP_SECONDS:
             continue
         status = 'recent' if old.get('last_seen') and now - old['last_seen'] <= RECENT_CLIENT_SECONDS else 'offline'
-        ip = old.get('ip') or (key.split(':', 1)[-1] if key.startswith('ip:') else '—')
         user = users_by_id.get(str(old.get('registered_user_id') or '')) or users_by_name.get(str(old.get('username') or ''))
         grouped[key] = {
             'key': key,

@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.6.4"
+APP_VERSION = "1.8.1"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -26,12 +26,14 @@ OPTIONS_FILE = Path("/data/options.json")
 SINGBOX_BIN = "/usr/local/bin/sing-box"
 SINGBOX_CONFIG = TMP_DIR / "sing-box.json"
 BACKEND_PORT = 8099
-MTG_BIN = "/usr/local/bin/mtg"
+MTG_BIN = "/usr/local/bin/mtg-multi"
 MTG_CONFIG = TMP_DIR / "mtg.toml"
 MTG_UPSTREAM_SOCKS_PORT = 2084
 CLASH_API = "http://127.0.0.1:9090"
 SESSION_BREAK_SECONDS = 60
 RECENT_CLIENT_SECONDS = 300
+OFFLINE_CLIENT_KEEP_SECONDS = 30 * 24 * 3600
+EVENT_LOG_LIMIT = 1000
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -39,12 +41,45 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 lock = threading.RLock()
 singbox_process = None
 mtg_process = None
+mtg_processes = {}
 last_error = ""
 last_mtg_error = ""
 
 
-def log(stage, result, message):
+def now_ts():
+    return time.time()
+
+
+def iso_time(ts=None):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts or time.time()))
+
+
+def append_event(stage, result, message, actor="system", action="", target="", extra=None):
+    try:
+        path = data_path("events.json")
+        events = read_json(path, [])
+        if not isinstance(events, list):
+            events = []
+        events.append({
+            "ts": time.time(),
+            "time": iso_time(),
+            "stage": str(stage),
+            "result": str(result),
+            "actor": str(actor or "system"),
+            "action": str(action or stage),
+            "target": str(target or ""),
+            "message": str(message),
+            "extra": extra or {},
+        })
+        events = events[-EVENT_LOG_LIMIT:]
+        write_json(path, events)
+    except Exception:
+        pass
+
+
+def log(stage, result, message, actor="system", action="", target="", extra=None):
     print(f"[{time.strftime('%H:%M:%S')}] INFO: [STAGE={stage}] [RESULT={result}] {message}", flush=True)
+    append_event(stage, result, message, actor=actor, action=action or stage, target=target, extra=extra)
 
 
 def read_json(path, default):
@@ -104,6 +139,9 @@ def load_settings():
         "subscription_url": "",
         "traffic_limit_bytes": 0,
         "traffic_used_offset_bytes": 0,
+        "proxy_started_at": time.time(),
+        "proxy_last_enabled_at": time.time(),
+        "proxy_last_disabled_at": None,
         "created_at": time.time(),
         "updated_at": time.time(),
     })
@@ -117,6 +155,186 @@ def save_settings(settings):
 def make_mtproto_secret(hostname):
     host = (hostname or "www.google.com").strip() or "www.google.com"
     return "ee" + secrets.token_hex(16) + host.encode("utf-8").hex()
+
+
+
+
+def random_token(length=18):
+    return secrets.token_urlsafe(length).replace('-', '').replace('_', '')[:length]
+
+
+def slugify_username(value, fallback='client'):
+    value = str(value or '').strip().lower()
+    value = re.sub(r'[^a-z0-9_\-]+', '_', value)
+    value = value.strip('_-')
+    if not value:
+        value = fallback
+    return value[:32]
+
+
+def users_path():
+    return data_path('proxy_users.json')
+
+
+def is_user_block_active(user, ts=None):
+    ts = ts or time.time()
+    until = user.get('blocked_until')
+    return bool(until and (until == 'permanent' or float(until) > ts))
+
+
+def next_telegram_port(users, preferred=None):
+    options = load_options()
+    base = int(preferred or options.get('telegram_proxy_port', 2083) or 2083)
+    used = {int(u.get('telegram_port')) for u in users if u.get('telegram_port')}
+    used.update({int(options.get('http_proxy_port', 2081)), int(options.get('socks_proxy_port', 2080)), int(MTG_UPSTREAM_SOCKS_PORT), BACKEND_PORT, 9090})
+    port = base
+    while port in used:
+        port += 1
+    return port
+
+
+def create_default_user():
+    options = load_options()
+    tg = read_json(data_path('telegram_proxy.json'), {})
+    front = tg.get('front_domain') or options.get('telegram_front_domain') or 'www.google.com'
+    secret_value = tg.get('secret') or make_mtproto_secret(front)
+    return {
+        'id': 'default',
+        'name': 'Основной клиент',
+        'enabled': True,
+        'trusted': True,
+        'username': str(options.get('proxy_username') or 'user'),
+        'password': str(options.get('proxy_password') or 'ChangeThisProxyPassword'),
+        'socks_enabled': True,
+        'http_enabled': True,
+        'telegram_enabled': bool(options.get('telegram_proxy_enabled', False)),
+        'telegram_port': int(tg.get('port') or options.get('telegram_proxy_port', 2083) or 2083),
+        'telegram_secret': secret_value,
+        'telegram_front_domain': front,
+        'public_host': tg.get('public_host') or '',
+        'notes': 'Создан автоматически из настроек add-on',
+        'created_at': time.time(),
+        'updated_at': time.time(),
+        'blocked_until': None,
+        'blocked_comment': '',
+    }
+
+
+def normalize_user(user, existing_users=None):
+    existing_users = existing_users or []
+    now = time.time()
+    user = dict(user or {})
+    user.setdefault('id', secrets.token_hex(6))
+    user['id'] = safe_tag(user.get('id'), 'client')
+    user['name'] = str(user.get('name') or user.get('username') or 'Клиент').strip()
+    user['username'] = slugify_username(user.get('username') or user.get('name') or user['id'], 'client')
+    user.setdefault('password', random_token(20))
+    user['enabled'] = bool(user.get('enabled', True))
+    user['trusted'] = bool(user.get('trusted', True))
+    user['socks_enabled'] = bool(user.get('socks_enabled', True))
+    user['http_enabled'] = bool(user.get('http_enabled', True))
+    user['telegram_enabled'] = bool(user.get('telegram_enabled', True))
+    user['telegram_front_domain'] = str(user.get('telegram_front_domain') or load_options().get('telegram_front_domain') or 'www.google.com').strip()
+    if not user.get('telegram_secret'):
+        user['telegram_secret'] = make_mtproto_secret(user['telegram_front_domain'])
+    try:
+        user['telegram_port'] = int(user.get('telegram_port') or next_telegram_port(existing_users))
+    except Exception:
+        user['telegram_port'] = next_telegram_port(existing_users)
+    user.setdefault('public_host', '')
+    user.setdefault('notes', '')
+    user.setdefault('created_at', now)
+    user['updated_at'] = now
+    user.setdefault('blocked_until', None)
+    user.setdefault('blocked_comment', '')
+    return user
+
+
+def load_proxy_users():
+    users = read_json(users_path(), None)
+    if not isinstance(users, list) or not users:
+        users = [create_default_user()]
+        write_json(users_path(), users)
+        log('USERS', 'INIT', 'Created default proxy user from add-on configuration', action='users_init')
+    normalized = []
+    seen_ids = set()
+    changed = False
+    for u in users:
+        if not isinstance(u, dict):
+            changed = True
+            continue
+        nu = normalize_user(u, normalized)
+        base_id = nu['id']
+        if base_id in seen_ids:
+            nu['id'] = base_id + '-' + secrets.token_hex(2)
+            changed = True
+        seen_ids.add(nu['id'])
+        normalized.append(nu)
+    if changed:
+        write_json(users_path(), normalized)
+    return normalized
+
+
+def save_proxy_users(users):
+    normalized = []
+    seen_usernames = set()
+    seen_ports = set()
+    for u in users:
+        nu = normalize_user(u, normalized)
+        base_username = nu['username']
+        n = 2
+        while nu['username'] in seen_usernames:
+            nu['username'] = f'{base_username}_{n}'
+            n += 1
+        seen_usernames.add(nu['username'])
+        while int(nu['telegram_port']) in seen_ports:
+            nu['telegram_port'] = int(nu['telegram_port']) + 1
+        seen_ports.add(int(nu['telegram_port']))
+        normalized.append(nu)
+    write_json(users_path(), normalized)
+    return normalized
+
+
+def find_proxy_user(user_id):
+    for u in load_proxy_users():
+        if str(u.get('id')) == str(user_id) or str(u.get('username')) == str(user_id):
+            return u
+    return None
+
+
+def active_proxy_users_for(protocol):
+    now = time.time()
+    result = []
+    for u in load_proxy_users():
+        if not u.get('enabled', True):
+            continue
+        if protocol == 'socks' and not u.get('socks_enabled', True):
+            continue
+        if protocol == 'http' and not u.get('http_enabled', True):
+            continue
+        # Заблокированные пользователи остаются в auth-списке, чтобы правило auth_user могло отправить их в block.
+        result.append(u)
+    return result
+
+
+def user_public_urls(user, public_host=None):
+    host = (public_host or user.get('public_host') or '').strip()
+    port = int(user.get('telegram_port') or 0)
+    secret_value = user.get('telegram_secret') or ''
+    if not host or not port or not secret_value:
+        return {'tg_url': '', 'tme_url': ''}
+    q = urllib.parse.urlencode({'server': host, 'port': str(port), 'secret': secret_value})
+    return {'tg_url': 'tg://proxy?' + q, 'tme_url': 'https://t.me/proxy?' + q}
+
+
+def users_safe(public_host=None):
+    result = []
+    for u in load_proxy_users():
+        item = dict(u)
+        item['blocked_active'] = is_user_block_active(item)
+        item['urls'] = user_public_urls(item, public_host=public_host)
+        result.append(item)
+    return result
 
 
 def load_telegram_settings():
@@ -256,6 +474,405 @@ def mtg_status():
     }
 
 
+
+
+# --- Multi-user MTProto backend overrides ---
+def mtg_config_for_user(user):
+    return TMP_DIR / f"mtg_{safe_tag(user.get('id'), 'client')}.toml"
+
+
+def write_mtg_config_for_user(user):
+    secret_value = user.get('telegram_secret') or make_mtproto_secret(user.get('telegram_front_domain'))
+    port = int(user.get('telegram_port'))
+    upstream = f"socks5://127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}"
+    lines = [
+        f"secret = {toml_quote(secret_value)}",
+        f"bind-to = {toml_quote('0.0.0.0:' + str(port))}",
+        'prefer-ip = "prefer-ipv4"',
+        'auto-update = false',
+        '',
+        '[network]',
+        'dns = "https://1.1.1.1/dns-query"',
+        f"proxies = [{toml_quote(upstream)}]",
+        '',
+        '[network.timeout]',
+        'tcp = "10s"',
+        'http = "10s"',
+        'idle = "10m"',
+        'handshake = "10s"',
+        '',
+        '[defense.blocklist]',
+        'enabled = false',
+        '',
+        '[stats.prometheus]',
+        'enabled = false',
+        '',
+    ]
+    path = mtg_config_for_user(user)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def stop_mtg_user(user_id):
+    global mtg_processes
+    proc = mtg_processes.get(str(user_id))
+    if proc and proc.poll() is None:
+        log('MTG', 'STOP', f'Stopping MTProto user={user_id}', action='mtg_stop', target=str(user_id))
+        proc.terminate()
+        try:
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    mtg_processes.pop(str(user_id), None)
+
+
+def start_mtg_user(user):
+    global mtg_processes, last_mtg_error
+    uid = str(user.get('id'))
+    if not user.get('enabled', True) or not user.get('telegram_enabled', True) or is_user_block_active(user):
+        stop_mtg_user(uid)
+        return False
+    if not os.path.exists(MTG_BIN):
+        last_mtg_error = 'mtg binary not found'
+        log('MTG', 'ERROR', last_mtg_error)
+        return False
+    stop_mtg_user(uid)
+    cfg = write_mtg_config_for_user(user)
+    log('MTG', 'START', f"Starting MTProto for {user.get('name')} on 0.0.0.0:{user.get('telegram_port')} via SOCKS5 127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}", action='mtg_start', target=uid)
+    proc = subprocess.Popen([MTG_BIN, 'run', str(cfg)], stdout=sys.stdout, stderr=sys.stderr)
+    mtg_processes[uid] = proc
+    time.sleep(0.35)
+    if proc.poll() is not None:
+        last_mtg_error = f"mtg user={uid} exited with code {proc.returncode}"
+        log('MTG', 'ERROR', last_mtg_error, target=uid)
+        mtg_processes.pop(uid, None)
+        return False
+    last_mtg_error = ''
+    return True
+
+
+def stop_mtg():
+    for uid in list(mtg_processes.keys()):
+        stop_mtg_user(uid)
+
+
+def start_mtg():
+    users = load_proxy_users()
+    desired = {str(u.get('id')) for u in users if u.get('enabled', True) and u.get('telegram_enabled', True) and not is_user_block_active(u)}
+    for uid in list(mtg_processes.keys()):
+        if uid not in desired:
+            stop_mtg_user(uid)
+    ok = False
+    for user in users:
+        if str(user.get('id')) in desired:
+            ok = start_mtg_user(user) or ok
+    return ok
+
+
+def restart_mtg():
+    with lock:
+        stop_mtg()
+        return start_mtg()
+
+
+def mtg_status():
+    users = users_safe()
+    running = []
+    for u in users:
+        proc = mtg_processes.get(str(u.get('id')))
+        u['telegram_running'] = bool(proc and proc.poll() is None)
+        if u['telegram_running']:
+            running.append(u.get('id'))
+    primary = users[0] if users else {}
+    return {
+        'enabled': any(u.get('telegram_enabled') and u.get('enabled') for u in users),
+        'running': bool(running),
+        'running_count': len(running),
+        'port': primary.get('telegram_port') or load_options().get('telegram_proxy_port', 2083),
+        'front_domain': primary.get('telegram_front_domain') or 'www.google.com',
+        'public_host': primary.get('public_host') or '',
+        'secret': primary.get('telegram_secret') or '',
+        'last_error': last_mtg_error,
+        'upstream': f'socks5://127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}',
+        'users': users,
+        **user_public_urls(primary),
+        'urls': user_public_urls(primary),
+    }
+
+
+# --- Single-port multi-secret MTProto backend overrides (v1.8.1) ---
+MTG_MULTI_API_PORT = 2093
+
+
+def telegram_shared_port():
+    return int(load_options().get('telegram_proxy_port', 2083) or 2083)
+
+
+def create_default_user():
+    options = load_options()
+    tg = read_json(data_path('telegram_proxy.json'), {})
+    front = tg.get('front_domain') or options.get('telegram_front_domain') or 'www.google.com'
+    secret_value = tg.get('secret') or make_mtproto_secret(front)
+    return {
+        'id': 'default',
+        'name': 'Основной клиент',
+        'enabled': True,
+        'trusted': True,
+        'username': str(options.get('proxy_username') or 'user'),
+        'password': str(options.get('proxy_password') or 'ChangeThisProxyPassword'),
+        'socks_enabled': True,
+        'http_enabled': True,
+        'telegram_enabled': bool(options.get('telegram_proxy_enabled', False)),
+        'telegram_port': telegram_shared_port(),
+        'telegram_secret': secret_value,
+        'telegram_front_domain': front,
+        'public_host': tg.get('public_host') or '',
+        'notes': 'Создан автоматически из настроек add-on. Telegram использует общий порт для всех пользователей.',
+        'created_at': time.time(),
+        'updated_at': time.time(),
+        'blocked_until': None,
+        'blocked_comment': '',
+    }
+
+
+def normalize_user(user, existing_users=None):
+    existing_users = existing_users or []
+    now = time.time()
+    user = dict(user or {})
+    user.setdefault('id', secrets.token_hex(6))
+    user['id'] = safe_tag(user.get('id'), 'client')
+    user['name'] = str(user.get('name') or user.get('username') or 'Клиент').strip()
+    user['username'] = slugify_username(user.get('username') or user.get('name') or user['id'], 'client')
+    user.setdefault('password', random_token(20))
+    user['enabled'] = bool(user.get('enabled', True))
+    user['trusted'] = bool(user.get('trusted', True))
+    user['socks_enabled'] = bool(user.get('socks_enabled', True))
+    user['http_enabled'] = bool(user.get('http_enabled', True))
+    user['telegram_enabled'] = bool(user.get('telegram_enabled', True))
+    user['telegram_front_domain'] = str(user.get('telegram_front_domain') or load_options().get('telegram_front_domain') or 'www.google.com').strip()
+    if not user.get('telegram_secret'):
+        user['telegram_secret'] = make_mtproto_secret(user['telegram_front_domain'])
+    # Важно: с mtg-multi все Telegram-пользователи работают через один внешний порт.
+    user['telegram_port'] = telegram_shared_port()
+    user.setdefault('public_host', '')
+    user.setdefault('notes', '')
+    user.setdefault('created_at', now)
+    user['updated_at'] = now
+    user.setdefault('blocked_until', None)
+    user.setdefault('blocked_comment', '')
+    return user
+
+
+def save_proxy_users(users):
+    normalized = []
+    seen_usernames = set()
+    for u in users:
+        nu = normalize_user(u, normalized)
+        base_username = nu['username']
+        n = 2
+        while nu['username'] in seen_usernames:
+            nu['username'] = f'{base_username}_{n}'
+            n += 1
+        seen_usernames.add(nu['username'])
+        nu['telegram_port'] = telegram_shared_port()
+        normalized.append(nu)
+    write_json(users_path(), normalized)
+    return normalized
+
+
+def user_public_urls(user, public_host=None):
+    host = (public_host or user.get('public_host') or load_telegram_settings().get('public_host') or '').strip()
+    port = telegram_shared_port()
+    secret_value = user.get('telegram_secret') or ''
+    if not host or not port or not secret_value:
+        return {'tg_url': '', 'tme_url': ''}
+    q = urllib.parse.urlencode({'server': host, 'port': str(port), 'secret': secret_value})
+    return {'tg_url': 'tg://proxy?' + q, 'tme_url': 'https://t.me/proxy?' + q}
+
+
+def write_mtg_config():
+    tg = load_telegram_settings()
+    port = telegram_shared_port()
+    upstream = f"socks5://127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}"
+    users = [u for u in load_proxy_users() if u.get('enabled', True) and u.get('telegram_enabled', True) and not is_user_block_active(u)]
+    if not users:
+        raise RuntimeError('No enabled Telegram users')
+    lines = [
+        f"bind-to = {toml_quote('0.0.0.0:' + str(port))}",
+        f"api-bind-to = {toml_quote('127.0.0.1:' + str(MTG_MULTI_API_PORT))}",
+        'prefer-ip = "prefer-ipv4"',
+        'auto-update = false',
+        '',
+        '[network]',
+        'dns = "https://1.1.1.1/dns-query"',
+        f"proxies = [{toml_quote(upstream)}]",
+        '',
+        '[network.timeout]',
+        'tcp = "10s"',
+        'http = "10s"',
+        'idle = "10m"',
+        'handshake = "10s"',
+        '',
+        '[defense.blocklist]',
+        'enabled = false',
+        '',
+        '[stats.prometheus]',
+        'enabled = false',
+        '',
+        '[throttle]',
+        'max-connections = 5000',
+        'check-interval = "5s"',
+        '',
+        '# [secrets] must be the last section in the global TOML scope.',
+        '[secrets]',
+    ]
+    for user in users:
+        name = slugify_username(user.get('username'), user.get('id') or 'client')
+        secret_value = user.get('telegram_secret') or make_mtproto_secret(user.get('telegram_front_domain'))
+        lines.append(f"{name} = {toml_quote(secret_value)}")
+    MTG_CONFIG.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return MTG_CONFIG
+
+
+def stop_mtg():
+    global mtg_process, mtg_processes
+    for uid in list(mtg_processes.keys()):
+        stop_mtg_user(uid)
+    mtg_processes = {}
+    if mtg_process and mtg_process.poll() is None:
+        log('MTG', 'STOP', 'Stopping shared MTProto multi-secret proxy', action='mtg_stop', target='shared')
+        mtg_process.terminate()
+        try:
+            mtg_process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            mtg_process.kill()
+            mtg_process.wait(timeout=5)
+    mtg_process = None
+
+
+def start_mtg():
+    global mtg_process, last_mtg_error
+    tg = load_telegram_settings()
+    if not tg.get('enabled', False):
+        stop_mtg()
+        last_mtg_error = ''
+        return False
+    users = [u for u in load_proxy_users() if u.get('enabled', True) and u.get('telegram_enabled', True) and not is_user_block_active(u)]
+    if not users:
+        stop_mtg()
+        last_mtg_error = 'No enabled Telegram users'
+        log('MTG', 'SKIP', last_mtg_error, action='mtg_skip')
+        return False
+    if not os.path.exists(MTG_BIN):
+        last_mtg_error = 'mtg-multi binary not found'
+        log('MTG', 'ERROR', last_mtg_error, action='mtg_error')
+        return False
+    try:
+        cfg = write_mtg_config()
+    except Exception as e:
+        last_mtg_error = str(e)
+        log('MTG', 'ERROR', last_mtg_error, action='mtg_config')
+        return False
+    stop_mtg()
+    port = telegram_shared_port()
+    log('MTG', 'START', f'Starting shared MTProto multi-secret proxy on 0.0.0.0:{port} for {len(users)} users via SOCKS5 127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}', action='mtg_start', target='shared')
+    mtg_process = subprocess.Popen([MTG_BIN, 'run', str(cfg)], stdout=sys.stdout, stderr=sys.stderr)
+    time.sleep(0.8)
+    if mtg_process.poll() is not None:
+        last_mtg_error = f'mtg-multi exited with code {mtg_process.returncode}'
+        log('MTG', 'ERROR', last_mtg_error, action='mtg_error', target='shared')
+        mtg_process = None
+        return False
+    last_mtg_error = ''
+    return True
+
+
+def restart_mtg():
+    with lock:
+        stop_mtg()
+        return start_mtg()
+
+
+def mtg_multi_stats():
+    try:
+        return json.loads(fetch_text(f'http://127.0.0.1:{MTG_MULTI_API_PORT}/stats', timeout=2))
+    except Exception as e:
+        return {'error': str(e), 'users': {}}
+
+
+def mtg_status():
+    users = users_safe()
+    running = bool(mtg_process and mtg_process.poll() is None)
+    stats = mtg_multi_stats() if running else {'users': {}}
+    stats_users = stats.get('users') if isinstance(stats, dict) else {}
+    for u in users:
+        u['telegram_port'] = telegram_shared_port()
+        u['telegram_running'] = running and u.get('enabled', True) and u.get('telegram_enabled', True) and not is_user_block_active(u)
+        su = stats_users.get(u.get('username')) if isinstance(stats_users, dict) else None
+        if isinstance(su, dict):
+            u['telegram_stats'] = su
+    primary = users[0] if users else {}
+    return {
+        'enabled': bool(load_telegram_settings().get('enabled', False)),
+        'running': running,
+        'running_count': 1 if running else 0,
+        'port': telegram_shared_port(),
+        'front_domain': load_telegram_settings().get('front_domain') or 'www.google.com',
+        'public_host': load_telegram_settings().get('public_host') or primary.get('public_host') or '',
+        'secret': primary.get('telegram_secret') or '',
+        'last_error': last_mtg_error,
+        'upstream': f'socks5://127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}',
+        'stats': stats,
+        'users': users,
+        **user_public_urls(primary),
+        'urls': user_public_urls(primary),
+    }
+
+
+def get_mtg_client_connections():
+    result = []
+    status = mtg_status()
+    stats = status.get('stats') or {}
+    stats_users = stats.get('users') if isinstance(stats, dict) else {}
+    users_by_name = user_by_username_map()
+    if isinstance(stats_users, dict):
+        for username, su in stats_users.items():
+            user = users_by_name.get(username)
+            if not user:
+                continue
+            connections = int(su.get('connections') or 0) if isinstance(su, dict) else 0
+            if connections <= 0:
+                continue
+            result.append({
+                'ip': 'telegram:' + str(username),
+                'port': 0,
+                'state': 'ESTABLISHED',
+                'state_code': '01',
+                'local_port': telegram_shared_port(),
+                'source': 'telegram_mtproto',
+                'user_id': user.get('id'),
+                'username': user.get('username'),
+                'user_name': user.get('name'),
+                'telegram_port': telegram_shared_port(),
+                'connections': connections,
+                'bytes_in': su.get('bytes_in', 0) if isinstance(su, dict) else 0,
+                'bytes_out': su.get('bytes_out', 0) if isinstance(su, dict) else 0,
+                'last_seen': su.get('last_seen') if isinstance(su, dict) else '',
+            })
+    # Дополнительно показываем реальные IP, подключенные к общему MTProto-порту.
+    # Их невозможно надежно сопоставить с пользователем без статистики mtg-multi,
+    # но это полезно для контроля входящих адресов.
+    for peer in list_tcp_peers_for_local_port(telegram_shared_port()):
+        peer['user_id'] = ''
+        peer['username'] = ''
+        peer['user_name'] = ''
+        peer['telegram_port'] = telegram_shared_port()
+        peer['unmapped'] = True
+        result.append(peer)
+    return result
+
+
 def load_servers():
     path = data_path("servers.json")
     if not path.exists():
@@ -283,12 +900,39 @@ def save_servers(servers):
     write_json(data_path("servers.json"), servers)
 
 
-def load_blocked():
-    return read_json(data_path("blocked_ips.json"), [])
+def load_blocked(include_expired=False):
+    items = read_json(data_path("blocked_ips.json"), [])
+    if not isinstance(items, list):
+        items = []
+    now = time.time()
+    changed = False
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        exp = item.get("expires_at")
+        expired = bool(exp and float(exp) <= now)
+        item["expired"] = expired
+        if expired and not include_expired:
+            changed = True
+            continue
+        normalized.append(item)
+    if changed:
+        save_blocked(normalized)
+    return normalized
 
 
 def save_blocked(items):
     write_json(data_path("blocked_ips.json"), items)
+
+
+def block_duration_to_seconds(value):
+    if value in [None, "", "permanent", "perm", "forever", 0, "0"]:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def load_trusted():
@@ -312,6 +956,7 @@ def load_traffic():
         "limit_bytes": 0,
         "used_bytes": 0,
         "connection_bytes": {},
+        "started_at": time.time(),
         "updated_at": time.time(),
     })
 
@@ -519,12 +1164,21 @@ def make_singbox_config():
     socks_tag = f"IN-SOCKS5-{socks_port}"
     http_tag = f"IN-HTTP-{http_port}"
     mtg_upstream_tag = f"IN-MTG-UPSTREAM-{MTG_UPSTREAM_SOCKS_PORT}"
+    users = load_proxy_users()
     socks_auth = []
     http_auth = []
     if options.get("socks_auth_enabled"):
-        socks_auth = [{"username": options.get("proxy_username", ""), "password": options.get("proxy_password", "")}]
+        socks_auth = [
+            {"username": u.get("username", ""), "password": u.get("password", "")}
+            for u in users
+            if u.get("enabled", True) and u.get("socks_enabled", True)
+        ]
     if options.get("http_auth_enabled"):
-        http_auth = [{"username": options.get("proxy_username", ""), "password": options.get("proxy_password", "")}]
+        http_auth = [
+            {"username": u.get("username", ""), "password": u.get("password", "")}
+            for u in users
+            if u.get("enabled", True) and u.get("http_enabled", True)
+        ]
     inbounds = [
         {"type": "socks", "tag": socks_tag, "listen": "0.0.0.0", "listen_port": socks_port},
         {"type": "http", "tag": http_tag, "listen": "0.0.0.0", "listen_port": http_port},
@@ -550,6 +1204,9 @@ def make_singbox_config():
     outbounds.extend(servers)
     outbounds.extend([{"type": "block", "tag": "block"}, {"type": "direct", "tag": "direct"}])
     rules = []
+    blocked_auth_users = [u.get("username") for u in users if u.get("username") and is_user_block_active(u)]
+    if blocked_auth_users:
+        rules.append({"auth_user": blocked_auth_users, "outbound": "block"})
     blocked_cidrs = [item.get("cidr") for item in blocked if item.get("cidr")]
     if blocked_cidrs:
         rules.append({"source_ip_cidr": blocked_cidrs, "outbound": "block"})
@@ -764,15 +1421,21 @@ def list_tcp_peers_for_local_port(port):
 
 
 def get_mtg_client_connections():
-    tg = load_telegram_settings()
-    if not tg.get("enabled", False):
-        return []
-    try:
-        port = int(tg.get("port") or load_options().get("telegram_proxy_port", 2083))
-    except Exception:
-        port = 2083
-    return list_tcp_peers_for_local_port(port)
-
+    peers = []
+    for user in load_proxy_users():
+        if not user.get('enabled', True) or not user.get('telegram_enabled', True) or is_user_block_active(user):
+            continue
+        try:
+            port = int(user.get('telegram_port') or 0)
+        except Exception:
+            continue
+        for peer in list_tcp_peers_for_local_port(port):
+            peer['user_id'] = user.get('id')
+            peer['username'] = user.get('username')
+            peer['user_name'] = user.get('name')
+            peer['telegram_port'] = port
+            peers.append(peer)
+    return peers
 
 def geo_lookup(ip):
     cache = read_json(data_path("geo_cache.json"), {})
@@ -813,141 +1476,231 @@ def update_traffic(connections):
     save_traffic(traffic)
 
 
-def ensure_client_group(grouped, history, trusted, ip, now, source_label=None):
-    old = history.get(ip, {})
-    was_offline_long = old.get("last_seen") and (now - old.get("last_seen", 0) > SESSION_BREAK_SECONDS)
-    first_time = not old.get("first_seen")
+def extract_connection_identity(conn):
+    meta = conn.get("metadata") or {}
+    identities = []
+    for key in ["auth_user", "user", "username", "authUser", "inbound_user", "client", "client_id"]:
+        val = meta.get(key) or conn.get(key)
+        if val:
+            identities.append(f"{key}:{val}")
+    inbound = conn.get("inbound") or meta.get("inbound") or meta.get("inboundTag")
+    if inbound:
+        identities.append(f"inbound:{inbound}")
+    return sorted(set(identities))
 
-    if ip not in grouped:
-        grouped[ip] = {
-            "ip": ip,
-            "status": "online",
-            "connections": [],
-            "upload": 0,
-            "download": 0,
-            "hosts": set(),
-            "services": set(old.get("services") or []),
-            "mtproto_connections": 0,
-            "tcp_states": {},
-            "first_seen": old.get("first_seen") or now,
-            "session_started": now if first_time or was_offline_long else old.get("session_started", now),
-            "last_seen": now,
-            "seen_count": 1 if first_time else (int(old.get("seen_count", 1)) + 1 if was_offline_long else int(old.get("seen_count", 1))),
-            "trusted": ip in trusted,
-            "trusted_name": (trusted.get(ip) or {}).get("name", ""),
-            "trusted_at": (trusted.get(ip) or {}).get("trusted_at"),
-            "is_public": not is_private_ip(ip),
+
+def get_connection_username(conn):
+    meta = conn.get('metadata') or {}
+    for key in ['auth_user', 'authUser', 'user', 'username', 'socks_username', 'inbound_user']:
+        val = meta.get(key) or conn.get(key)
+        if val:
+            return str(val)
+    return ''
+
+
+def user_by_username_map():
+    return {str(u.get('username')): u for u in load_proxy_users() if u.get('username')}
+
+
+def client_key_for(ip, username='', user_id=''):
+    if user_id:
+        return 'user:' + str(user_id)
+    if username:
+        return 'auth:' + str(username)
+    return 'ip:' + str(ip)
+
+
+def ensure_client_group(grouped, history, trusted, ip, now, source_label=None, user=None, username=''):
+    user_id = user.get('id') if user else ''
+    key = client_key_for(ip, username=username or (user.get('username') if user else ''), user_id=user_id)
+    old = history.get(key, {})
+    was_offline_long = old.get('last_seen') and (now - old.get('last_seen', 0) > SESSION_BREAK_SECONDS)
+    first_time = not old.get('first_seen')
+    if key not in grouped:
+        trusted_by_ip = trusted.get(ip) or {}
+        grouped[key] = {
+            'key': key,
+            'ip': ip,
+            'username': username or (user.get('username') if user else ''),
+            'registered_user_id': user_id or '',
+            'registered_name': user.get('name') if user else '',
+            'status': 'online',
+            'connections': [],
+            'upload': 0,
+            'download': 0,
+            'hosts': set(),
+            'services': set(old.get('services') or []),
+            'mtproto_connections': 0,
+            'tcp_states': {},
+            'first_seen': old.get('first_seen') or now,
+            'session_started': now if first_time or was_offline_long else old.get('session_started', now),
+            'last_seen': now,
+            'seen_count': 1 if first_time else (int(old.get('seen_count', 1)) + 1 if was_offline_long else int(old.get('seen_count', 1))),
+            'trusted': bool(user) or bool(trusted_by_ip),
+            'trusted_name': (user.get('name') if user else trusted_by_ip.get('name', '')),
+            'trusted_at': (user.get('created_at') if user else trusted_by_ip.get('trusted_at')),
+            'is_public': not is_private_ip(ip),
+            'user_blocked': bool(user and is_user_block_active(user)),
+            'user_enabled': bool(user.get('enabled', True)) if user else None,
         }
     if source_label:
-        grouped[ip]["services"].add(source_label)
-    return grouped[ip]
+        grouped[key]['services'].add(source_label)
+    return grouped[key]
+
+
+def simplify_host(host):
+    host = str(host or '').strip().lower().strip('.')
+    if not host or host == '—':
+        return '—'
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except Exception:
+        pass
+    parts = host.split('.')
+    if len(parts) <= 2:
+        return host
+    two_part_suffixes = {'co.uk', 'com.br', 'com.tr', 'com.au', 'co.jp', 'co.kr'}
+    suffix2 = '.'.join(parts[-2:])
+    if suffix2 in two_part_suffixes and len(parts) >= 3:
+        return '.'.join(parts[-3:])
+    return '.'.join(parts[-2:])
 
 
 def build_clients(connections):
     now = time.time()
     history = load_clients()
     trusted = load_trusted()
+    users_by_name = user_by_username_map()
+    users_by_id = {str(u.get('id')): u for u in load_proxy_users()}
     grouped = {}
 
-    # Regular HTTP/SOCKS clients as reported by sing-box.
-    # Loopback connections are internal service traffic. In particular,
-    # MTProto -> internal SOCKS5 appears in sing-box as 127.0.0.1, so it must
-    # not be displayed as a real user client.
     for conn in connections:
         ip = get_source_ip(conn)
-        if not ip or ip == "—" or is_loopback_ip(ip):
+        if not ip or ip == '—' or is_loopback_ip(ip):
             continue
-        item = ensure_client_group(grouped, history, trusted, ip, now, "HTTP/SOCKS")
-        item["connections"].append(conn)
-        item["upload"] += int(conn.get("upload") or 0)
-        item["download"] += int(conn.get("download") or 0)
+        username = get_connection_username(conn)
+        user = users_by_name.get(username) if username else None
+        item = ensure_client_group(grouped, history, trusted, ip, now, 'HTTP/SOCKS', user=user, username=username)
+        item['connections'].append(conn)
+        item['upload'] += int(conn.get('upload') or 0)
+        item['download'] += int(conn.get('download') or 0)
+        item.setdefault('identities', set()).update(extract_connection_identity(conn))
+        if username:
+            item.setdefault('identities', set()).add('auth_user:' + username)
         host = get_host(conn)
-        port = (conn.get("metadata") or {}).get("destinationPort") or (conn.get("metadata") or {}).get("destination_port") or ""
-        if host and host != "—":
-            item["hosts"].add(f"{host}:{port}" if port else host)
+        port = (conn.get('metadata') or {}).get('destinationPort') or (conn.get('metadata') or {}).get('destination_port') or ''
+        if host and host != '—':
+            item['hosts'].add(f'{host}:{port}' if port else host)
+            item.setdefault('main_hosts', {})[simplify_host(host)] = item.setdefault('main_hosts', {}).get(simplify_host(host), 0) + 1
 
-    # Real Telegram MTProto clients are visible on mtg's listening TCP port.
-    # Their outgoing traffic is then forwarded to sing-box through 127.0.0.1,
-    # so this extra scan is required to show the phone's real IP instead of
-    # the internal 127.0.0.1 upstream.
-    mtg_peers = get_mtg_client_connections()
-    mtg_by_ip = {}
-    for peer in mtg_peers:
-        ip = peer.get("ip")
-        if not ip or ip == "—" or is_loopback_ip(ip):
+    for peer in get_mtg_client_connections():
+        ip = peer.get('ip')
+        if not ip or ip == '—' or is_loopback_ip(ip):
             continue
-        mtg_by_ip.setdefault(ip, []).append(peer)
+        user = users_by_id.get(str(peer.get('user_id')))
+        item = ensure_client_group(grouped, history, trusted, ip, now, 'Telegram MTProto', user=user, username=user.get('username') if user else '')
+        item['mtproto_connections'] = int(item.get('mtproto_connections') or 0) + int(peer.get('connections') or 1)
+        item['upload'] += int(peer.get('bytes_in') or 0)
+        item['download'] += int(peer.get('bytes_out') or 0)
+        item['hosts'].add('Telegram MTProto proxy')
+        item.setdefault('main_hosts', {})['telegram'] = item.setdefault('main_hosts', {}).get('telegram', 0) + 1
+        item.setdefault('identities', set()).add('service:Telegram MTProto')
+        if user:
+            item.setdefault('identities', set()).add('telegram_user:' + user.get('name', ''))
+            item.setdefault('identities', set()).add('auth_user:' + user.get('username', ''))
+        state = peer.get('state') or 'UNKNOWN'
+        item['tcp_states'][state] = item['tcp_states'].get(state, 0) + 1
 
-    for ip, peers in mtg_by_ip.items():
-        item = ensure_client_group(grouped, history, trusted, ip, now, "Telegram MTProto")
-        item["mtproto_connections"] = len(peers)
-        item["hosts"].add("Telegram MTProto proxy")
-        for peer in peers:
-            state = peer.get("state") or "UNKNOWN"
-            item["tcp_states"][state] = item["tcp_states"].get(state, 0) + 1
-
-    active_ips = set(grouped.keys())
-
-    for ip, item in grouped.items():
-        history[ip] = {
-            "first_seen": item["first_seen"],
-            "session_started": item["session_started"],
-            "last_seen": item["last_seen"],
-            "seen_count": item["seen_count"],
-            "services": sorted(item.get("services") or []),
+    active_keys = set(grouped.keys())
+    for key, item in grouped.items():
+        old = history.get(key, {})
+        became_online = not old.get('last_seen') or (now - old.get('last_seen', 0) > SESSION_BREAK_SECONDS)
+        history[key] = {
+            'key': key,
+            'ip': item['ip'],
+            'username': item.get('username') or '',
+            'registered_user_id': item.get('registered_user_id') or '',
+            'registered_name': item.get('registered_name') or '',
+            'first_seen': item['first_seen'],
+            'session_started': item['session_started'],
+            'last_seen': item['last_seen'],
+            'seen_count': item['seen_count'],
+            'services': sorted(item.get('services') or []),
+            'last_identities': sorted(item.get('identities') or []),
         }
+        if became_online:
+            log('CLIENT', 'ONLINE', f"Client online: {item.get('registered_name') or item.get('username') or item['ip']}", actor='backend', action='client_online', target=key, extra={'ip': item['ip'], 'services': sorted(item.get('services') or [])})
 
-    for ip, old in list(history.items()):
-        if ip in active_ips:
+    for key, old in list(history.items()):
+        if key in active_keys:
             continue
-        if old.get("last_seen") and now - old["last_seen"] <= RECENT_CLIENT_SECONDS:
-            grouped[ip] = {
-                "ip": ip,
-                "status": "recent",
-                "connections": [],
-                "upload": 0,
-                "download": 0,
-                "hosts": set(),
-                "services": set(old.get("services") or []),
-                "mtproto_connections": 0,
-                "tcp_states": {},
-                "first_seen": old.get("first_seen"),
-                "session_started": old.get("session_started"),
-                "last_seen": old.get("last_seen"),
-                "seen_count": old.get("seen_count", 1),
-                "trusted": ip in trusted,
-                "trusted_name": (trusted.get(ip) or {}).get("name", ""),
-                "trusted_at": (trusted.get(ip) or {}).get("trusted_at"),
-                "is_public": not is_private_ip(ip),
-            }
+        if old.get('last_seen') and now - old['last_seen'] > OFFLINE_CLIENT_KEEP_SECONDS:
+            continue
+        status = 'recent' if old.get('last_seen') and now - old['last_seen'] <= RECENT_CLIENT_SECONDS else 'offline'
+        ip = old.get('ip') or (key.split(':', 1)[-1] if key.startswith('ip:') else '—')
+        user = users_by_id.get(str(old.get('registered_user_id') or '')) or users_by_name.get(str(old.get('username') or ''))
+        grouped[key] = {
+            'key': key,
+            'ip': ip,
+            'username': old.get('username') or (user.get('username') if user else ''),
+            'registered_user_id': old.get('registered_user_id') or (user.get('id') if user else ''),
+            'registered_name': old.get('registered_name') or (user.get('name') if user else ''),
+            'status': status,
+            'connections': [],
+            'upload': 0,
+            'download': 0,
+            'hosts': set(),
+            'main_hosts': {},
+            'services': set(old.get('services') or []),
+            'identities': set(old.get('last_identities') or []),
+            'mtproto_connections': 0,
+            'tcp_states': {},
+            'first_seen': old.get('first_seen'),
+            'session_started': old.get('session_started'),
+            'last_seen': old.get('last_seen'),
+            'seen_count': old.get('seen_count', 1),
+            'trusted': bool(user) or ip in trusted,
+            'trusted_name': (user.get('name') if user else (trusted.get(ip) or {}).get('name', '')),
+            'trusted_at': (user.get('created_at') if user else (trusted.get(ip) or {}).get('trusted_at')),
+            'is_public': not is_private_ip(ip),
+            'user_blocked': bool(user and is_user_block_active(user)),
+            'user_enabled': bool(user.get('enabled', True)) if user else None,
+        }
 
     save_clients(history)
 
     result = []
-    for ip, item in grouped.items():
+    for key, item in grouped.items():
         item = dict(item)
-        item["hosts"] = list(item["hosts"])[:12]
-        item["services"] = sorted(item.get("services") or [])
-        item["geo"] = geo_lookup(ip)
-        item["connections_count"] = len(item["connections"]) + int(item.get("mtproto_connections") or 0)
-        item["risk"] = risk_level(item)
-        item.pop("connections", None)
+        main_hosts = item.get('main_hosts') or {}
+        item['hosts'] = list(item['hosts'])[:20]
+        item['main_hosts'] = sorted([{'host': k, 'count': v} for k, v in main_hosts.items() if k and k != '—'], key=lambda x: -x['count'])[:12]
+        item['services'] = sorted(item.get('services') or [])
+        item['identities'] = sorted(item.get('identities') or [])
+        item['geo'] = geo_lookup(item.get('ip') or '—')
+        item['connections_count'] = len(item.get('connections') or []) + int(item.get('mtproto_connections') or 0)
+        item['risk'] = risk_level(item)
+        item['registered'] = bool(item.get('registered_user_id')) or bool(item.get('trusted'))
+        item.pop('connections', None)
         result.append(item)
 
-    return sorted(result, key=lambda x: (0 if x["status"] == "online" else 1, 0 if not x["trusted"] else 1, -x["last_seen"]))
+    status_order = {'online': 0, 'recent': 1, 'offline': 2}
+    return sorted(result, key=lambda x: (status_order.get(x.get('status'), 9), 0 if not x.get('trusted') else 1, -(x.get('last_seen') or 0)))
 
 
 def risk_level(client):
-    if client.get("trusted"):
-        return "trusted"
-    if client.get("is_public"):
-        return "high"
-    if int(client.get("connections_count", len(client.get("connections", [])))) >= 20:
-        return "medium"
-    if int(client.get("upload", 0)) + int(client.get("download", 0)) > 100 * 1024 * 1024:
-        return "medium"
-    return "medium" if client.get("status") == "online" else "low"
-
+    if client.get('user_blocked'):
+        return 'high'
+    if client.get('trusted') or client.get('registered_user_id'):
+        return 'trusted'
+    if client.get('is_public'):
+        return 'high'
+    if int(client.get('connections_count', 0)) >= 20:
+        return 'medium'
+    if int(client.get('upload', 0)) + int(client.get('download', 0)) > 100 * 1024 * 1024:
+        return 'medium'
+    return 'medium' if client.get('status') == 'online' else 'low'
 
 def current_server_info(proxies):
     group = proxies.get("Proxy") or proxies.get("GLOBAL") or {}
@@ -1022,8 +1775,72 @@ def normalize_request_path(raw_path):
     return path
 
 
+
+def power_summary(settings=None, tg_status=None):
+    settings = settings or load_settings()
+    tg_status = tg_status or mtg_status()
+    http_on = bool(settings.get("http_enabled", True))
+    socks_on = bool(settings.get("socks_enabled", True))
+    telegram_on = bool((tg_status.get("telegram") or {}).get("enabled") if isinstance(tg_status, dict) and "telegram" in tg_status else tg_status.get("enabled", False)) if isinstance(tg_status, dict) else False
+    flags = [http_on, socks_on, telegram_on]
+    if all(flags):
+        state = "all_on"
+        label = "Все прокси включены"
+    elif not any(flags):
+        state = "all_off"
+        label = "Все прокси выключены"
+    else:
+        state = "partial"
+        label = "Включены не все прокси"
+    started_at = settings.get("proxy_started_at") or settings.get("proxy_last_enabled_at") or settings.get("created_at")
+    uptime = int(time.time() - started_at) if any(flags) and started_at else 0
+    return {"state": state, "label": label, "http_enabled": http_on, "socks_enabled": socks_on, "telegram_enabled": telegram_on, "proxy_started_at": started_at, "uptime_seconds": uptime, "last_disabled_at": settings.get("proxy_last_disabled_at")}
+
+
+def update_proxy_lifecycle(settings, telegram_enabled=None):
+    prev_any = bool(settings.get("http_enabled", True) or settings.get("socks_enabled", True) or settings.get("_last_telegram_enabled", False))
+    if telegram_enabled is None:
+        try:
+            telegram_enabled = bool(load_telegram_settings().get("enabled", False))
+        except Exception:
+            telegram_enabled = False
+    new_any = bool(settings.get("http_enabled", True) or settings.get("socks_enabled", True) or telegram_enabled)
+    settings["_last_telegram_enabled"] = bool(telegram_enabled)
+    if new_any and not prev_any:
+        settings["proxy_started_at"] = time.time()
+        settings["proxy_last_enabled_at"] = settings["proxy_started_at"]
+        log("POWER", "ON", "Proxy stack enabled", action="power_on")
+    elif not new_any and prev_any:
+        settings["proxy_last_disabled_at"] = time.time()
+        log("POWER", "OFF", "Proxy stack disabled", action="power_off")
+    elif new_any and not settings.get("proxy_started_at"):
+        settings["proxy_started_at"] = time.time()
+    return settings
+
+
+def vpn_status(proxies=None):
+    proxies = proxies if proxies is not None else get_proxies()
+    current = current_server_info(proxies or {})
+    server = current.get("server")
+    ok = bool(server and server != "—" and (server in (proxies or {}) or server == "direct"))
+    delay = current.get("delay")
+    if server == "direct" or not load_servers():
+        ok = False
+    return {"connected": ok, "server": server, "mode": current.get("mode"), "delay": delay, "checked_at": time.time(), "message": "VPN-сервер выбран" if ok else "VPN-сервер не выбран или список серверов пуст"}
+
+
+def get_events(limit=200):
+    events = read_json(data_path("events.json"), [])
+    if not isinstance(events, list):
+        return []
+    try:
+        limit = max(1, min(int(limit), EVENT_LOG_LIMIT))
+    except Exception:
+        limit = 200
+    return events[-limit:][::-1]
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.6.4"
+    server_version = "ProxyOtBorisa/1.8.0"
 
     def log_message(self, fmt, *args):
         return
@@ -1078,7 +1895,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_file(path)
             if path == "/api/status":
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_connections_raw(); update_traffic(conns)
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "proxies": proxies})
             if path == "/api/proxies":
                 return self.send_json(get_proxies())
             if path == "/api/connections":
@@ -1090,12 +1907,19 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/telegram":
                 host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or ""
                 return self.send_json({"telegram": mtg_status(), "detected_host": host.split(":")[0] if host else ""})
+            if path == "/api/users":
+                host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or ""
+                return self.send_json({"users": users_safe(public_host=host.split(":")[0] if host else "")})
             if path == "/api/blocklist":
                 return self.send_json({"blocked": load_blocked()})
             if path == "/api/trusted":
                 return self.send_json({"trusted": load_trusted()})
             if path == "/api/traffic":
                 return self.send_json(load_traffic())
+            if path == "/api/logs":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                limit = (qs.get("limit") or [200])[-1]
+                return self.send_json({"events": get_events(limit)})
             if path.startswith("/api/geo/"):
                 ip = urllib.parse.unquote(path.split("/api/geo/", 1)[1]); return self.send_json(geo_lookup(ip))
             self.send_json({"error": "not found"}, 404)
@@ -1113,16 +1937,24 @@ class Handler(BaseHTTPRequestHandler):
                     settings["http_enabled"] = bool(body["http_enabled"])
                 if "socks_enabled" in body:
                     settings["socks_enabled"] = bool(body["socks_enabled"])
-                save_settings(settings)
-                apply_power_selectors()
+                telegram_enabled = None
                 if "telegram_enabled" in body:
+                    telegram_enabled = bool(body["telegram_enabled"])
+                    users = load_proxy_users()
+                    for u in users:
+                        u["telegram_enabled"] = telegram_enabled
+                    save_proxy_users(users)
                     tg = load_telegram_settings()
-                    tg["enabled"] = bool(body["telegram_enabled"])
+                    tg["enabled"] = telegram_enabled
                     save_telegram_settings(tg)
                     restart_mtg()
-                if not settings.get("http_enabled", True) or not settings.get("socks_enabled", True):
+                settings = update_proxy_lifecycle(settings, telegram_enabled)
+                save_settings(settings)
+                apply_power_selectors()
+                if not settings.get("http_enabled", True) or not settings.get("socks_enabled", True) or telegram_enabled is False:
                     close_all_connections()
-                return self.send_json({"ok": True, "settings": settings, "telegram": mtg_status()})
+                log("POWER", "CHANGE", "Power settings changed", actor="ui", action="power_change", extra={"http_enabled": settings.get("http_enabled"), "socks_enabled": settings.get("socks_enabled"), "telegram_enabled": telegram_enabled})
+                return self.send_json({"ok": True, "settings": settings, "power": power_summary(settings, mtg_status()), "telegram": mtg_status()})
             if path == "/api/telegram":
                 tg = load_telegram_settings()
                 action = body.get("action") or "update"
@@ -1141,9 +1973,101 @@ class Handler(BaseHTTPRequestHandler):
                 if action == "enable":
                     tg["enabled"] = True
                 save_telegram_settings(tg)
+                settings = load_settings(); settings = update_proxy_lifecycle(settings, tg.get("enabled", False)); save_settings(settings)
                 if action in ["restart", "regenerate_secret", "enable", "disable", "update"] or "enabled" in body:
                     restart_mtg()
-                return self.send_json({"ok": True, "telegram": mtg_status()})
+                log("TELEGRAM", "CHANGE", f"Telegram proxy action={action}", actor="ui", action="telegram_" + str(action), extra={"enabled": tg.get("enabled"), "port": tg.get("port")})
+                return self.send_json({"ok": True, "telegram": mtg_status(), "power": power_summary(settings, mtg_status())})
+            if path == "/api/users":
+                users = load_proxy_users()
+                action = body.get('action') or 'create'
+                if action == 'create':
+                    candidate = {
+                        'id': secrets.token_hex(5),
+                        'name': body.get('name') or 'Новый клиент',
+                        'username': body.get('username') or body.get('name') or 'client',
+                        'password': body.get('password') or random_token(20),
+                        'enabled': body.get('enabled', True),
+                        'trusted': True,
+                        'socks_enabled': body.get('socks_enabled', True),
+                        'http_enabled': body.get('http_enabled', True),
+                        'telegram_enabled': body.get('telegram_enabled', True),
+                        'telegram_port': body.get('telegram_port') or next_telegram_port(users),
+                        'telegram_secret': body.get('telegram_secret') or '',
+                        'telegram_front_domain': body.get('telegram_front_domain') or load_options().get('telegram_front_domain') or 'www.google.com',
+                        'public_host': body.get('public_host') or '',
+                        'notes': body.get('notes') or '',
+                        'created_at': time.time(),
+                        'blocked_until': None,
+                        'blocked_comment': '',
+                    }
+                    users.append(candidate)
+                    users = save_proxy_users(users)
+                    log('USERS', 'CREATE', 'Created proxy client', actor='ui', action='user_create', target=candidate.get('username'))
+                    restart_singbox()
+                    return self.send_json({'ok': True, 'users': users_safe()})
+                if action == 'update':
+                    uid = str(body.get('id') or body.get('username') or '')
+                    changed = False
+                    for u in users:
+                        if str(u.get('id')) == uid or str(u.get('username')) == uid:
+                            for key in ['name','username','password','enabled','trusted','socks_enabled','http_enabled','telegram_enabled','telegram_port','telegram_secret','telegram_front_domain','public_host','notes']:
+                                if key in body:
+                                    if key == 'telegram_port':
+                                        u[key] = int(body[key])
+                                    elif key in ['enabled','trusted','socks_enabled','http_enabled','telegram_enabled']:
+                                        u[key] = bool(body[key])
+                                    else:
+                                        u[key] = body[key]
+                            u['updated_at'] = time.time()
+                            changed = True
+                            break
+                    if not changed:
+                        raise ValueError('Клиент не найден')
+                    users = save_proxy_users(users)
+                    log('USERS', 'UPDATE', 'Updated proxy client', actor='ui', action='user_update', target=uid)
+                    restart_singbox()
+                    return self.send_json({'ok': True, 'users': users_safe()})
+                if action == 'regenerate_password':
+                    uid = str(body.get('id') or '')
+                    for u in users:
+                        if str(u.get('id')) == uid:
+                            u['password'] = random_token(20)
+                            u['updated_at'] = time.time()
+                            break
+                    users = save_proxy_users(users)
+                    log('USERS', 'PASSWORD', 'Regenerated proxy client password', actor='ui', action='user_password', target=uid)
+                    restart_singbox()
+                    return self.send_json({'ok': True, 'users': users_safe()})
+                if action == 'regenerate_secret':
+                    uid = str(body.get('id') or '')
+                    for u in users:
+                        if str(u.get('id')) == uid:
+                            u['telegram_secret'] = make_mtproto_secret(u.get('telegram_front_domain') or 'www.google.com')
+                            u['updated_at'] = time.time()
+                            break
+                    users = save_proxy_users(users)
+                    log('USERS', 'SECRET', 'Regenerated proxy client Telegram secret', actor='ui', action='user_secret', target=uid)
+                    restart_singbox()
+                    return self.send_json({'ok': True, 'users': users_safe()})
+                if action in ['block','unblock']:
+                    uid = str(body.get('id') or '')
+                    duration = block_duration_to_seconds(body.get('duration_seconds'))
+                    for u in users:
+                        if str(u.get('id')) == uid:
+                            if action == 'block':
+                                u['blocked_until'] = time.time() + duration if duration else 'permanent'
+                                u['blocked_comment'] = body.get('comment') or 'Blocked from users panel'
+                            else:
+                                u['blocked_until'] = None
+                                u['blocked_comment'] = ''
+                            u['updated_at'] = time.time()
+                            break
+                    users = save_proxy_users(users)
+                    log('USERS', action.upper(), f'User {action}', actor='ui', action='user_'+action, target=uid)
+                    restart_singbox(); close_all_connections()
+                    return self.send_json({'ok': True, 'users': users_safe()})
+                raise ValueError('Неизвестное действие users')
             if path == "/api/proxy/select":
                 name = body.get("name")
                 clash_request("PUT", "/proxies/Proxy", {"name": name}, timeout=5)
@@ -1160,7 +2084,8 @@ class Handler(BaseHTTPRequestHandler):
                         results[name] = clash_request("GET", f"/proxies/{urllib.parse.quote(name)}/delay?timeout=5000&url={urllib.parse.quote('https://www.gstatic.com/generate_204')}", timeout=8)
                     except Exception as e:
                         results[name] = {"error": str(e)}
-                return self.send_json({"ok": True, "results": results})
+                log("PING", "OK", f"Ping test completed for {len(names)} server(s)", actor="ui", action="ping", extra={"count": len(names)})
+                return self.send_json({"ok": True, "results": results, "checked_at": time.time()})
             if path == "/api/connections/close_all":
                 return self.send_json({"ok": close_all_connections()})
             if path == "/api/clients/disconnect":
@@ -1173,25 +2098,32 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/blocklist":
                 ip = body.get("ip") or body.get("cidr")
                 comment = body.get("comment") or ""
+                duration = block_duration_to_seconds(body.get("duration_seconds"))
+                expires_at = time.time() + duration if duration else None
                 cidr = normalize_ip_cidr(ip)
                 items = load_blocked()
                 if not any(x.get("cidr") == cidr for x in items):
-                    items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time()})
+                    items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at})
                     save_blocked(items)
+                    log("BLOCK", "ADD", f"Blocked {cidr}", actor="ui", action="block_add", target=cidr, extra={"duration_seconds": duration, "expires_at": expires_at})
                     restart_singbox()
                 return self.send_json({"ok": True, "blocked": items})
             if path == "/api/clients/block":
                 ip = body.get("ip"); comment = body.get("comment") or "Blocked from clients panel"
+                duration = block_duration_to_seconds(body.get("duration_seconds"))
+                expires_at = time.time() + duration if duration else None
                 cidr = normalize_ip_cidr(ip)
                 items = load_blocked()
                 if not any(x.get("cidr") == cidr for x in items):
-                    items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time()})
+                    items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at})
                     save_blocked(items)
+                    log("BLOCK", "ADD", f"Blocked client {cidr}", actor="ui", action="client_block", target=cidr, extra={"duration_seconds": duration, "expires_at": expires_at})
                 restart_singbox(); close_all_connections()
                 return self.send_json({"ok": True, "blocked": items})
             if path == "/api/trusted":
                 ip = body.get("ip"); name = body.get("name") or "Моё устройство"
                 trusted = load_trusted(); trusted[ip] = {"name": name, "trusted_at": time.time()}; save_trusted(trusted)
+                log("TRUSTED", "ADD", f"Trusted client {ip} as {name}", actor="ui", action="trusted_add", target=ip)
                 return self.send_json({"ok": True, "trusted": trusted})
             if path == "/api/servers/import":
                 mode = body.get("mode", "json")
@@ -1212,6 +2144,7 @@ class Handler(BaseHTTPRequestHandler):
                 final = load_servers() + new_servers if append else new_servers
                 final = validate_servers(final)["servers"]
                 save_servers(final)
+                log("SERVERS", "IMPORT", f"Imported {len(new_servers)} server(s), total {len(final)}", actor="ui", action="servers_import", extra={"mode": mode, "append": append})
                 restart_singbox()
                 return self.send_json({"ok": True, "count": len(final), "imported": len(new_servers), "errors": parsed.get("errors", [])})
             if path == "/api/servers/refresh":
@@ -1223,7 +2156,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not parsed["servers"]:
                     return self.send_json({"ok": False, "errors": parsed.get("errors", [])}, 400)
                 settings["subscription_url"] = url; save_settings(settings)
-                save_servers(parsed["servers"]); restart_singbox()
+                save_servers(parsed["servers"]); log("SERVERS", "REFRESH", f"Subscription refreshed, {len(parsed['servers'])} server(s)", actor="ui", action="servers_refresh", target=url); restart_singbox()
                 return self.send_json({"ok": True, "count": len(parsed["servers"]), "errors": parsed.get("errors", [])})
             if path == "/api/traffic":
                 traffic = load_traffic()
@@ -1231,9 +2164,9 @@ class Handler(BaseHTTPRequestHandler):
                     traffic["limit_bytes"] = int(body.get("limit_bytes") or 0)
                 if "used_bytes" in body:
                     traffic["used_bytes"] = int(body.get("used_bytes") or 0)
-                save_traffic(traffic); return self.send_json({"ok": True, "traffic": traffic})
+                save_traffic(traffic); log("TRAFFIC", "SAVE", "Traffic settings saved", actor="ui", action="traffic_save", extra={"limit_bytes": traffic.get("limit_bytes"), "used_bytes": traffic.get("used_bytes")}); return self.send_json({"ok": True, "traffic": traffic})
             if path == "/api/traffic/reset":
-                traffic = load_traffic(); traffic["used_bytes"] = 0; traffic["connection_bytes"] = {}; save_traffic(traffic); return self.send_json({"ok": True, "traffic": traffic})
+                traffic = load_traffic(); traffic["used_bytes"] = 0; traffic["connection_bytes"] = {}; traffic["started_at"] = time.time(); save_traffic(traffic); log("TRAFFIC", "RESET", "Traffic counter reset", actor="ui", action="traffic_reset"); return self.send_json({"ok": True, "traffic": traffic})
             if path == "/api/restart":
                 restart_singbox(); return self.send_json({"ok": True})
             self.send_json({"error": "not found"}, 404)
@@ -1246,11 +2179,18 @@ class Handler(BaseHTTPRequestHandler):
             path = normalize_request_path(self.path)
             if path.startswith("/api/blocklist/"):
                 cidr_or_ip = urllib.parse.unquote(path.split("/api/blocklist/", 1)[1])
-                items = [x for x in load_blocked() if x.get("cidr") != cidr_or_ip and x.get("ip") != cidr_or_ip]
-                save_blocked(items); restart_singbox(); return self.send_json({"ok": True, "blocked": items})
+                items = [x for x in load_blocked(include_expired=True) if x.get("cidr") != cidr_or_ip and x.get("ip") != cidr_or_ip]
+                save_blocked(items); log("BLOCK", "DELETE", f"Unblocked {cidr_or_ip}", actor="ui", action="block_delete", target=cidr_or_ip); restart_singbox(); return self.send_json({"ok": True, "blocked": items})
+            if path.startswith("/api/users/"):
+                uid = urllib.parse.unquote(path.split("/api/users/", 1)[1])
+                users = [u for u in load_proxy_users() if str(u.get("id")) != uid]
+                save_proxy_users(users)
+                log("USERS", "DELETE", f"Deleted proxy client {uid}", actor="ui", action="user_delete", target=uid)
+                restart_singbox()
+                return self.send_json({"ok": True, "users": users_safe()})
             if path.startswith("/api/trusted/"):
                 ip = urllib.parse.unquote(path.split("/api/trusted/", 1)[1])
-                trusted = load_trusted(); trusted.pop(ip, None); save_trusted(trusted); return self.send_json({"ok": True, "trusted": trusted})
+                trusted = load_trusted(); trusted.pop(ip, None); save_trusted(trusted); log("TRUSTED", "DELETE", f"Untrusted client {ip}", actor="ui", action="trusted_delete", target=ip); return self.send_json({"ok": True, "trusted": trusted})
             if path.startswith("/api/servers/"):
                 tag = urllib.parse.unquote(path.split("/api/servers/", 1)[1])
                 servers = [s for s in load_servers() if s.get("tag") != tag]
@@ -1271,6 +2211,7 @@ def main():
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
     load_servers()
+    settings = load_settings(); settings = update_proxy_lifecycle(settings, load_telegram_settings().get("enabled", False)); save_settings(settings)
     start_singbox()
     server = ThreadingHTTPServer(("0.0.0.0", BACKEND_PORT), Handler)
     log("BACKEND", "READY", f"Management UI listening on 0.0.0.0:{BACKEND_PORT}")

@@ -1,12 +1,12 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base-python:latest
 
 FROM ghcr.io/sagernet/sing-box:latest AS singbox
-FROM nineseconds/mtg:2 AS mtg
+FROM ghcr.io/dolonet/mtg-multi:latest AS mtg
 
 FROM ${BUILD_FROM}
 
 COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
-COPY --from=mtg /mtg /usr/local/bin/mtg
+COPY --from=mtg /mtg /usr/local/bin/mtg-multi
 
 COPY run.sh /run.sh
 COPY backend.py /app/backend.py
@@ -16,6 +16,6 @@ COPY servers.example.json /defaults/servers.example.json
 RUN sed -i 's/\r$//' /run.sh /app/backend.py && \
     chmod a+x /run.sh && \
     chmod a+x /usr/local/bin/sing-box && \
-    chmod a+x /usr/local/bin/mtg
+    chmod a+x /usr/local/bin/mtg-multi
 
 CMD ["/run.sh"]

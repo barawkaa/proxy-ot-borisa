@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.4"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -1469,7 +1469,18 @@ def list_tcp_peers_for_local_port(port):
 
 
 def get_mtg_client_connections():
-    peers = []
+    """Return real TCP clients connected to MTProto port(s).
+
+    With multi-secret MTProto one external port can serve several users. The OS
+    TCP table only shows remote IP:port, not which MTProto secret was used.
+    Therefore we must NOT create one client per registered user on the same
+    port: that caused fake/offline clients after creating users.
+
+    If exactly one active Telegram user exists for a port, we can attribute the
+    peer to that user. If several users share the port, the peer is shown by IP
+    only with a Telegram MTProto service label.
+    """
+    users_by_port = {}
     for user in load_proxy_users():
         if not user.get('enabled', True) or not user.get('telegram_enabled', True) or is_user_block_active(user):
             continue
@@ -1477,10 +1488,29 @@ def get_mtg_client_connections():
             port = int(user.get('telegram_port') or 0)
         except Exception:
             continue
+        if port <= 0:
+            continue
+        users_by_port.setdefault(port, []).append(user)
+
+    peers = []
+    seen = set()
+    for port, users in users_by_port.items():
+        single_user = users[0] if len(users) == 1 else None
         for peer in list_tcp_peers_for_local_port(port):
-            peer['user_id'] = user.get('id')
-            peer['username'] = user.get('username')
-            peer['user_name'] = user.get('name')
+            identity = (peer.get('ip'), peer.get('port'), port, peer.get('state'))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if single_user:
+                peer['user_id'] = single_user.get('id')
+                peer['username'] = single_user.get('username')
+                peer['user_name'] = single_user.get('name')
+            else:
+                peer['user_id'] = ''
+                peer['username'] = ''
+                peer['user_name'] = ''
+                peer['ambiguous_user'] = True
+                peer['possible_users'] = [u.get('username') for u in users if u.get('username')]
             peer['telegram_port'] = port
             peers.append(peer)
     return peers
@@ -1686,7 +1716,14 @@ def build_clients(connections):
         ip = old.get('ip') or (key.split(':', 1)[-1] if key.startswith('ip:') else '—')
         # Remove stale synthetic Telegram clients created by older builds.
         # Registered users must not appear in Clients until real network activity exists.
+        # Unknown LAN/private IPs are usually browser/HA internal/local noise. Show them only while online;
+        # do not keep them as offline clients after user creation/restart.
+        has_registered_identity = bool(old.get('registered_user_id') or old.get('username'))
+        has_manual_trust = bool(trusted.get(ip))
         if str(ip).startswith('telegram:') or is_loopback_ip(str(ip)):
+            history.pop(key, None)
+            continue
+        if is_private_ip(ip) and not has_registered_identity and not has_manual_trust:
             history.pop(key, None)
             continue
         if old.get('last_seen') and now - old['last_seen'] > OFFLINE_CLIENT_KEEP_SECONDS:
@@ -2148,6 +2185,32 @@ class Handler(BaseHTTPRequestHandler):
                     if get_source_ip(c) == ip and close_connection(get_conn_id(c)):
                         closed += 1
                 return self.send_json({"ok": True, "closed": closed})
+            if path == "/api/clients/delete":
+                ip = str(body.get("ip") or "")
+                key = str(body.get("key") or "")
+                conns = get_connections_raw(); closed = 0
+                for c in conns:
+                    if ip and get_source_ip(c) == ip and close_connection(get_conn_id(c)):
+                        closed += 1
+                # MTProto clients are external TCP sessions to mtg; sing-box cannot close them by client IP.
+                # Restart mtg to drop current Telegram sessions if this IP had MTProto activity.
+                mtg_restarted = False
+                try:
+                    if ip and any((p.get('ip') == ip) for p in get_mtg_client_connections()):
+                        restart_mtg(); mtg_restarted = True
+                except Exception:
+                    pass
+                history = load_clients()
+                removed_keys = []
+                for hk, hv in list(history.items()):
+                    if (key and hk == key) or (ip and hv.get('ip') == ip) or (ip and hk == 'ip:' + ip):
+                        removed_keys.append(hk)
+                        history.pop(hk, None)
+                save_clients(history)
+                if ip:
+                    trusted = load_trusted(); trusted.pop(ip, None); save_trusted(trusted)
+                log("CLIENT", "DELETE", f"Deleted client from list: {ip or key}", actor="ui", action="client_delete", target=key or ip, extra={"closed": closed, "removed_keys": removed_keys, "mtg_restarted": mtg_restarted})
+                return self.send_json({"ok": True, "closed": closed, "removed_keys": removed_keys, "mtg_restarted": mtg_restarted})
             if path == "/api/blocklist":
                 ip = body.get("ip") or body.get("cidr")
                 comment = body.get("comment") or ""

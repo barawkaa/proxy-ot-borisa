@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.10.1"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -1237,6 +1237,25 @@ def auto_server_tags(servers):
     return [s.get("tag") for s in normalized if s.get("tag")]
 
 
+def server_to_singbox_outbound(server):
+    """Return a clean sing-box outbound object.
+
+    The UI/backend may store management-only fields such as priority.
+    sing-box rejects unknown outbound fields, so these keys must never be
+    written into /tmp/boris-proxy/sing-box.json.
+    """
+    item = dict(server)
+    for key in [
+        "priority",
+        "last_ping",
+        "last_ping_at",
+        "note",
+        "enabled",
+    ]:
+        item.pop(key, None)
+    return item
+
+
 def load_server_pings():
     data = read_json(data_path("server_pings.json"), {})
     return data if isinstance(data, dict) else {}
@@ -1582,7 +1601,7 @@ def make_singbox_config():
     ]
     if auto_tags:
         outbounds.append({"type": "urltest", "tag": "auto", "outbounds": auto_tags, "url": "https://www.gstatic.com/generate_204", "interval": options.get("urltest_interval", "2m"), "tolerance": int(options.get("urltest_tolerance", 50))})
-    outbounds.extend(servers)
+    outbounds.extend([server_to_singbox_outbound(s) for s in servers])
     outbounds.extend([{"type": "block", "tag": "block"}, {"type": "direct", "tag": "direct"}])
 
     route_rule_sets = []
@@ -2308,7 +2327,7 @@ def get_events(limit=200):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.10.0"
+    server_version = "ProxyOtBorisa/1.10.1"
 
     def log_message(self, fmt, *args):
         return

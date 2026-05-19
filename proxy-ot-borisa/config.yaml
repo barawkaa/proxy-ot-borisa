@@ -1,5 +1,5 @@
 name: "Proxy от Бориса"
-version: "1.9.0"
+version: "1.10.0"
 slug: "proxy_ot_borisa"
 description: "Управляемый HTTP/SOCKS/Telegram MTProto прокси на базе sing-box"
 arch:

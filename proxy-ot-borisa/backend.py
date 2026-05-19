@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -1206,6 +1206,46 @@ def get_mtg_client_connections():
         result.append(peer)
     return result
 
+def infer_server_priority(server):
+    tag = str(server.get("tag") or "").upper()
+    # Российские/локальные узлы держим как резерв: они часто дают лучший ping,
+    # но для обхода блокировок не должны выигрывать auto-выбор.
+    if tag.startswith("RU") or tag.endswith("-RU") or " RUSSIA" in tag:
+        return 200
+    return 50
+
+
+def normalize_server_priority(server):
+    item = dict(server)
+    try:
+        pr = int(item.get("priority"))
+    except Exception:
+        pr = infer_server_priority(item)
+    item["priority"] = max(1, min(999, pr))
+    return item
+
+
+def sort_servers_for_display(servers):
+    return sorted([normalize_server_priority(s) for s in servers if isinstance(s, dict)], key=lambda x: (int(x.get("priority", 50)), str(x.get("tag") or "")))
+
+
+def auto_server_tags(servers):
+    normalized = sort_servers_for_display(servers)
+    primary = [s.get("tag") for s in normalized if s.get("tag") and int(s.get("priority", 50)) < 100]
+    if primary:
+        return primary
+    return [s.get("tag") for s in normalized if s.get("tag")]
+
+
+def load_server_pings():
+    data = read_json(data_path("server_pings.json"), {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_server_pings(data):
+    write_json(data_path("server_pings.json"), data if isinstance(data, dict) else {})
+
+
 def load_servers():
     path = data_path("servers.json")
     if not path.exists():
@@ -1221,11 +1261,16 @@ def load_servers():
         if not servers and DEFAULT_SERVERS_FILE.exists():
             servers = read_json(DEFAULT_SERVERS_FILE, [])
             log("SERVERS_INIT", "OK", f"Loaded {len(servers)} servers from defaults")
-        write_json(path, servers)
-    return read_json(path, [])
+        write_json(path, sort_servers_for_display(servers))
+    servers = read_json(path, [])
+    normalized = sort_servers_for_display(servers)
+    if normalized != servers:
+        write_json(path, normalized)
+    return normalized
 
 
 def save_servers(servers):
+    servers = sort_servers_for_display(servers)
     backup_path = data_path(f"servers.backup.{int(time.time())}.json")
     current = read_json(data_path("servers.json"), None)
     if current is not None:
@@ -1449,6 +1494,7 @@ def validate_servers(servers):
         if typ in ["vless", "vmess", "trojan", "shadowsocks"] and not item.get("server"):
             errors.append(f"{tag}: не указан server")
             continue
+        item = normalize_server_priority(item)
         result.append(item)
     return {"servers": result, "errors": errors}
 
@@ -1480,7 +1526,7 @@ def fetch_text(url, timeout=20):
 
 
 def selector_outbounds(servers):
-    tags = [s.get("tag") for s in servers if s.get("tag")]
+    tags = [s.get("tag") for s in sort_servers_for_display(servers) if s.get("tag")]
     if tags:
         return ["auto"] + tags
     return ["direct"]
@@ -1493,6 +1539,7 @@ def make_singbox_config():
     servers = load_servers()
     blocked = load_blocked()
     server_tags = [s.get("tag") for s in servers if s.get("tag")]
+    auto_tags = auto_server_tags(servers)
     http_port = int(options["http_proxy_port"])
     socks_port = int(options["socks_proxy_port"])
     socks_tag = f"IN-SOCKS5-{socks_port}"
@@ -1533,8 +1580,8 @@ def make_singbox_config():
         {"type": "selector", "tag": "HTTP_POWER", "outbounds": ["Proxy", "block"], "default": "Proxy" if settings.get("http_enabled", True) else "block", "interrupt_exist_connections": True},
         proxy_selector,
     ]
-    if server_tags:
-        outbounds.append({"type": "urltest", "tag": "auto", "outbounds": server_tags, "url": "https://www.gstatic.com/generate_204", "interval": options.get("urltest_interval", "2m"), "tolerance": int(options.get("urltest_tolerance", 50))})
+    if auto_tags:
+        outbounds.append({"type": "urltest", "tag": "auto", "outbounds": auto_tags, "url": "https://www.gstatic.com/generate_204", "interval": options.get("urltest_interval", "2m"), "tolerance": int(options.get("urltest_tolerance", 50))})
     outbounds.extend(servers)
     outbounds.extend([{"type": "block", "tag": "block"}, {"type": "direct", "tag": "direct"}])
 
@@ -2261,7 +2308,7 @@ def get_events(limit=200):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.8.0"
+    server_version = "ProxyOtBorisa/1.10.0"
 
     def log_message(self, fmt, *args):
         return
@@ -2324,7 +2371,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/clients":
                 conns = get_connections_raw(); update_traffic(conns); return self.send_json({"clients": build_clients(conns)})
             if path == "/api/servers":
-                settings = load_settings(); return self.send_json({"servers": load_servers(), "subscription_url": settings.get("subscription_url", "")})
+                settings = load_settings(); servers = load_servers(); return self.send_json({"servers": servers, "subscription_url": settings.get("subscription_url", ""), "pings": load_server_pings(), "auto_tags": auto_server_tags(servers)})
             if path == "/api/routing":
                 return self.send_json({"routing": load_routing(), "summary": routing_summary()})
             if path == "/api/telegram":
@@ -2337,6 +2384,39 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"blocked": load_blocked()})
             if path == "/api/trusted":
                 return self.send_json({"trusted": load_trusted()})
+            if path == "/api/servers/priority":
+                tag = str(body.get("tag") or "")
+                priority = int(body.get("priority") or 50)
+                servers = load_servers()
+                changed = False
+                for srv in servers:
+                    if srv.get("tag") == tag:
+                        srv["priority"] = max(1, min(999, priority))
+                        changed = True
+                        break
+                if not changed:
+                    raise ValueError("Сервер не найден")
+                save_servers(servers)
+                log("SERVERS", "PRIORITY", f"Priority updated for {tag}: {priority}", actor="ui", action="server_priority", target=tag, extra={"priority": priority})
+                restart_singbox()
+                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
+            if path == "/api/servers/reorder":
+                order = body.get("order") or []
+                if not isinstance(order, list):
+                    raise ValueError("order должен быть списком tag")
+                servers = load_servers()
+                by_tag = {s.get("tag"): s for s in servers}
+                new_servers = []
+                for i, tag in enumerate(order):
+                    srv = by_tag.pop(str(tag), None)
+                    if srv:
+                        srv["priority"] = 10 + i * 10
+                        new_servers.append(srv)
+                new_servers.extend(by_tag.values())
+                save_servers(new_servers)
+                log("SERVERS", "REORDER", "Server priorities reordered", actor="ui", action="server_reorder", extra={"count": len(new_servers)})
+                restart_singbox()
+                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
             if path == "/api/traffic":
                 return self.send_json(load_traffic())
             if path == "/api/logs":
@@ -2502,13 +2582,17 @@ class Handler(BaseHTTPRequestHandler):
                     group = proxies.get("Proxy") or {}
                     names = [x for x in (group.get("all") or group.get("proxies") or []) if x != "auto"]
                 results = {}
+                pings = load_server_pings()
+                checked_at = time.time()
                 for name in names:
                     try:
                         results[name] = clash_request("GET", f"/proxies/{urllib.parse.quote(name)}/delay?timeout=5000&url={urllib.parse.quote('https://www.gstatic.com/generate_204')}", timeout=8)
                     except Exception as e:
                         results[name] = {"error": str(e)}
+                    pings[name] = {"checked_at": checked_at, **(results[name] if isinstance(results[name], dict) else {})}
+                save_server_pings(pings)
                 log("PING", "OK", f"Ping test completed for {len(names)} server(s)", actor="ui", action="ping", extra={"count": len(names)})
-                return self.send_json({"ok": True, "results": results, "checked_at": time.time()})
+                return self.send_json({"ok": True, "results": results, "checked_at": checked_at})
             if path == "/api/connections/close_all":
                 return self.send_json({"ok": close_all_connections()})
             if path == "/api/clients/disconnect":
@@ -2620,6 +2704,39 @@ class Handler(BaseHTTPRequestHandler):
                 settings["subscription_url"] = url; save_settings(settings)
                 save_servers(parsed["servers"]); log("SERVERS", "REFRESH", f"Subscription refreshed, {len(parsed['servers'])} server(s)", actor="ui", action="servers_refresh", target=url); restart_singbox()
                 return self.send_json({"ok": True, "count": len(parsed["servers"]), "errors": parsed.get("errors", [])})
+            if path == "/api/servers/priority":
+                tag = str(body.get("tag") or "")
+                priority = int(body.get("priority") or 50)
+                servers = load_servers()
+                changed = False
+                for srv in servers:
+                    if srv.get("tag") == tag:
+                        srv["priority"] = max(1, min(999, priority))
+                        changed = True
+                        break
+                if not changed:
+                    raise ValueError("Сервер не найден")
+                save_servers(servers)
+                log("SERVERS", "PRIORITY", f"Priority updated for {tag}: {priority}", actor="ui", action="server_priority", target=tag, extra={"priority": priority})
+                restart_singbox()
+                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
+            if path == "/api/servers/reorder":
+                order = body.get("order") or []
+                if not isinstance(order, list):
+                    raise ValueError("order должен быть списком tag")
+                servers = load_servers()
+                by_tag = {s.get("tag"): s for s in servers}
+                new_servers = []
+                for i, tag in enumerate(order):
+                    srv = by_tag.pop(str(tag), None)
+                    if srv:
+                        srv["priority"] = 10 + i * 10
+                        new_servers.append(srv)
+                new_servers.extend(by_tag.values())
+                save_servers(new_servers)
+                log("SERVERS", "REORDER", "Server priorities reordered", actor="ui", action="server_reorder", extra={"count": len(new_servers)})
+                restart_singbox()
+                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
             if path == "/api/traffic":
                 traffic = load_traffic()
                 if "limit_bytes" in body:

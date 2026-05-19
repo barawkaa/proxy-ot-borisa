@@ -1,0 +1,62 @@
+name: "Proxy от Бориса"
+version: "1.6.0"
+slug: "proxy_ot_borisa"
+description: "Управляемый HTTP/SOCKS/Telegram MTProto прокси на базе sing-box"
+arch:
+  - aarch64
+
+startup: services
+boot: auto
+host_network: true
+init: false
+
+webui: "http://[HOST]:[PORT:8099]/"
+ingress: true
+ingress_port: 8099
+panel_icon: "mdi:shield-link-variant"
+panel_title: "Proxy от Бориса"
+panel_admin: false
+
+options:
+  secret: "ChangeThisSecret_2026"
+  http_proxy_port: 2081
+  socks_proxy_port: 2080
+  telegram_proxy_enabled: false
+  telegram_proxy_port: 2083
+  telegram_front_domain: "www.google.com"
+  socks_auth_enabled: true
+  http_auth_enabled: false
+  proxy_username: "user"
+  proxy_password: "ChangeThisProxyPassword"
+  urltest_interval: "2m"
+  urltest_tolerance: 50
+  log_level: "info"
+  servers_json: "[]"
+
+schema:
+  secret: "password"
+  http_proxy_port: "int(1,65535)"
+  socks_proxy_port: "int(1,65535)"
+  telegram_proxy_enabled: "bool"
+  telegram_proxy_port: "int(1,65535)"
+  telegram_front_domain: "str"
+  socks_auth_enabled: "bool"
+  http_auth_enabled: "bool"
+  proxy_username: "str"
+  proxy_password: "password"
+  urltest_interval: "str"
+  urltest_tolerance: "int(0,1000)"
+  log_level: "list(trace|debug|info|warn|error|fatal|panic)"
+  servers_json: "str"
+
+ports:
+  2080/tcp: 2080
+  2081/tcp: 2081
+  2083/tcp: 2083
+  8099/tcp: null
+
+ports_description:
+  2080/tcp: "SOCKS5 proxy"
+  2081/tcp: "HTTP proxy"
+  2083/tcp: "Telegram MTProto proxy"
+  8099/tcp: "Management UI through Home Assistant Ingress"

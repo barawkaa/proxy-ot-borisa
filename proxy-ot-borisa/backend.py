@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.6.4"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -677,6 +677,103 @@ def is_private_ip(ip):
         return True
 
 
+def is_loopback_ip(ip):
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except Exception:
+        return False
+
+
+def tcp_state_name(code):
+    return {
+        "01": "ESTABLISHED",
+        "02": "SYN_SENT",
+        "03": "SYN_RECV",
+        "04": "FIN_WAIT1",
+        "05": "FIN_WAIT2",
+        "06": "TIME_WAIT",
+        "07": "CLOSE",
+        "08": "CLOSE_WAIT",
+        "09": "LAST_ACK",
+        "0A": "LISTEN",
+        "0B": "CLOSING",
+    }.get(str(code).upper(), str(code))
+
+
+def decode_proc_ipv4(hex_ip):
+    raw = bytes.fromhex(hex_ip)
+    return str(ipaddress.IPv4Address(raw[::-1]))
+
+
+def decode_proc_ipv6(hex_ip):
+    raw = bytes.fromhex(hex_ip)
+    # /proc/net/tcp6 stores IPv6 as 4 little-endian 32-bit words.
+    fixed = b"".join(raw[i:i+4][::-1] for i in range(0, 16, 4))
+    ip = ipaddress.IPv6Address(fixed)
+    if ip.ipv4_mapped:
+        return str(ip.ipv4_mapped)
+    return str(ip)
+
+
+def list_tcp_peers_for_local_port(port):
+    """Return remote peers connected to a local TCP port.
+
+    Used to identify real Telegram MTProto clients. sing-box sees MTProto
+    traffic only as 127.0.0.1 because mtg forwards it to the internal SOCKS5
+    upstream. The actual phone/client IP is visible on mtg's listening port.
+    """
+    result = []
+    targets = [("/proc/net/tcp", decode_proc_ipv4), ("/proc/net/tcp6", decode_proc_ipv6)]
+    wanted_port = int(port)
+
+    for path, decoder in targets:
+        try:
+            lines = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()[1:]
+        except Exception:
+            continue
+
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            local, remote, state = parts[1], parts[2], parts[3].upper()
+            try:
+                local_ip_hex, local_port_hex = local.split(":")
+                remote_ip_hex, remote_port_hex = remote.split(":")
+                local_port = int(local_port_hex, 16)
+                if local_port != wanted_port:
+                    continue
+                if state == "0A":
+                    continue
+                remote_ip = decoder(remote_ip_hex)
+                remote_port = int(remote_port_hex, 16)
+                if remote_ip in ["0.0.0.0", "::"] or is_loopback_ip(remote_ip):
+                    continue
+                result.append({
+                    "ip": remote_ip,
+                    "port": remote_port,
+                    "state": tcp_state_name(state),
+                    "state_code": state,
+                    "local_port": wanted_port,
+                    "source": "telegram_mtproto",
+                })
+            except Exception:
+                continue
+
+    return result
+
+
+def get_mtg_client_connections():
+    tg = load_telegram_settings()
+    if not tg.get("enabled", False):
+        return []
+    try:
+        port = int(tg.get("port") or load_options().get("telegram_proxy_port", 2083))
+    except Exception:
+        port = 2083
+    return list_tcp_peers_for_local_port(port)
+
+
 def geo_lookup(ip):
     cache = read_json(data_path("geo_cache.json"), {})
     if ip in cache and time.time() - cache[ip].get("ts", 0) < 86400:
@@ -716,60 +813,127 @@ def update_traffic(connections):
     save_traffic(traffic)
 
 
+def ensure_client_group(grouped, history, trusted, ip, now, source_label=None):
+    old = history.get(ip, {})
+    was_offline_long = old.get("last_seen") and (now - old.get("last_seen", 0) > SESSION_BREAK_SECONDS)
+    first_time = not old.get("first_seen")
+
+    if ip not in grouped:
+        grouped[ip] = {
+            "ip": ip,
+            "status": "online",
+            "connections": [],
+            "upload": 0,
+            "download": 0,
+            "hosts": set(),
+            "services": set(old.get("services") or []),
+            "mtproto_connections": 0,
+            "tcp_states": {},
+            "first_seen": old.get("first_seen") or now,
+            "session_started": now if first_time or was_offline_long else old.get("session_started", now),
+            "last_seen": now,
+            "seen_count": 1 if first_time else (int(old.get("seen_count", 1)) + 1 if was_offline_long else int(old.get("seen_count", 1))),
+            "trusted": ip in trusted,
+            "trusted_name": (trusted.get(ip) or {}).get("name", ""),
+            "trusted_at": (trusted.get(ip) or {}).get("trusted_at"),
+            "is_public": not is_private_ip(ip),
+        }
+    if source_label:
+        grouped[ip]["services"].add(source_label)
+    return grouped[ip]
+
+
 def build_clients(connections):
     now = time.time()
     history = load_clients()
     trusted = load_trusted()
     grouped = {}
+
+    # Regular HTTP/SOCKS clients as reported by sing-box.
+    # Loopback connections are internal service traffic. In particular,
+    # MTProto -> internal SOCKS5 appears in sing-box as 127.0.0.1, so it must
+    # not be displayed as a real user client.
     for conn in connections:
         ip = get_source_ip(conn)
-        if not ip or ip == "—":
+        if not ip or ip == "—" or is_loopback_ip(ip):
             continue
-        old = history.get(ip, {})
-        if ip not in grouped:
-            was_offline_long = old.get("last_seen") and (now - old.get("last_seen", 0) > SESSION_BREAK_SECONDS)
-            first_time = not old.get("first_seen")
+        item = ensure_client_group(grouped, history, trusted, ip, now, "HTTP/SOCKS")
+        item["connections"].append(conn)
+        item["upload"] += int(conn.get("upload") or 0)
+        item["download"] += int(conn.get("download") or 0)
+        host = get_host(conn)
+        port = (conn.get("metadata") or {}).get("destinationPort") or (conn.get("metadata") or {}).get("destination_port") or ""
+        if host and host != "—":
+            item["hosts"].add(f"{host}:{port}" if port else host)
+
+    # Real Telegram MTProto clients are visible on mtg's listening TCP port.
+    # Their outgoing traffic is then forwarded to sing-box through 127.0.0.1,
+    # so this extra scan is required to show the phone's real IP instead of
+    # the internal 127.0.0.1 upstream.
+    mtg_peers = get_mtg_client_connections()
+    mtg_by_ip = {}
+    for peer in mtg_peers:
+        ip = peer.get("ip")
+        if not ip or ip == "—" or is_loopback_ip(ip):
+            continue
+        mtg_by_ip.setdefault(ip, []).append(peer)
+
+    for ip, peers in mtg_by_ip.items():
+        item = ensure_client_group(grouped, history, trusted, ip, now, "Telegram MTProto")
+        item["mtproto_connections"] = len(peers)
+        item["hosts"].add("Telegram MTProto proxy")
+        for peer in peers:
+            state = peer.get("state") or "UNKNOWN"
+            item["tcp_states"][state] = item["tcp_states"].get(state, 0) + 1
+
+    active_ips = set(grouped.keys())
+
+    for ip, item in grouped.items():
+        history[ip] = {
+            "first_seen": item["first_seen"],
+            "session_started": item["session_started"],
+            "last_seen": item["last_seen"],
+            "seen_count": item["seen_count"],
+            "services": sorted(item.get("services") or []),
+        }
+
+    for ip, old in list(history.items()):
+        if ip in active_ips:
+            continue
+        if old.get("last_seen") and now - old["last_seen"] <= RECENT_CLIENT_SECONDS:
             grouped[ip] = {
                 "ip": ip,
-                "status": "online",
+                "status": "recent",
                 "connections": [],
                 "upload": 0,
                 "download": 0,
                 "hosts": set(),
-                "first_seen": old.get("first_seen") or now,
-                "session_started": now if first_time or was_offline_long else old.get("session_started", now),
-                "last_seen": now,
-                "seen_count": 1 if first_time else (int(old.get("seen_count", 1)) + 1 if was_offline_long else int(old.get("seen_count", 1))),
+                "services": set(old.get("services") or []),
+                "mtproto_connections": 0,
+                "tcp_states": {},
+                "first_seen": old.get("first_seen"),
+                "session_started": old.get("session_started"),
+                "last_seen": old.get("last_seen"),
+                "seen_count": old.get("seen_count", 1),
                 "trusted": ip in trusted,
                 "trusted_name": (trusted.get(ip) or {}).get("name", ""),
                 "trusted_at": (trusted.get(ip) or {}).get("trusted_at"),
                 "is_public": not is_private_ip(ip),
             }
-        grouped[ip]["connections"].append(conn)
-        grouped[ip]["upload"] += int(conn.get("upload") or 0)
-        grouped[ip]["download"] += int(conn.get("download") or 0)
-        host = get_host(conn)
-        port = (conn.get("metadata") or {}).get("destinationPort") or (conn.get("metadata") or {}).get("destination_port") or ""
-        if host and host != "—":
-            grouped[ip]["hosts"].add(f"{host}:{port}" if port else host)
-    active_ips = set(grouped.keys())
-    for ip, item in grouped.items():
-        history[ip] = {"first_seen": item["first_seen"], "session_started": item["session_started"], "last_seen": item["last_seen"], "seen_count": item["seen_count"]}
-    for ip, old in list(history.items()):
-        if ip in active_ips:
-            continue
-        if old.get("last_seen") and now - old["last_seen"] <= RECENT_CLIENT_SECONDS:
-            grouped[ip] = {"ip": ip, "status": "recent", "connections": [], "upload": 0, "download": 0, "hosts": set(), "first_seen": old.get("first_seen"), "session_started": old.get("session_started"), "last_seen": old.get("last_seen"), "seen_count": old.get("seen_count", 1), "trusted": ip in trusted, "trusted_name": (trusted.get(ip) or {}).get("name", ""), "trusted_at": (trusted.get(ip) or {}).get("trusted_at"), "is_public": not is_private_ip(ip)}
+
     save_clients(history)
+
     result = []
     for ip, item in grouped.items():
         item = dict(item)
         item["hosts"] = list(item["hosts"])[:12]
+        item["services"] = sorted(item.get("services") or [])
         item["geo"] = geo_lookup(ip)
+        item["connections_count"] = len(item["connections"]) + int(item.get("mtproto_connections") or 0)
         item["risk"] = risk_level(item)
-        item["connections_count"] = len(item["connections"])
         item.pop("connections", None)
         result.append(item)
+
     return sorted(result, key=lambda x: (0 if x["status"] == "online" else 1, 0 if not x["trusted"] else 1, -x["last_seen"]))
 
 
@@ -859,7 +1023,7 @@ def normalize_request_path(raw_path):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.6.3"
+    server_version = "ProxyOtBorisa/1.6.4"
 
     def log_message(self, fmt, *args):
         return

@@ -18,7 +18,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.15.0"
+APP_VERSION = "1.16.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -26,6 +26,7 @@ DEFAULT_SERVERS_FILE = Path("/defaults/servers.example.json")
 OPTIONS_FILE = Path("/data/options.json")
 RUNTIME_PORTS_FILE = Path("/data/runtime_ports.json")
 SUBSCRIPTION_INFO_FILE = Path("/data/subscription_info.json")
+SUBSCRIPTION_SERVERS_FILE = Path("/data/subscription_servers.json")
 PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port"]
 SINGBOX_BIN = "/usr/local/bin/sing-box"
 SINGBOX_CONFIG = TMP_DIR / "sing-box.json"
@@ -895,7 +896,7 @@ def write_source_ruleset(path, tag, kind, values):
 
 def fetch_text_with_fallback(url, timeout=35):
     errors = []
-    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.15"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.16"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="ignore"), "direct"
@@ -1771,6 +1772,49 @@ def auto_server_tags(servers):
     return [s.get("tag") for s in normalized if s.get("tag")]
 
 
+
+def server_identity_keys(server):
+    """Stable keys used to preserve UI metadata across subscription refreshes."""
+    if not isinstance(server, dict):
+        return []
+    keys = []
+    tag = str(server.get("tag") or "").strip()
+    if tag:
+        keys.append("tag:" + tag)
+    server_addr = str(server.get("server") or "").strip()
+    port = str(server.get("server_port") or "").strip()
+    uuid = str(server.get("uuid") or "").strip()
+    typ = str(server.get("type") or "").strip()
+    if server_addr and port:
+        keys.append("endpoint:" + "|".join([typ, server_addr, port, uuid]))
+        keys.append("hostport:" + "|".join([server_addr, port]))
+    return keys
+
+
+def preserve_server_metadata(existing_servers, new_servers):
+    """Keep manual priority/order and UI-only data after subscription update."""
+    index = {}
+    for srv in existing_servers or []:
+        if not isinstance(srv, dict):
+            continue
+        for key in server_identity_keys(srv):
+            index.setdefault(key, srv)
+    preserved_keys = ["priority", "enabled", "note", "last_ping", "last_ping_at"]
+    merged = []
+    for srv in new_servers or []:
+        item = dict(srv)
+        old = None
+        for key in server_identity_keys(item):
+            if key in index:
+                old = index[key]
+                break
+        if old:
+            for k in preserved_keys:
+                if k in old and old.get(k) not in [None, ""]:
+                    item[k] = old.get(k)
+        merged.append(item)
+    return merged
+
 def server_to_singbox_outbound(server):
     """Return a clean sing-box outbound object.
 
@@ -1921,6 +1965,58 @@ def save_subscription_info(info):
     info["updated_at"] = time.time()
     write_json(SUBSCRIPTION_INFO_FILE, info)
     return info
+
+
+def save_subscription_servers(servers, source_url=""):
+    items = []
+    for srv in servers or []:
+        if isinstance(srv, dict):
+            items.append(clean_server_for_config(dict(srv)))
+    payload = {
+        "updated_at": int(time.time()),
+        "source_url": source_url or "",
+        "count": len(items),
+        "servers": items,
+    }
+    write_json(SUBSCRIPTION_SERVERS_FILE, payload)
+    return payload
+
+
+def load_subscription_servers():
+    return read_json(SUBSCRIPTION_SERVERS_FILE, {"updated_at": 0, "source_url": "", "count": 0, "servers": []})
+
+
+def priority_profile_from_value(value):
+    try:
+        p = int(value)
+    except Exception:
+        p = 50
+    if p < 70:
+        return {"id": "primary", "name": "Приоритетный", "description": "участвует в auto первым", "priority": p}
+    if p < 100:
+        return {"id": "standard", "name": "Обычный", "description": "участвует в auto после приоритетных", "priority": p}
+    if p < 190:
+        return {"id": "reserve", "name": "Резервный", "description": "не участвует в auto, доступен вручную", "priority": p}
+    if p < 260:
+        return {"id": "ru_reserve", "name": "Российский/резервный", "description": "держать ниже зарубежных, использовать вручную/как крайний резерв", "priority": p}
+    return {"id": "manual_only", "name": "Только вручную", "description": "исключён из auto", "priority": p}
+
+
+def priority_value_from_profile(profile, current=50):
+    profile = str(profile or "").strip().lower()
+    mapping = {
+        "primary": 50,
+        "standard": 80,
+        "reserve": 150,
+        "ru_reserve": 200,
+        "manual_only": 300,
+    }
+    if profile in mapping:
+        return mapping[profile]
+    try:
+        return max(1, min(999, int(current)))
+    except Exception:
+        return 50
 
 
 def parse_subscription_userinfo(value):
@@ -2192,7 +2288,7 @@ def fetch_and_parse_subscription(url, timeout=25):
         "sing-box/1.11",
         "NekoBox/1.3",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "ProxyOtBorisa/1.15",
+        "ProxyOtBorisa/1.16",
     ]
     attempts = []
     best = None
@@ -2357,6 +2453,8 @@ def parse_servers_payload(text):
         return validate_servers(servers)
     except Exception as e:
         errors.append(f"JSON: {e}")
+    format_errors = list(errors)
+    errors = []
     candidate = text if "vless://" in text.lower() else try_decode_base64(text)
     links = re.findall(r"vless://[^\s\r\n]+", candidate, flags=re.IGNORECASE)
     servers = []
@@ -2379,7 +2477,7 @@ def parse_servers_payload(text):
         errors.append("Clash YAML: vless proxies not found")
     except Exception as e:
         errors.append(f"Clash YAML: {e}")
-    return {"servers": [], "errors": errors or ["Не найден JSON, Clash YAML или vless:// ссылки"]}
+    return {"servers": [], "errors": (format_errors + errors) or ["Не найден JSON, Clash YAML или vless:// ссылки"]}
 
 
 def validate_servers(servers):
@@ -2416,7 +2514,7 @@ def validate_servers(servers):
 
 
 def fetch_text(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.15"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.16"})
     errors = []
 
     # 1) Пробуем напрямую. Это работает, если подписка доступна с Raspberry/HAOS.
@@ -3292,7 +3390,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.15.0"
+    server_version = "ProxyOtBorisa/1.16.0"
 
     def log_message(self, fmt, *args):
         return
@@ -3363,7 +3461,16 @@ class Handler(BaseHTTPRequestHandler):
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 conns = get_monitored_connections(force=(qs.get("force", ["0"])[0] == "1"), run_autoban=True); return self.send_json({"clients": build_clients(conns), "updated_at": connections_cache.get("updated_at", 0)})
             if path == "/api/servers":
-                settings = load_settings(); servers = load_servers(); return self.send_json({"servers": servers, "subscription_url": settings.get("subscription_url", ""), "subscription_info": load_subscription_info(), "pings": load_server_pings(), "auto_tags": auto_server_tags(servers)})
+                settings = load_settings(); servers = load_servers()
+                enriched = []
+                for srv in servers:
+                    item = dict(srv)
+                    item["priority_profile"] = priority_profile_from_value(item.get("priority", 50))
+                    enriched.append(item)
+                return self.send_json({"servers": enriched, "subscription_url": settings.get("subscription_url", ""), "subscription_info": load_subscription_info(), "subscription_json": load_subscription_servers(), "pings": load_server_pings(), "auto_tags": auto_server_tags(servers)})
+            if path == "/api/servers/subscription_json":
+                data = load_subscription_servers()
+                return self.send_json({"ok": True, **data, "json_text": json.dumps(data.get("servers") or [], ensure_ascii=False, indent=2)})
             if path == "/api/routing":
                 return self.send_json({"routing": load_routing(), "summary": routing_summary()})
             if path == "/api/telegram":
@@ -3393,7 +3500,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(check_country_ip(ip, country))
             if path == "/api/servers/priority":
                 tag = str(body.get("tag") or "")
-                priority = int(body.get("priority") or 50)
+                profile = body.get("profile")
+                priority = priority_value_from_profile(profile, body.get("priority") or 50)
                 servers = load_servers()
                 changed = False
                 for srv in servers:
@@ -3750,11 +3858,18 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     parsed = parse_servers_payload(text)
                 new_servers = parsed["servers"]
+                if mode == "url" and new_servers:
+                    save_subscription_servers(new_servers, url)
                 if not new_servers:
                     if mode == "url":
                         return self.send_json({"ok": False, "errors": parsed.get("errors", []), "subscription_info": subscription_info}, 400)
                     return self.send_json({"ok": False, "errors": parsed.get("errors", [])}, 400)
-                final = load_servers() + new_servers if append else new_servers
+                existing_servers = load_servers()
+                if append:
+                    final = existing_servers + new_servers
+                else:
+                    # При обновлении подписки сохраняем ручные приоритеты/порядок уже известных серверов.
+                    final = preserve_server_metadata(existing_servers, new_servers)
                 final = validate_servers(final)["servers"]
                 save_servers(final)
                 if mode == "url":
@@ -3772,11 +3887,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not parsed["servers"]:
                     return self.send_json({"ok": False, "errors": parsed.get("errors", []), "subscription_info": subscription_info}, 400)
                 settings["subscription_url"] = url; save_settings(settings)
-                save_servers(parsed["servers"]); log("SERVERS", "REFRESH", f"Subscription refreshed, {len(parsed['servers'])} server(s)", actor="ui", action="servers_refresh", target=url, extra={"subscription": subscription_info}); restart_singbox()
-                return self.send_json({"ok": True, "count": len(parsed["servers"]), "errors": parsed.get("errors", []), "subscription_info": subscription_info})
+                save_subscription_servers(parsed["servers"], url)
+                merged_servers = preserve_server_metadata(load_servers(), parsed["servers"])
+                save_servers(merged_servers); log("SERVERS", "REFRESH", f"Subscription refreshed, {len(parsed['servers'])} server(s), priorities preserved", actor="ui", action="servers_refresh", target=url, extra={"subscription": subscription_info}); restart_singbox()
+                return self.send_json({"ok": True, "count": len(merged_servers), "imported": len(parsed["servers"]), "priorities_preserved": True, "errors": parsed.get("errors", []), "subscription_info": subscription_info})
             if path == "/api/servers/priority":
                 tag = str(body.get("tag") or "")
-                priority = int(body.get("priority") or 50)
+                profile = body.get("profile")
+                priority = priority_value_from_profile(profile, body.get("priority") or 50)
                 servers = load_servers()
                 changed = False
                 for srv in servers:

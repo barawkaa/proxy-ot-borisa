@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -136,7 +136,9 @@ DEFAULT_SECURITY = {
     "custom_allowed_cidrs": [],
     "custom_denied_cidrs": [],
     "autoban_enabled": True,
-    "autoban_max_connections_per_ip": 120,
+    "autoban_max_connections_per_ip": 40,
+    "autoban_max_new_connections_per_minute": 80,
+    "autoban_window_seconds": 60,
     "autoban_duration_seconds": 3600,
     "http_public_warning_ack": False,
     "updated_at": 0,
@@ -297,6 +299,11 @@ def load_security():
         sec["custom_denied_cidrs"] = []
     if not isinstance(sec.get("country_lists"), dict):
         sec["country_lists"] = {}
+    for key, fallback in [("autoban_max_connections_per_ip", 40), ("autoban_max_new_connections_per_minute", 80), ("autoban_window_seconds", 60), ("autoban_duration_seconds", 3600)]:
+        try:
+            sec[key] = int(sec.get(key) or fallback)
+        except Exception:
+            sec[key] = fallback
     return sec
 
 
@@ -400,6 +407,8 @@ def security_summary(sec=None, options=None):
         "custom_denied_cidrs": sec.get("custom_denied_cidrs") or [],
         "autoban_enabled": bool(sec.get("autoban_enabled")),
         "autoban_max_connections_per_ip": int(sec.get("autoban_max_connections_per_ip") or 0),
+        "autoban_max_new_connections_per_minute": int(sec.get("autoban_max_new_connections_per_minute") or 0),
+        "autoban_window_seconds": int(sec.get("autoban_window_seconds") or 0),
         "autoban_duration_seconds": int(sec.get("autoban_duration_seconds") or 0),
         "country_lists": sec.get("country_lists") or {},
         "warnings": warnings,
@@ -410,34 +419,88 @@ def security_summary(sec=None, options=None):
 
 
 def run_security_autoban(connections):
+    """Autoban by two signals:
+    1) too many active connections from one public IP;
+    2) too many new connection IDs from one public IP within a rolling window.
+
+    This is not a replacement for authentication, but it cuts off noisy scanners and open-proxy abuse.
+    Every automatic ban is written to blocked_ips.json, so it appears in the Blocklist tab and can be removed manually.
+    """
     sec = load_security()
     if not sec.get("autoban_enabled"):
         return []
-    threshold = int(sec.get("autoban_max_connections_per_ip") or 0)
-    if threshold <= 0:
-        return []
-    counts = {}
+
+    active_threshold = int(sec.get("autoban_max_connections_per_ip") or 40)
+    new_threshold = int(sec.get("autoban_max_new_connections_per_minute") or 80)
+    window_seconds = max(10, int(sec.get("autoban_window_seconds") or 60))
+    duration = int(sec.get("autoban_duration_seconds") or 3600)
+    now = time.time()
+
+    active_counts = {}
+    events = read_json(data_path("security_autoban_events.json"), {})
+    if not isinstance(events, dict):
+        events = {}
+
+    # Keep only recent event timestamps and compact old IP keys.
+    compacted = {}
+    for ip, ids in events.items():
+        if not isinstance(ids, dict):
+            continue
+        recent = {cid: ts for cid, ts in ids.items() if isinstance(ts, (int, float)) and now - float(ts) <= window_seconds}
+        if recent:
+            compacted[ip] = recent
+    events = compacted
+
     for conn in connections or []:
         ip = get_source_ip(conn)
         if not ip or ip == "—" or is_private_ip(ip) or is_loopback_ip(ip):
             continue
-        counts[ip] = counts.get(ip, 0) + 1
-    added = []
-    if not counts:
-        return added
+        active_counts[ip] = active_counts.get(ip, 0) + 1
+        cid = str(get_conn_id(conn) or "")
+        if not cid:
+            # Fallback fingerprint: enough for rate detection, without being persistent identity.
+            meta = conn.get("metadata") or {}
+            cid = f"{ip}|{meta.get('host') or meta.get('domain') or meta.get('destinationIP') or ''}|{meta.get('destinationPort') or ''}|{conn.get('start') or ''}"
+        events.setdefault(ip, {})[cid] = now
+
+    write_json(data_path("security_autoban_events.json"), events)
+
     items = load_blocked()
     existing = {x.get("cidr") for x in items}
-    duration = int(sec.get("autoban_duration_seconds") or 3600)
-    for ip, count in counts.items():
-        if count < threshold:
-            continue
+    added = []
+
+    def add_ban(ip, reason, count, threshold):
         cidr = normalize_ip_cidr(ip)
         if cidr in existing:
-            continue
-        expires_at = time.time() + duration if duration else None
-        items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": f"Автоблокировка: {count} активных соединений", "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at})
+            return
+        expires_at = now + duration if duration else None
+        entry = {
+            "cidr": cidr,
+            "ip": extract_ip_from_cidr(cidr),
+            "comment": f"Автоблокировка: {reason}; значение={count}; порог={threshold}",
+            "created_at": now,
+            "duration_seconds": duration,
+            "expires_at": expires_at,
+            "source": "autoban",
+            "reason": reason,
+            "count": count,
+            "threshold": threshold,
+        }
+        items.append(entry)
         existing.add(cidr)
-        added.append({"ip": ip, "cidr": cidr, "connections": count})
+        added.append(entry)
+
+    if active_threshold > 0:
+        for ip, count in active_counts.items():
+            if count >= active_threshold:
+                add_ban(ip, "too_many_active_connections", count, active_threshold)
+
+    if new_threshold > 0:
+        for ip, ids in events.items():
+            count = len(ids)
+            if count >= new_threshold:
+                add_ban(ip, f"too_many_new_connections_in_{window_seconds}s", count, new_threshold)
+
     if added:
         save_blocked(items)
         log("SECURITY", "AUTOBAN", f"Autobanned {len(added)} IP(s)", actor="backend", action="autoban", extra={"items": added})
@@ -2876,7 +2939,7 @@ class Handler(BaseHTTPRequestHandler):
                 cidr = normalize_ip_cidr(ip)
                 items = load_blocked()
                 if not any(x.get("cidr") == cidr for x in items):
-                    items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at})
+                    items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at, "source": "manual"})
                     save_blocked(items)
                     log("BLOCK", "ADD", f"Blocked {cidr}", actor="ui", action="block_add", target=cidr, extra={"duration_seconds": duration, "expires_at": expires_at})
                     restart_singbox()
@@ -2888,7 +2951,7 @@ class Handler(BaseHTTPRequestHandler):
                 cidr = normalize_ip_cidr(ip)
                 items = load_blocked()
                 if not any(x.get("cidr") == cidr for x in items):
-                    items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at})
+                    items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at, "source": "manual"})
                     save_blocked(items)
                     log("BLOCK", "ADD", f"Blocked client {cidr}", actor="ui", action="client_block", target=cidr, extra={"duration_seconds": duration, "expires_at": expires_at})
                 restart_singbox(); close_all_connections()
@@ -2900,7 +2963,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "trusted": trusted})
             if path == "/api/security":
                 sec = load_security()
-                for key in ["country_filter_enabled", "allowed_countries", "custom_allowed_cidrs", "custom_denied_cidrs", "autoban_enabled", "autoban_max_connections_per_ip", "autoban_duration_seconds", "http_public_warning_ack"]:
+                for key in ["country_filter_enabled", "allowed_countries", "custom_allowed_cidrs", "custom_denied_cidrs", "autoban_enabled", "autoban_max_connections_per_ip", "autoban_max_new_connections_per_minute", "autoban_window_seconds", "autoban_duration_seconds", "http_public_warning_ack"]:
                     if key in body:
                         sec[key] = body[key]
                 sec["custom_allowed_cidrs"] = normalize_cidr_list(sec.get("custom_allowed_cidrs") or [])

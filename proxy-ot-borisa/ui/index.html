@@ -122,9 +122,14 @@
       </div>
     </div>
     <div class="card full"><h2>Автоблокировка подозрительных IP</h2>
-      <label><input type="checkbox" id="secAutobanEnabled"> Включить автоблокировку по количеству активных соединений</label>
-      <div class="row"><label>Порог соединений <input id="secAutobanThreshold" type="number" min="10" step="1" style="width:120px"></label><label>Бан, секунд <input id="secAutobanDuration" type="number" min="60" step="60" style="width:140px"></label></div>
-      <div class="small muted">Это не ловит все попытки подбора паролей, но помогает отрезать IP, который уже создал слишком много активных соединений.</div>
+      <label><input type="checkbox" id="secAutobanEnabled"> Включить автоблокировку подозрительных IP</label>
+      <div class="row">
+        <label>Активных соединений/IP <input id="secAutobanThreshold" type="number" min="5" step="1" style="width:120px"></label>
+        <label>Новых соединений/IP за окно <input id="secAutobanNewThreshold" type="number" min="10" step="1" style="width:130px"></label>
+        <label>Окно, секунд <input id="secAutobanWindow" type="number" min="10" step="10" style="width:120px"></label>
+        <label>Бан, секунд <input id="secAutobanDuration" type="number" min="60" step="60" style="width:140px"></label>
+      </div>
+      <div class="small muted">Рекомендуемый старт: 40 активных соединений или 80 новых соединений за 60 секунд. Все автоблокировки попадают во вкладку «Блокировки», откуда их можно снять вручную.</div>
     </div>
     <div class="card full"><h2>Предупреждения</h2><div id="securityWarnings">—</div></div>
   </div></section>
@@ -144,6 +149,16 @@ const BASE=ingressBase();
 async function api(path,opt={}){const r=await fetch(BASE+path,{...opt,cache:'no-store',headers:{'Content-Type':'application/json',...(opt.headers||{})}});const t=await r.text();if(!r.ok)throw new Error(`HTTP ${r.status}: ${t||r.statusText}`);return t?JSON.parse(t):null}
 function post(path,obj={}){return api(path,{method:'POST',body:JSON.stringify(obj)})} function del(path){return api(path,{method:'DELETE'})}
 function $(id){return document.getElementById(id)} function msg(t,err=false){$('message').textContent=t;$('message').className=err?'bad':'muted'}
+function setBusy(on,label=''){
+  document.body.style.cursor=on?'progress':'';
+  document.querySelectorAll('button').forEach(b=>{ if(on){b.dataset.oldText=b.textContent; b.disabled=true;} else {b.disabled=false; if(b.dataset.oldText){b.textContent=b.dataset.oldText; delete b.dataset.oldText;}} });
+  if(label) msg(label);
+}
+async function runUiAction(label, fn, okLabel){
+  try{setBusy(true,label+'...'); const res=await fn(); msg(okLabel||('Готово: '+label)); return res;}
+  catch(e){msg((label?label+': ':'')+(e.message||e),true); throw e;}
+  finally{setBusy(false);}
+}
 function esc(s){return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;')}
 function fmtBytes(n){n=Number(n||0);if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';if(n<1073741824)return(n/1048576).toFixed(1)+' MB';return(n/1073741824).toFixed(2)+' GB'}
 function gbToBytes(g){return Math.round(Number(g||0)*1073741824)} function bytesToGb(b){return Number(b||0)/1073741824}
@@ -182,7 +197,9 @@ function renderSecurity(summary={}){
   $('secAllowCidrs').value=(sec.custom_allowed_cidrs||[]).join('\n');
   $('secDenyCidrs').value=(sec.custom_denied_cidrs||[]).join('\n');
   $('secAutobanEnabled').checked=!!sec.autoban_enabled;
-  $('secAutobanThreshold').value=sec.autoban_max_connections_per_ip||120;
+  $('secAutobanThreshold').value=sec.autoban_max_connections_per_ip||40;
+  $('secAutobanNewThreshold').value=sec.autoban_max_new_connections_per_minute||80;
+  $('secAutobanWindow').value=sec.autoban_window_seconds||60;
   $('secAutobanDuration').value=sec.autoban_duration_seconds||3600;
   $('secHttpAuth').innerHTML=summary.http_auth_enabled?'<span class="ok">включена</span>':'<span class="bad">выключена</span>';
   $('secSocksAuth').innerHTML=summary.socks_auth_enabled?'<span class="ok">включена</span>':'<span class="bad">выключена</span>';
@@ -192,7 +209,8 @@ function renderSecurity(summary={}){
   $('securityPills').innerHTML=[
     pill(sec.country_filter_enabled?'Геофильтр RU включён':'Геофильтр выключен',sec.country_filter_enabled?'green':'yellow'),
     pill('RU CIDR: '+(ru.count||0),ru.count?'blue':'yellow'),
-    pill(sec.autoban_enabled?'Автобан включён':'Автобан выключен',sec.autoban_enabled?'green':'yellow')
+    pill(sec.autoban_enabled?'Автобан включён':'Автобан выключен',sec.autoban_enabled?'green':'yellow'),
+    pill('Автобан: active '+(sec.autoban_max_connections_per_ip||40)+' / new '+(sec.autoban_max_new_connections_per_minute||80), sec.autoban_enabled?'blue':'gray')
   ].join('');
   $('securityWarnings').innerHTML=warnings.length?warnings.map(w=>`<div class="bad">⚠ ${esc(w)}</div>`).join(''):'<span class="ok">Критичных предупреждений нет.</span>';
 }
@@ -203,7 +221,9 @@ async function saveSecurity(){
     custom_allowed_cidrs:$('secAllowCidrs').value.split(/\n|,|;/).map(x=>x.trim()).filter(Boolean),
     custom_denied_cidrs:$('secDenyCidrs').value.split(/\n|,|;/).map(x=>x.trim()).filter(Boolean),
     autoban_enabled:$('secAutobanEnabled').checked,
-    autoban_max_connections_per_ip:Number($('secAutobanThreshold').value||120),
+    autoban_max_connections_per_ip:Number($('secAutobanThreshold').value||40),
+    autoban_max_new_connections_per_minute:Number($('secAutobanNewThreshold').value||80),
+    autoban_window_seconds:Number($('secAutobanWindow').value||60),
     autoban_duration_seconds:Number($('secAutobanDuration').value||3600)
   };
   await post('/api/security',body); await refreshAll();
@@ -254,7 +274,7 @@ async function blockUserPrompt(id){const duration=prompt('Срок блокир�
 async function unblockUser(id){await post('/api/users',{action:'unblock',id});await refreshAll()}
 async function deleteUser(id){if(confirm('Удалить пользователя?')){await del('/api/users/'+encodeURIComponent(id));await refreshAll()}}
 
-function renderBlocks(){const now=Date.now()/1000;const rows=state.blocks.map(b=>`<tr><td class="tag">${esc(b.cidr||b.ip)}</td><td>${esc(b.comment||'')}</td><td>${fmtTime(b.created_at)}</td><td>${b.expires_at?fmtTime(b.expires_at):'навсегда'} ${b.expires_at&&b.expires_at>now?`<br><span class="muted">осталось ${fmtDur(b.expires_at-now)}</span>`:''}</td><td><button onclick="unblock('${encodeURIComponent(b.cidr||b.ip)}')">Разблокировать</button></td></tr>`).join('');$('blocksTable').innerHTML=rows?`<table><thead><tr><th>IP/CIDR</th><th>Комментарий</th><th>Создана</th><th>Истекает</th><th></th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="muted">Блокировок нет.</div>'}
+function renderBlocks(){const now=Date.now()/1000;const rows=state.blocks.map(b=>{const src=b.source==='autoban'?pill('автобан','red'):pill('ручная','blue');const details=b.source==='autoban'?`<br><span class="muted">Причина: ${esc(b.reason||'—')}; значение ${esc(b.count||'—')}; порог ${esc(b.threshold||'—')}</span>`:'';return `<tr><td class="tag">${esc(b.cidr||b.ip)}</td><td>${src}<br>${esc(b.comment||'')}${details}</td><td>${fmtTime(b.created_at)}</td><td>${b.expires_at?fmtTime(b.expires_at):'навсегда'} ${b.expires_at&&b.expires_at>now?`<br><span class="muted">осталось ${fmtDur(b.expires_at-now)}</span>`:''}</td><td><button onclick="unblock('${encodeURIComponent(b.cidr||b.ip)}')">Разблокировать</button></td></tr>`}).join('');$('blocksTable').innerHTML=rows?`<div class="muted">Здесь отображаются ручные блокировки и IP, добавленные автоблокировкой. Любую запись можно снять кнопкой «Разблокировать».</div><table><thead><tr><th>IP/CIDR</th><th>Тип / комментарий</th><th>Создана</th><th>Истекает</th><th></th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="muted">Блокировок нет.</div>'}
 function renderTraffic(){const t=state.traffic||{},limit=Number(t.limit_bytes||0),used=Number(t.used_bytes||0),left=Math.max(0,limit-used),pct=limit?Math.min(100,used/limit*100):0;$('trafficLimit').textContent=limit?fmtBytes(limit):'не задан';$('trafficUsed').textContent=fmtBytes(used);$('trafficLeft').textContent=limit?fmtBytes(left):'—';$('trafficLeftShort').textContent=limit?fmtBytes(left):'—';$('trafficPercent').textContent=limit?pct.toFixed(1)+'%':'—';$('trafficBar').style.width=pct+'%';$('trafficLimitGb').value=limit?bytesToGb(limit).toFixed(2):'';$('trafficUsedGb').value=used?bytesToGb(used).toFixed(2):'';$('trafficNote').textContent='Обновлено: '+fmtTime(t.updated_at)}
 function renderConnections(){const groups=groupConnections(state.connections);$('connectionsGrouped').innerHTML=groups.map(g=>{const hosts=Object.entries(g.hosts).sort((a,b)=>b[1]-a[1]).slice(0,15).map(([h,c])=>pill(`${h} ×${c}`,'purple')).join('');const rows=g.items.slice(0,40).map(c=>{const m=c.metadata||{};return `<tr><td class="tag">${esc(m.host||m.domain||m.destinationIP||'—')}</td><td>${fmtBytes(c.download)}</td><td>${fmtBytes(c.upload)}</td><td class="tag">${esc((c.chains||[]).join(' → ')||'—')}</td></tr>`}).join('');return `<div class="client-box"><div class="client-head">${esc(g.ip)} — ${g.items.length} соединений, Down ${fmtBytes(g.down)}, Up ${fmtBytes(g.up)}</div><div class="client-body"><div>Основные сайты: ${hosts||'—'}</div><table><thead><tr><th>Адрес</th><th>Down</th><th>Up</th><th>Маршрут</th></tr></thead><tbody>${rows}</tbody></table></div></div>`}).join('')||'<div class="muted">Активных соединений нет.</div>'}
 function renderLogs(){$('logsBox').innerHTML=state.logs.map(e=>`<div class="log-row"><span class="muted">${esc(e.time)}</span> [${esc(e.stage)}] [${esc(e.result)}] actor=${esc(e.actor)} action=${esc(e.action)} target=${esc(e.target)} — ${esc(e.message)}</div>`).join('')||'Лог пуст.'}
@@ -269,7 +289,7 @@ async function selectServer(name){if(!name)name='auto';await post('/api/proxy/se
 async function savePriority(tag){const inp=$('prio-'+tag);const priority=Number(inp?.value||50);await post('/api/servers/priority',{tag,priority});msg('Приоритет сохранён: '+tag+' = '+priority);await refreshAll()}
 async function pingOne(name){if(!name||name==='—')name='auto';$('pingNote').textContent='Проверяю пинг '+name+'...';const r=await post('/api/ping',{names:[name]});state.serverPings={...state.serverPings,...Object.fromEntries(Object.entries(r.results||{}).map(([k,v])=>[k,{...v,checked_at:r.checked_at}]))};const val=r.results?.[name];const txt=val?.delay?val.delay+' мс':(val?.error||'ошибка');const el=$('ping-'+name);if(el)el.textContent=txt;$('pingNote').textContent='Пинг обновлён: '+name+' = '+txt;await loadStatus();renderServerSelector()}
 async function pingAll(){msg('Проверяю пинг всех серверов...');$('pingNote').textContent='Проверяю пинг всех серверов...';const r=await post('/api/ping',{names:state.servers.map(s=>s.tag)});for(const [k,v] of Object.entries(r.results||{})){state.serverPings[k]={...v,checked_at:r.checked_at};const el=$('ping-'+k);if(el)el.textContent=v.delay?v.delay+' мс':(v.error||'ошибка')}msg('Проверка пинга завершена');$('pingNote').textContent='Пинг всех серверов обновлён';await loadServers();await loadStatus();await loadLogs()}
-async function importServers(append){try{const mode=$('importMode').value;const body={mode,append,text:$('serversInput').value,url:$('subUrl').value};const r=await post('/api/servers/import',body);$('serverImportMsg').textContent=`Готово. Импортировано ${r.imported}, всего ${r.count}`;await refreshAll()}catch(e){$('serverImportMsg').textContent=e.message;msg(e.message,true)}}
+async function importServers(append){try{$('serverImportMsg').textContent='Идёт импорт серверов...';const mode=$('importMode').value;const body={mode,append,text:$('serversInput').value,url:$('subUrl').value};const r=await post('/api/servers/import',body);$('serverImportMsg').textContent=`Готово. Импортировано ${r.imported}, всего ${r.count}. sing-box перезапущен.`;msg(`Серверы обновлены: импортировано ${r.imported}, всего ${r.count}`);await refreshAll()}catch(e){$('serverImportMsg').textContent=e.message;msg(e.message,true)}}
 async function blockClientPrompt(ip){$('blockIp').value=ip;document.querySelector('[data-tab="blocks"]').click()}
 async function trustClient(ip){const name=prompt('Название клиента/устройства',ip);if(!name)return;await post('/api/trusted',{ip,name});await loadClients();await loadLogs()} async function untrustClient(ip){await del('/api/trusted/'+encodeURIComponent(ip));await loadClients();await loadLogs()}
 async function disconnectClient(ip){await post('/api/clients/disconnect',{ip});await loadClients();await loadConnections();await loadLogs()}
@@ -279,7 +299,34 @@ async function deleteServer(tag){if(!confirm('Удалить сервер '+tag+
 async function saveTraffic(){await post('/api/traffic',{limit_bytes:gbToBytes($('trafficLimitGb').value),used_bytes:gbToBytes($('trafficUsedGb').value)});await loadTraffic();await loadLogs()}
 // events
 for(const b of document.querySelectorAll('.tab-btn'))b.onclick=()=>{document.querySelectorAll('.tab-btn').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('tab-'+b.dataset.tab).classList.add('active')}
-$('btnHttp').onclick=()=>setPower('http',!state.status.power.http_enabled);$('btnSocks').onclick=()=>setPower('socks',!state.status.power.socks_enabled);$('btnTg').onclick=()=>setPower('telegram',!state.status.power.telegram_enabled);$('btnAll').onclick=()=>setPower('all',state.status.power.state!=='all_on');$('btnSelectServer').onclick=()=>selectServer($('serverSelect').value);$('btnPingCurrent').onclick=()=>pingOne(state.status.current.server);$('btnPingAllOverview').onclick=pingAll;$('btnRestart').onclick=async()=>{await post('/api/restart');await refreshAll()};$('btnReplaceServers').onclick=()=>importServers(false);$('btnAppendServers').onclick=()=>importServers(true);$('btnRefreshSub').onclick=async()=>{await post('/api/servers/refresh',{url:$('subUrl').value});await refreshAll()};$('btnPingServers').onclick=pingAll;$('btnAddBlock').onclick=async()=>{await post('/api/blocklist',{ip:$('blockIp').value,comment:$('blockComment').value,duration_seconds:$('blockDuration').value});await refreshAll()};$('btnRefreshConnections').onclick=loadConnections;$('btnCloseAll').onclick=async()=>{await post('/api/connections/close_all');await refreshAll()};$('btnSaveTraffic').onclick=saveTraffic;$('btnResetTraffic').onclick=async()=>{await post('/api/traffic/reset');await loadTraffic();await loadLogs()};$('btnTgEnable').onclick=()=>setPower('telegram',true);$('btnTgDisable').onclick=()=>setPower('telegram',false);$('btnTgRestart').onclick=async()=>{await post('/api/telegram',{action:'restart'});await refreshAll()};$('btnTgSecret').onclick=async()=>{if(confirm('Сгенерировать новый secret? Старые ссылки перестанут работать.')){await post('/api/telegram',{action:'regenerate_secret'});await refreshAll()}};$('btnTgSaveHost').onclick=async()=>{await post('/api/telegram',{action:'update',public_host:$('tgPublicHost').value});await refreshAll()};$('btnRefreshLogs').onclick=loadLogs;$('btnCreateUser').onclick=createUser;$('btnSaveSecurity').onclick=saveSecurity;$('btnUpdateRuList').onclick=async()=>{msg('Обновляю RU IP-список...');await post('/api/security/update_country',{country:'RU'});await refreshAll()};$('btnSaveRouting').onclick=()=>saveRouting(false);$('btnUpdateRoutingSources').onclick=()=>saveRouting(true);
+$('btnHttp').onclick=()=>runUiAction('Переключаю HTTP',()=>setPower('http',!state.status.power.http_enabled));
+$('btnSocks').onclick=()=>runUiAction('Переключаю SOCKS5',()=>setPower('socks',!state.status.power.socks_enabled));
+$('btnTg').onclick=()=>runUiAction('Переключаю Telegram',()=>setPower('telegram',!state.status.power.telegram_enabled));
+$('btnAll').onclick=()=>runUiAction('Переключаю все прокси',()=>setPower('all',state.status.power.state!=='all_on'));
+$('btnSelectServer').onclick=()=>runUiAction('Выбираю сервер',()=>selectServer($('serverSelect').value));
+$('btnPingCurrent').onclick=()=>runUiAction('Проверяю текущий сервер',()=>pingOne(state.status.current.server),'Пинг текущего сервера обновлён');
+$('btnPingAllOverview').onclick=()=>runUiAction('Проверяю пинг всех серверов',pingAll,'Пинг всех серверов обновлён');
+$('btnRestart').onclick=()=>runUiAction('Перезапускаю sing-box',async()=>{await post('/api/restart');await refreshAll()},'sing-box перезапущен');
+$('btnReplaceServers').onclick=()=>runUiAction('Импортирую серверы с заменой',()=>importServers(false));
+$('btnAppendServers').onclick=()=>runUiAction('Добавляю серверы',()=>importServers(true));
+$('btnRefreshSub').onclick=()=>runUiAction('Обновляю серверы из подписки',async()=>{ $('serverImportMsg').textContent='Обновляю подписку...'; const r=await post('/api/servers/refresh',{url:$('subUrl').value}); $('serverImportMsg').textContent=`Подписка обновлена. Всего серверов: ${r.count}.`; await refreshAll();},'Подписка серверов обновлена');
+$('btnPingServers').onclick=()=>runUiAction('Проверяю пинг всех серверов',pingAll,'Пинг всех серверов обновлён');
+$('btnAddBlock').onclick=()=>runUiAction('Добавляю блокировку',async()=>{await post('/api/blocklist',{ip:$('blockIp').value,comment:$('blockComment').value,duration_seconds:$('blockDuration').value});await refreshAll()},'IP добавлен в блокировки');
+$('btnRefreshConnections').onclick=()=>runUiAction('Обновляю соединения',loadConnections,'Соединения обновлены');
+$('btnCloseAll').onclick=()=>runUiAction('Закрываю все соединения',async()=>{await post('/api/connections/close_all');await refreshAll()},'Все соединения закрыты');
+$('btnSaveTraffic').onclick=()=>runUiAction('Сохраняю лимит трафика',saveTraffic,'Лимит трафика сохранён');
+$('btnResetTraffic').onclick=()=>runUiAction('Сбрасываю трафик',async()=>{await post('/api/traffic/reset');await loadTraffic();await loadLogs()},'Счётчик трафика сброшен');
+$('btnTgEnable').onclick=()=>runUiAction('Включаю Telegram',()=>setPower('telegram',true));
+$('btnTgDisable').onclick=()=>runUiAction('Выключаю Telegram',()=>setPower('telegram',false));
+$('btnTgRestart').onclick=()=>runUiAction('Перезапускаю Telegram proxy',async()=>{await post('/api/telegram',{action:'restart'});await refreshAll()},'Telegram proxy перезапущен');
+$('btnTgSecret').onclick=()=>{if(confirm('Сгенерировать новый secret? Старые ссылки перестанут работать.'))runUiAction('Генерирую новый Telegram secret',async()=>{await post('/api/telegram',{action:'regenerate_secret'});await refreshAll()},'Telegram secret обновлён')};
+$('btnTgSaveHost').onclick=()=>runUiAction('Сохраняю публичный адрес Telegram',async()=>{await post('/api/telegram',{action:'update',public_host:$('tgPublicHost').value});await refreshAll()},'Публичный адрес Telegram сохранён');
+$('btnRefreshLogs').onclick=()=>runUiAction('Обновляю логи',loadLogs,'Логи обновлены');
+$('btnCreateUser').onclick=()=>runUiAction('Создаю пользователя',createUser,'Пользователь создан');
+$('btnSaveSecurity').onclick=()=>runUiAction('Сохраняю безопасность',saveSecurity,'Настройки безопасности сохранены');
+$('btnUpdateRuList').onclick=()=>runUiAction('Обновляю RU IP-список',async()=>{msg('Скачиваю RU IP-список...');const r=await post('/api/security/update_country',{country:'RU'});msg(`RU IP-список обновлён: ${r.count||0} CIDR`);await refreshAll()},'RU IP-список обновлён');
+$('btnSaveRouting').onclick=()=>runUiAction('Сохраняю маршрутизацию',()=>saveRouting(false),'Маршрутизация сохранена');
+$('btnUpdateRoutingSources').onclick=()=>runUiAction('Обновляю списки маршрутизации',async()=>{ $('routingStatusText').textContent='Обновляю источники списков...'; await saveRouting(true); $('routingStatusText').textContent='Списки обновлены: '+new Date().toLocaleString('ru-RU');},'Списки маршрутизации обновлены');
 refreshAll();setInterval(refreshAll,10000);
 </script>
 </body>

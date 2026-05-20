@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.11.3"
+APP_VERSION = "1.12.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -33,8 +33,11 @@ CLASH_API = "http://127.0.0.1:9090"
 SESSION_BREAK_SECONDS = 60
 RECENT_CLIENT_SECONDS = 300
 OFFLINE_CLIENT_KEEP_SECONDS = 30 * 24 * 3600
-EVENT_LOG_LIMIT = 1000
+EVENT_LOG_LIMIT = 2000
 SINGBOX_STARTED_AT = 0
+MONITOR_INTERVAL_SECONDS = 15
+AUTOBAN_CHECK_INTERVAL_SECONDS = 30
+connections_cache = {"items": [], "updated_at": 0, "last_autoban_at": 0}
 
 RULES_DIR = DATA_DIR / "rules"
 RULES_DIR.mkdir(parents=True, exist_ok=True)
@@ -190,6 +193,22 @@ def iso_time(ts=None):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts or time.time()))
 
 
+
+def event_category(stage, result=""):
+    stage = str(stage or "").upper()
+    result = str(result or "").upper()
+    if "ERROR" in result or "ERROR" in stage or "FATAL" in result:
+        return "errors"
+    if stage in {"SECURITY", "BLOCK", "TRUSTED", "COUNTRY", "AUTOBAN"} or "AUTOBAN" in stage:
+        return "security"
+    if stage in {"CLIENT", "CLIENTS", "USER", "USERS", "MTG", "TELEGRAM"}:
+        return "clients"
+    if stage in {"CONNECTION", "CONNECTIONS", "TRAFFIC"}:
+        return "connections"
+    if stage in {"ROUTING", "SERVERS", "PING", "VPN", "SING_BOX", "POWER"}:
+        return "proxy"
+    return "app"
+
 def append_event(stage, result, message, actor="system", action="", target="", extra=None):
     try:
         path = data_path("events.json")
@@ -199,6 +218,7 @@ def append_event(stage, result, message, actor="system", action="", target="", e
         events.append({
             "ts": time.time(),
             "time": iso_time(),
+            "category": event_category(stage, result),
             "stage": str(stage),
             "result": str(result),
             "actor": str(actor or "system"),
@@ -316,7 +336,7 @@ def load_security():
             sec[key] = fallback
     # One-time migration from the overly aggressive v1.11.1 defaults.
     # Preserve custom values if the user already changed them to something else.
-    if sec.get("autoban_defaults_version") != "1.11.3":
+    if sec.get("autoban_defaults_version") != "1.12.0":
         if sec.get("autoban_max_connections_per_ip") == 40:
             sec["autoban_max_connections_per_ip"] = 120
         if sec.get("autoban_max_new_connections_per_minute") == 80:
@@ -324,7 +344,7 @@ def load_security():
         sec["autoban_exempt_trusted_clients"] = bool(sec.get("autoban_exempt_trusted_clients", True))
         sec["autoban_exempt_registered_users"] = bool(sec.get("autoban_exempt_registered_users", True))
         sec["autoban_exempt_allowlist"] = bool(sec.get("autoban_exempt_allowlist", True))
-        sec["autoban_defaults_version"] = "1.11.3"
+        sec["autoban_defaults_version"] = "1.12.0"
     return sec
 
 
@@ -393,6 +413,54 @@ def fetch_country_cidrs(country="RU"):
     save_security(sec)
     log("SECURITY", "COUNTRY_UPDATE", f"Updated country list {cc}: {len(cidrs)} CIDR", actor="backend", action="country_update", target=cc)
     return payload
+
+
+def country_cidr_details(country="RU", limit=20, full=False):
+    cc = str(country or "RU").upper()
+    src = COUNTRY_SOURCES.get(cc, {})
+    data = read_json(country_rule_file(cc), {})
+    cidrs = normalize_cidr_list(data.get("cidrs") if isinstance(data, dict) else [])
+    try:
+        limit = max(1, min(500, int(limit or 20)))
+    except Exception:
+        limit = 20
+    path = country_rule_file(cc)
+    size_bytes = path.stat().st_size if path.exists() else 0
+    payload = {
+        "country": cc,
+        "source": data.get("source") if isinstance(data, dict) else src.get("url"),
+        "configured_source": src.get("url"),
+        "updated_at": data.get("updated_at") if isinstance(data, dict) else None,
+        "count": len(cidrs),
+        "size_bytes": size_bytes,
+        "path": str(path),
+        "first": cidrs[:limit],
+        "last": cidrs[-limit:] if cidrs else [],
+    }
+    if full:
+        payload["cidrs"] = cidrs
+    return payload
+
+
+def check_country_ip(ip, country="RU"):
+    raw_ip = str(ip or "").strip()
+    if not raw_ip:
+        raise ValueError("IP не указан")
+    try:
+        addr = ipaddress.ip_address(raw_ip)
+    except Exception:
+        raise ValueError("Некорректный IP")
+    cidrs = load_country_cidrs(country)
+    matched = None
+    for c in cidrs:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+            if addr in net:
+                matched = str(net)
+                break
+        except Exception:
+            continue
+    return {"ip": raw_ip, "country": str(country or "RU").upper(), "in_list": bool(matched), "matched_cidr": matched, "count": len(cidrs)}
 
 
 def allowed_source_cidrs_from_security(sec=None):
@@ -550,9 +618,9 @@ def run_security_autoban(connections):
         # Never autoban trusted/allowed IPs. This is critical for routers/gateways:
         # one trusted router may have hundreds or thousands of legitimate LAN connections behind it.
         if ip_in_any_cidr(ip, exempt_cidrs):
-            if ip not in exempt_seen:
-                log("SECURITY", "AUTOBAN_SKIP", f"Skip autoban for trusted/allowed IP {ip}", actor="backend", action="autoban_skip", target=ip)
-                exempt_seen.add(ip)
+            # Trusted/allowed clients are expected to be noisy, especially routers/gateways.
+            # Do not log every skip: polling /connections every few seconds would flood logs.
+            exempt_seen.add(ip)
             continue
         # Never autoban a known authenticated user, unless this protection is explicitly disabled.
         username = get_connection_username(conn)
@@ -2110,6 +2178,23 @@ def start_singbox():
     start_mtg()
 
 
+
+
+def validate_singbox_config():
+    """Generate and validate config without replacing the running process."""
+    cfg = write_config()
+    try:
+        proc = subprocess.run([SINGBOX_BIN, "check", "-c", str(SINGBOX_CONFIG)], capture_output=True, text=True, timeout=20)
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "sing-box check failed").strip()
+            raise RuntimeError(err[-2000:])
+        return {"ok": True, "config": str(SINGBOX_CONFIG)}
+    except FileNotFoundError:
+        # Should never happen inside the add-on, but keep the API error explicit.
+        raise RuntimeError("sing-box binary not found")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("sing-box check timeout")
+
 def restart_singbox():
     with lock:
         stop_mtg()
@@ -2145,6 +2230,41 @@ def get_connections_raw():
     except Exception:
         pass
     return []
+
+def get_monitored_connections(force=False, run_autoban=True):
+    """Return connections with a small cache.
+
+    The UI can ask several endpoints at once (/status, /clients, /connections).
+    Without a cache every call hits sing-box, updates traffic and runs security checks.
+    This function makes normal polling cheap, while manual refresh can still force reload.
+    """
+    global connections_cache
+    now = time.time()
+    with lock:
+        age = now - float(connections_cache.get("updated_at") or 0)
+        if not force and age < MONITOR_INTERVAL_SECONDS:
+            return list(connections_cache.get("items") or [])
+
+    conns = get_connections_raw()
+    try:
+        update_traffic(conns)
+    except Exception as e:
+        log("TRAFFIC", "ERROR", f"Failed to update traffic: {e}")
+
+    with lock:
+        connections_cache["items"] = conns
+        connections_cache["updated_at"] = now
+        last_autoban_at = float(connections_cache.get("last_autoban_at") or 0)
+
+    if run_autoban and now - last_autoban_at >= AUTOBAN_CHECK_INTERVAL_SECONDS:
+        try:
+            run_security_autoban(conns)
+        except Exception as e:
+            log("SECURITY", "ERROR", f"Autoban check failed: {e}", action="autoban_check")
+        with lock:
+            connections_cache["last_autoban_at"] = now
+
+    return conns
 
 
 def get_conn_id(conn):
@@ -2708,7 +2828,7 @@ def vpn_status(proxies=None):
     return {"connected": ok, "server": server, "mode": current.get("mode"), "delay": delay, "checked_at": time.time(), "message": "VPN-сервер выбран" if ok else "VPN-сервер не выбран или список серверов пуст"}
 
 
-def get_events(limit=200):
+def get_events(limit=200, category="all"):
     events = read_json(data_path("events.json"), [])
     if not isinstance(events, list):
         return []
@@ -2716,6 +2836,8 @@ def get_events(limit=200):
         limit = max(1, min(int(limit), EVENT_LOG_LIMIT))
     except Exception:
         limit = 200
+    if category and category != "all":
+        events = [e for e in events if str(e.get("category") or event_category(e.get("stage"), e.get("result"))) == category]
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
@@ -2773,14 +2895,16 @@ class Handler(BaseHTTPRequestHandler):
             if not path.startswith("/api"):
                 return self.serve_file(path)
             if path == "/api/status":
-                options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_connections_raw(); update_traffic(conns)
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "security": security_summary(options=options), "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_monitored_connections(force=False, run_autoban=True); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/proxies":
                 return self.send_json(get_proxies())
             if path == "/api/connections":
-                conns = get_connections_raw(); update_traffic(conns); run_security_autoban(conns); return self.send_json({"connections": conns})
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                conns = get_monitored_connections(force=(qs.get("force", ["0"])[0] == "1"), run_autoban=True); return self.send_json({"connections": conns, "updated_at": connections_cache.get("updated_at", 0)})
             if path == "/api/clients":
-                conns = get_connections_raw(); update_traffic(conns); run_security_autoban(conns); return self.send_json({"clients": build_clients(conns)})
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                conns = get_monitored_connections(force=(qs.get("force", ["0"])[0] == "1"), run_autoban=True); return self.send_json({"clients": build_clients(conns), "updated_at": connections_cache.get("updated_at", 0)})
             if path == "/api/servers":
                 settings = load_settings(); servers = load_servers(); return self.send_json({"servers": servers, "subscription_url": settings.get("subscription_url", ""), "pings": load_server_pings(), "auto_tags": auto_server_tags(servers)})
             if path == "/api/routing":
@@ -2796,7 +2920,20 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/trusted":
                 return self.send_json({"trusted": load_trusted()})
             if path == "/api/security":
-                return self.send_json({"security": load_security(), "summary": security_summary()})
+                return self.send_json({"security": load_security(), "summary": security_summary(), "ru": country_cidr_details("RU", limit=20, full=False)})
+            if path.startswith("/api/security/country/"):
+                parsed = urllib.parse.urlparse(self.path)
+                qs = urllib.parse.parse_qs(parsed.query)
+                country = urllib.parse.unquote(normalize_request_path(parsed.path).split("/api/security/country/", 1)[1] or "RU")
+                limit = (qs.get("limit") or [20])[-1]
+                full = (qs.get("full") or ["0"])[-1] in ["1", "true", "yes"]
+                return self.send_json(country_cidr_details(country, limit=limit, full=full))
+            if path == "/api/security/check_ip":
+                parsed = urllib.parse.urlparse(self.path)
+                qs = urllib.parse.parse_qs(parsed.query)
+                ip = (qs.get("ip") or [""])[-1]
+                country = (qs.get("country") or ["RU"])[-1]
+                return self.send_json(check_country_ip(ip, country))
             if path == "/api/servers/priority":
                 tag = str(body.get("tag") or "")
                 priority = int(body.get("priority") or 50)
@@ -2835,7 +2972,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/logs":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 limit = (qs.get("limit") or [200])[-1]
-                return self.send_json({"events": get_events(limit)})
+                category = (qs.get("category") or ["all"])[-1]
+                return self.send_json({"events": get_events(limit, category), "category": category, "limit": limit, "max_retention": EVENT_LOG_LIMIT})
             if path.startswith("/api/geo/"):
                 ip = urllib.parse.unquote(path.split("/api/geo/", 1)[1]); return self.send_json(geo_lookup(ip))
             self.send_json({"error": "not found"}, 404)
@@ -3088,8 +3226,14 @@ class Handler(BaseHTTPRequestHandler):
                 save_security(sec)
                 removed_autobans = purge_exempt_autobans(sec)
                 log("SECURITY", "SAVE", "Security settings saved", actor="ui", action="security_save", extra={"country_filter_enabled": sec.get("country_filter_enabled"), "autoban_enabled": sec.get("autoban_enabled")})
+                # Saving security settings must be fast and must not restart sing-box.
+                # Use /api/security/apply explicitly when the user wants rules applied.
+                return self.send_json({"ok": True, "security": load_security(), "summary": security_summary(), "removed_autobans": removed_autobans, "needs_apply": True, "message": "Настройки безопасности сохранены. Нажми «Применить правила», чтобы обновить sing-box."})
+            if path == "/api/security/apply":
+                validate_singbox_config()
                 restart_singbox()
-                return self.send_json({"ok": True, "security": load_security(), "summary": security_summary(), "removed_autobans": removed_autobans})
+                log("SECURITY", "APPLY", "Security rules applied", actor="ui", action="security_apply")
+                return self.send_json({"ok": True, "summary": security_summary(), "message": "Правила безопасности проверены и применены."})
             if path == "/api/security/update_country":
                 country = str(body.get("country") or "RU").upper()
                 payload = fetch_country_cidrs(country)
@@ -3097,7 +3241,8 @@ class Handler(BaseHTTPRequestHandler):
                 # not a rule change by itself. Restarting here made the UI look like the whole
                 # add-on rebooted and hid the operation result. Security settings save/apply will
                 # restart sing-box when the filter is enabled or changed.
-                return self.send_json({"ok": True, "country": country, "count": payload.get("count"), "updated_at": payload.get("updated_at"), "summary": security_summary(), "message": "RU IP-список обновлён. Если фильтр уже включён, нажми Сохранить безопасность для применения."})
+                details = country_cidr_details(country, limit=20, full=False)
+                return self.send_json({"ok": True, "country": country, "count": payload.get("count"), "updated_at": payload.get("updated_at"), "summary": security_summary(), "details": details, "message": "RU IP-список обновлён. Нажми «Применить правила», если геофильтр включён."})
             if path == "/api/routing":
                 routing = load_routing()
                 for key in ["mode", "auto_update_enabled", "auto_update_interval_hours", "manual_include_domains", "manual_include_ips", "manual_exclude_domains", "manual_exclude_ips", "presets", "sources"]:

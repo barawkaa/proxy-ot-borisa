@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.17.0"
+APP_VERSION = "1.18.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -884,7 +884,7 @@ def system_check_report():
     options = load_options()
     settings = load_settings()
     servers = load_servers()
-    users = load_users()
+    users = load_proxy_users()
     routing = load_routing()
     security = load_security()
     ports = load_runtime_ports()
@@ -3563,7 +3563,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.16.0"
+    server_version = "ProxyOtBorisa/1.18.0"
 
     def log_message(self, fmt, *args):
         return
@@ -3677,40 +3677,6 @@ class Handler(BaseHTTPRequestHandler):
                 ip = (qs.get("ip") or [""])[-1]
                 country = (qs.get("country") or ["RU"])[-1]
                 return self.send_json(check_country_ip(ip, country))
-            if path == "/api/servers/priority":
-                tag = str(body.get("tag") or "")
-                profile = body.get("profile")
-                priority = priority_value_from_profile(profile, body.get("priority") or 50)
-                servers = load_servers()
-                changed = False
-                for srv in servers:
-                    if srv.get("tag") == tag:
-                        srv["priority"] = max(1, min(999, priority))
-                        changed = True
-                        break
-                if not changed:
-                    raise ValueError("Сервер не найден")
-                save_servers(servers)
-                log("SERVERS", "PRIORITY", f"Priority updated for {tag}: {priority}", actor="ui", action="server_priority", target=tag, extra={"priority": priority})
-                restart_singbox()
-                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
-            if path == "/api/servers/reorder":
-                order = body.get("order") or []
-                if not isinstance(order, list):
-                    raise ValueError("order должен быть списком tag")
-                servers = load_servers()
-                by_tag = {s.get("tag"): s for s in servers}
-                new_servers = []
-                for i, tag in enumerate(order):
-                    srv = by_tag.pop(str(tag), None)
-                    if srv:
-                        srv["priority"] = 10 + i * 10
-                        new_servers.append(srv)
-                new_servers.extend(by_tag.values())
-                save_servers(new_servers)
-                log("SERVERS", "REORDER", "Server priorities reordered", actor="ui", action="server_reorder", extra={"count": len(new_servers)})
-                restart_singbox()
-                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
             if path == "/api/ports":
                 return self.send_json(ports_summary())
             if path == "/api/traffic":
@@ -4084,9 +4050,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not changed:
                     raise ValueError("Сервер не найден")
                 save_servers(servers)
-                log("SERVERS", "PRIORITY", f"Priority updated for {tag}: {priority}", actor="ui", action="server_priority", target=tag, extra={"priority": priority})
-                restart_singbox()
-                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
+                log("SERVERS", "PRIORITY", f"Priority saved for {tag}: {priority}", actor="ui", action="server_priority", target=tag, extra={"priority": priority, "applied": False})
+                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "needs_apply": True, "message": "Профиль сохранён. Чтобы изменить auto-пул без задержек по одному серверу, нажмите «Сохранить всё и применить»."})
             if path == "/api/servers/reorder":
                 order = body.get("order") or []
                 if not isinstance(order, list):
@@ -4104,6 +4069,31 @@ class Handler(BaseHTTPRequestHandler):
                 log("SERVERS", "REORDER", "Server priorities reordered", actor="ui", action="server_reorder", extra={"count": len(new_servers)})
                 restart_singbox()
                 return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
+            if path == "/api/servers/priorities":
+                updates = body.get("updates") or []
+                apply = bool(body.get("apply", True))
+                if not isinstance(updates, list):
+                    raise ValueError("updates должен быть списком")
+                servers = load_servers()
+                by_tag = {str(s.get("tag")): s for s in servers}
+                changed = []
+                for upd in updates:
+                    if not isinstance(upd, dict):
+                        continue
+                    tag = str(upd.get("tag") or "")
+                    if not tag or tag not in by_tag:
+                        continue
+                    priority = priority_value_from_profile(upd.get("profile"), upd.get("priority") or by_tag[tag].get("priority") or 50)
+                    by_tag[tag]["priority"] = max(1, min(999, priority))
+                    changed.append({"tag": tag, "priority": by_tag[tag]["priority"], "profile": priority_profile_from_value(by_tag[tag]["priority"])})
+                save_servers(servers)
+                applied = False
+                if apply and changed:
+                    validate_singbox_config()
+                    restart_singbox()
+                    applied = True
+                log("SERVERS", "PRIORITIES", f"Saved server priority profiles: {len(changed)}", actor="ui", action="server_priorities", extra={"count": len(changed), "applied": applied})
+                return self.send_json({"ok": True, "changed": changed, "applied": applied, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "message": "Профили сохранены" + (" и применены." if applied else ".")})
             if path == "/api/traffic":
                 traffic = load_traffic()
                 if "limit_bytes" in body:
@@ -4169,9 +4159,24 @@ def main():
     signal.signal(signal.SIGINT, shutdown_handler)
     load_servers()
     settings = load_settings(); settings = update_proxy_lifecycle(settings, load_telegram_settings().get("enabled", False)); save_settings(settings)
-    start_singbox()
+
+    # Start the management UI first. If sing-box is slow to start or its config is
+    # broken, Home Assistant Ingress should still open the panel and show diagnostics
+    # instead of displaying a generic "Error loading addon" page.
     server = ThreadingHTTPServer(("0.0.0.0", BACKEND_PORT), Handler)
     log("BACKEND", "READY", f"Management UI listening on 0.0.0.0:{BACKEND_PORT}")
+
+    def bootstrap_proxy():
+        global last_error
+        try:
+            start_singbox()
+        except Exception as e:
+            last_error = str(e)
+            log("SING_BOX", "BOOT_ERROR", f"sing-box bootstrap failed: {e}", action="singbox_boot_error")
+            traceback.print_exc()
+
+    threading.Thread(target=bootstrap_proxy, name="bootstrap-sing-box", daemon=True).start()
+
     try:
         server.serve_forever()
     finally:

@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.7"
+APP_VERSION = "1.19.8"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -1927,61 +1927,6 @@ def active_mtg_users_from_stats():
     return result
 
 
-def get_mtg_client_connections():
-    """Return Telegram MTProto clients identified by registered secret when possible.
-
-    For Telegram MTProto the login/password fields are irrelevant. The identity
-    is the per-user MTProto secret. With a shared external port the OS TCP table
-    cannot tell which secret was used, so the primary source is mtg-multi
-    /stats, where counters are grouped by configured user/secret name. Real TCP
-    peers are kept only as a fallback when stats are unavailable.
-    """
-    real_peers = list_tcp_peers_for_local_port(telegram_shared_port())
-    active_stats = active_mtg_users_from_stats()
-
-    # Correct path: identify by secret/user from mtg-multi stats. This works
-    # even when client IP changes because of mobile Internet/NAT.
-    if active_stats:
-        peer_count = len(real_peers)
-        result = []
-        for stat in active_stats:
-            user = stat.get('user') or {}
-            username = stat.get('username') or user.get('username') or user.get('id') or 'unknown'
-            result.append({
-                'ip': 'telegram:' + str(username),
-                'display_ip': 'Telegram secret: ' + str(username),
-                'source': 'telegram_mtproto',
-                'identity_method': 'telegram_secret',
-                'user_id': user.get('id') or '',
-                'username': user.get('username') or str(username),
-                'user_name': user.get('name') or str(username),
-                'connections': max(1, int(stat.get('connections') or 1)),
-                'bytes_in': int(stat.get('bytes_in') or 0),
-                'bytes_out': int(stat.get('bytes_out') or 0),
-                'last_seen': stat.get('last_seen') or '',
-                'telegram_port': telegram_shared_port(),
-                'tcp_peer_count': peer_count,
-                'unmapped': False,
-            })
-        return result
-
-    # Fallback: mtg-multi stats are unavailable/empty, but TCP peers exist. In
-    # this mode we intentionally do not guess a registered user by IP.
-    result = []
-    for peer in real_peers:
-        peer['user_id'] = ''
-        peer['username'] = ''
-        peer['user_name'] = ''
-        peer['connections'] = 1
-        peer['bytes_in'] = 0
-        peer['bytes_out'] = 0
-        peer['last_seen'] = ''
-        peer['telegram_port'] = telegram_shared_port()
-        peer['identity_method'] = 'tcp_peer_fallback'
-        peer['unmapped'] = True
-        result.append(peer)
-    return result
-
 def infer_server_priority(server):
     tag = str(server.get("tag") or "").upper()
     # Российские/локальные узлы держим как резерв: они часто дают лучший ping,
@@ -3493,53 +3438,117 @@ def list_tcp_peers_for_local_port(port):
 
 
 def get_mtg_client_connections():
-    """Return real TCP clients connected to MTProto port(s).
+    """Return Telegram MTProto clients identified by registered secret when possible.
 
-    With multi-secret MTProto one external port can serve several users. The OS
-    TCP table only shows remote IP:port, not which MTProto secret was used.
-    Therefore we must NOT create one client per registered user on the same
-    port: that caused fake/offline clients after creating users.
-
-    If exactly one active Telegram user exists for a port, we can attribute the
-    peer to that user. If several users share the port, the peer is shown by IP
-    only with a Telegram MTProto service label.
+    Important: a Telegram client can reach MTProto through another registered
+    SOCKS/HTTP client, for example a router. In that case sing-box sees the
+    transport connection as the router, but the real MTProto identity is the
+    Telegram secret accepted by mtg-multi. Therefore /stats is authoritative;
+    TCP peers are only a diagnostic fallback and must not override the secret.
     """
-    users_by_port = {}
-    for user in load_proxy_users():
-        if not user.get('enabled', True) or not user.get('telegram_enabled', True) or is_user_block_active(user):
-            continue
-        try:
-            port = int(user.get('telegram_port') or 0)
-        except Exception:
-            continue
-        if port <= 0:
-            continue
-        users_by_port.setdefault(port, []).append(user)
+    real_peers = list_tcp_peers_for_local_port(telegram_shared_port())
+    active_stats = active_mtg_users_from_stats()
 
-    peers = []
-    seen = set()
-    for port, users in users_by_port.items():
-        single_user = users[0] if len(users) == 1 else None
-        for peer in list_tcp_peers_for_local_port(port):
-            identity = (peer.get('ip'), peer.get('port'), port, peer.get('state'))
-            if identity in seen:
-                continue
-            seen.add(identity)
-            if single_user:
-                peer['user_id'] = single_user.get('id')
-                peer['username'] = single_user.get('username')
-                peer['user_name'] = single_user.get('name')
-            else:
-                peer['user_id'] = ''
-                peer['username'] = ''
-                peer['user_name'] = ''
-                peer['ambiguous_user'] = True
-                peer['possible_users'] = [u.get('username') for u in users if u.get('username')]
-            peer['telegram_port'] = port
-            peers.append(peer)
-    return peers
+    # Authoritative path: mtg-multi stats by configured secret/user name.
+    if active_stats:
+        peer_count = len(real_peers)
+        result = []
+        for stat in active_stats:
+            user = stat.get('user') or {}
+            username = stat.get('username') or user.get('username') or user.get('id') or 'unknown'
+            result.append({
+                'ip': 'telegram:' + str(username),
+                'display_ip': 'Telegram secret: ' + str(username),
+                'source': 'telegram_mtproto',
+                'identity_method': 'telegram_secret',
+                'user_id': user.get('id') or '',
+                'username': user.get('username') or str(username),
+                'user_name': user.get('name') or str(username),
+                'connections': max(1, int(stat.get('connections') or 1)),
+                'bytes_in': int(stat.get('bytes_in') or 0),
+                'bytes_out': int(stat.get('bytes_out') or 0),
+                'last_seen': stat.get('last_seen') or '',
+                'telegram_port': telegram_shared_port(),
+                'tcp_peer_count': peer_count,
+                'unmapped': False,
+            })
+        return result
+
+    # Fallback only: stats are empty/unavailable. Do not guess user by IP,
+    # because mobile Internet/NAT/router transport makes that unreliable.
+    result = []
+    for peer in real_peers:
+        peer['user_id'] = ''
+        peer['username'] = ''
+        peer['user_name'] = ''
+        peer['connections'] = 1
+        peer['bytes_in'] = 0
+        peer['bytes_out'] = 0
+        peer['last_seen'] = ''
+        peer['telegram_port'] = telegram_shared_port()
+        peer['identity_method'] = 'tcp_peer_fallback'
+        peer['unmapped'] = True
+        result.append(peer)
+    return result
+
+
+def normalize_endpoint_host(value):
+    """Normalize a host or host:port value for local endpoint comparison."""
+    host = str(value or '').strip().lower()
+    if not host:
+        return ''
+    if '://' in host:
+        try:
+            host = urllib.parse.urlparse(host).hostname or host
+        except Exception:
+            pass
+    if host.startswith('[') and ']' in host:
+        return host[1:host.find(']')].lower()
+    if ':' in host and host.count(':') == 1:
+        host = host.rsplit(':', 1)[0]
+    return host.strip().strip('.')
+
+
+def own_mtproto_hosts():
+    """Known public hosts that point to this add-on MTProto endpoint."""
+    hosts = {'localhost', '127.0.0.1', '::1'}
+    tg = load_telegram_settings()
+    for val in [tg.get('public_host'), tg.get('host'), tg.get('server')]:
+        h = normalize_endpoint_host(val)
+        if h:
+            hosts.add(h)
+    for user in load_proxy_users():
+        for key in ['public_host', 'telegram_public_host']:
+            h = normalize_endpoint_host(user.get(key))
+            if h:
+                hosts.add(h)
+    return hosts
+
+
+def is_connection_to_own_mtproto(conn):
+    """True when a SOCKS/HTTP client is only transporting a Telegram MTProto
+    connection to this same add-on.
+
+    Example: phone -> router SOCKS client -> this server:MTProto. The transport
+    belongs to the router, but the Telegram user must be counted by secret from
+    mtg-multi stats. Without this filter the UI falsely shows the router as the
+    Telegram user.
+    """
+    meta = conn.get('metadata') or {}
+    try:
+        dport = int(meta.get('destinationPort') or meta.get('destination_port') or conn.get('destinationPort') or 0)
+    except Exception:
+        dport = 0
+    if dport != int(telegram_shared_port()):
+        return False
+    host = normalize_endpoint_host(get_host(conn) or meta.get('destinationIP') or meta.get('destination_ip') or meta.get('host') or meta.get('domain'))
+    if not host:
+        return False
+    return host in own_mtproto_hosts()
 
 def geo_lookup(ip):
+    if str(ip or '').startswith('telegram:'):
+        return {"country": "Telegram MTProto", "region": "secret", "city": "", "isp": "mtg-multi", "org": "local add-on identity", "asn": "", "timezone": "", "lat": None, "lon": None, "source": "telegram_secret"}
     cache = read_json(data_path("geo_cache.json"), {})
     if ip in cache and time.time() - cache[ip].get("ts", 0) < 86400:
         return cache[ip]["data"]
@@ -3678,6 +3687,10 @@ def build_clients(connections):
     grouped = {}
 
     for conn in connections:
+        if is_connection_to_own_mtproto(conn):
+            # Transport-only connection to this add-on's MTProto listener.
+            # The real Telegram client is identified separately by secret via mtg-multi stats.
+            continue
         ip = get_source_ip(conn)
         if not ip or ip == '—' or is_loopback_ip(ip):
             continue

@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.2"
+APP_VERSION = "1.19.3"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -2039,6 +2039,16 @@ def server_to_singbox_outbound(server):
         item.pop(key, None)
     return item
 
+
+
+
+def clean_server_for_config(server):
+    """Compatibility helper used by subscription JSON export.
+
+    Keeps subscription JSON readable and valid for sing-box by removing
+    UI/backend-only management fields.
+    """
+    return server_to_singbox_outbound(server)
 
 def load_server_pings():
     data = read_json(data_path("server_pings.json"), {})

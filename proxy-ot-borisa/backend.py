@@ -7,6 +7,7 @@ import re
 import signal
 import socket
 import subprocess
+import shutil
 import sys
 import threading
 import secrets
@@ -18,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.16.0"
+APP_VERSION = "1.17.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -28,6 +29,23 @@ RUNTIME_PORTS_FILE = Path("/data/runtime_ports.json")
 SUBSCRIPTION_INFO_FILE = Path("/data/subscription_info.json")
 SUBSCRIPTION_SERVERS_FILE = Path("/data/subscription_servers.json")
 PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port"]
+BACKUP_VERSION = 1
+BACKUP_FILES = {
+    "settings": "settings.json",
+    "runtime_ports": "runtime_ports.json",
+    "servers": "servers.json",
+    "server_pings": "server_pings.json",
+    "routing": "routing.json",
+    "users": "users.json",
+    "trusted": "trusted.json",
+    "blocklist": "blocked_ips.json",
+    "security": "security.json",
+    "traffic": "traffic.json",
+    "subscription_info": "subscription_info.json",
+    "subscription_servers": "subscription_servers.json",
+    "telegram": "telegram.json",
+    "events": "events.json",
+}
 SINGBOX_BIN = "/usr/local/bin/sing-box"
 SINGBOX_CONFIG = TMP_DIR / "sing-box.json"
 BACKEND_PORT = 8099
@@ -796,6 +814,161 @@ def load_settings():
 def save_settings(settings):
     settings["updated_at"] = time.time()
     write_json(data_path("settings.json"), settings)
+
+
+def export_backup(include_events=False):
+    files = {}
+    for key, fname in BACKUP_FILES.items():
+        if key == "events" and not include_events:
+            continue
+        path = data_path(fname)
+        if path.exists():
+            files[key] = read_json(path, None)
+    options = load_options()
+    ports = load_runtime_ports()
+    return {
+        "format": "proxy_ot_borisa_backup",
+        "backup_version": BACKUP_VERSION,
+        "app": APP_NAME,
+        "app_version": APP_VERSION,
+        "created_at": time.time(),
+        "created_time": iso_time(),
+        "note": "Резервная копия содержит настройки, пользователей, серверы и секреты. Храните файл безопасно.",
+        "addon_options_snapshot": {
+            "http_proxy_port": options.get("http_proxy_port"),
+            "socks_proxy_port": options.get("socks_proxy_port"),
+            "telegram_proxy_port": options.get("telegram_proxy_port"),
+            "http_auth_enabled": options.get("http_auth_enabled"),
+            "socks_auth_enabled": options.get("socks_auth_enabled"),
+            "telegram_proxy_enabled": options.get("telegram_proxy_enabled"),
+        },
+        "active_ports_snapshot": ports,
+        "files": files,
+    }
+
+
+def import_backup(payload, mode="replace"):
+    if not isinstance(payload, dict):
+        raise ValueError("Некорректный JSON резервной копии")
+    if payload.get("format") != "proxy_ot_borisa_backup":
+        raise ValueError("Это не резервная копия Proxy от Бориса")
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        raise ValueError("В резервной копии нет блока files")
+    restored = []
+    for key, fname in BACKUP_FILES.items():
+        if key not in files:
+            continue
+        if key == "events" and mode != "replace_with_logs":
+            continue
+        write_json(data_path(fname), files[key])
+        restored.append(key)
+    log("BACKUP", "IMPORT", f"Backup imported: {', '.join(restored)}", actor="ui", action="backup_import", extra={"restored": restored, "mode": mode})
+    return restored
+
+
+def _port_listening(port):
+    try:
+        port = int(port)
+        with socket.create_connection(("127.0.0.1", port), timeout=0.6):
+            return True
+    except Exception:
+        return False
+
+
+def _check_item(status, title, details="", fix="", group="system"):
+    return {"status": status, "title": title, "details": details, "fix": fix, "group": group}
+
+
+def system_check_report():
+    options = load_options()
+    settings = load_settings()
+    servers = load_servers()
+    users = load_users()
+    routing = load_routing()
+    security = load_security()
+    ports = load_runtime_ports()
+    blocked = load_blocked()
+    sub = load_subscription_info()
+    ru = country_cidr_details("RU", limit=3, full=False)
+    items = []
+
+    singbox_ok = bool(singbox_process and singbox_process.poll() is None)
+    items.append(_check_item("ok" if singbox_ok else "bad", "sing-box", "Основной прокси-процесс работает." if singbox_ok else f"sing-box не запущен: {last_error or 'ошибка неизвестна'}", "Проверьте логи и перезапустите add-on." if not singbox_ok else "", "proxy"))
+
+    if servers:
+        items.append(_check_item("ok", "VPN-серверы", f"Добавлено серверов: {len(servers)}.", "", "vpn"))
+    else:
+        items.append(_check_item("bad", "VPN-серверы", "Серверы не добавлены.", "Откройте вкладку VPN-серверы и добавьте JSON, vless:// ссылки или ссылку подписки.", "vpn"))
+
+    cur = current_server_info(get_proxies())
+    if cur.get("server") and cur.get("server") != "—":
+        items.append(_check_item("ok" if cur.get("delay") else "warn", "Текущий VPN-сервер", f"Выбран: {cur.get('server')}; пинг: {cur.get('delay') or 'не проверен'}.", "Нажмите «Пинг всех», если пинг не отображается.", "vpn"))
+    else:
+        items.append(_check_item("warn", "Текущий VPN-сервер", "Фактический сервер не подтверждён.", "Проверьте серверы и выберите auto или конкретный сервер.", "vpn"))
+
+    if sub.get("url"):
+        traffic = sub.get("traffic") or {}
+        total = traffic.get("total") or 0
+        items.append(_check_item("ok", "VPN-подписка", f"Ссылка сохранена. Серверов: {sub.get('servers_count') or len(servers)}. Лимит: {format_bytes(total) if total else 'не указан'}.", "", "vpn"))
+    else:
+        items.append(_check_item("warn", "VPN-подписка", "Ссылка подписки не сохранена.", "Если провайдер выдаёт ссылку подписки, добавьте её во вкладке VPN-серверы.", "vpn"))
+
+    mode = routing.get("mode") or "all_proxy"
+    items.append(_check_item("ok", "Маршрутизация", f"Текущий режим: {mode}.", "Для режима обхода блокировок обычно удобен blocked_plus_manual.", "routing"))
+    enabled_sources = [s for s in routing.get("sources", []) if s.get("enabled")]
+    if mode == "blocked_plus_manual" and not enabled_sources and not routing.get("manual_include_domains") and not routing.get("manual_include_ips"):
+        items.append(_check_item("warn", "Списки маршрутизации", "Режим списков включён, но источники/ручные правила пустые.", "Включите источники или добавьте домены вручную.", "routing"))
+    else:
+        items.append(_check_item("ok", "Списки маршрутизации", f"Включено источников: {len(enabled_sources)}; ручных доменов: {len(routing.get('manual_include_domains') or [])}.", "", "routing"))
+
+    if users:
+        enabled_users = [u for u in users if u.get("enabled", True)]
+        items.append(_check_item("ok", "Пользователи", f"Пользователей: {len(users)}, активных: {len(enabled_users)}.", "", "users"))
+    else:
+        items.append(_check_item("warn", "Пользователи", "Отдельные пользователи не созданы.", "Создайте пользователей для людей/устройств, чтобы видеть и управлять доступом отдельно.", "users"))
+
+    if options.get("http_auth_enabled"):
+        items.append(_check_item("ok", "HTTP auth", "HTTP-прокси защищён авторизацией.", "", "security"))
+    else:
+        items.append(_check_item("warn", "HTTP auth", "HTTP-прокси без авторизации. Это опасно, если порт открыт в интернет.", "Не пробрасывайте HTTP-порт наружу или включите авторизацию, если клиенты её поддерживают.", "security"))
+    items.append(_check_item("ok" if options.get("socks_auth_enabled") else "warn", "SOCKS5 auth", "SOCKS5 защищён авторизацией." if options.get("socks_auth_enabled") else "SOCKS5 без авторизации.", "Включите SOCKS5 auth для внешнего доступа." if not options.get("socks_auth_enabled") else "", "security"))
+    items.append(_check_item("ok" if security.get("autoban_enabled") else "warn", "Автоблокировка", "Автоблокировка включена." if security.get("autoban_enabled") else "Автоблокировка выключена.", "Включите автоблокировку, если прокси доступен из интернета." if not security.get("autoban_enabled") else "", "security"))
+    if security.get("country_filter_enabled"):
+        items.append(_check_item("ok" if ru.get("count") else "warn", "RU CIDR геофильтр", f"Включён. CIDR в базе: {ru.get('count') or 0}.", "Обновите RU IP-список, если база пустая." if not ru.get("count") else "", "security"))
+    else:
+        items.append(_check_item("warn", "RU CIDR геофильтр", "Геофильтр выключен.", "Можно включить, если прокси нужен только из России и доверенных сетей.", "security"))
+    items.append(_check_item("ok", "Блокировки", f"Активных записей блокировки: {len(blocked)}.", "", "security"))
+
+    for key, label in [("http_proxy_port", "HTTP"), ("socks_proxy_port", "SOCKS5"), ("telegram_proxy_port", "Telegram")]:
+        port = ports.get(key) or options.get(key)
+        if not port:
+            continue
+        listening = _port_listening(port)
+        required = key != "telegram_proxy_port" or bool(options.get("telegram_proxy_enabled"))
+        status = "ok" if listening else ("warn" if not required else "bad")
+        items.append(_check_item(status, f"Порт {label} {port}", "Сервис слушает порт." if listening else "Порт сейчас не отвечает внутри add-on.", "Проверьте, включён ли соответствующий прокси и применены ли порты." if not listening and required else "", "ports"))
+
+    try:
+        du = shutil.disk_usage(str(DATA_DIR))
+        free_pct = du.free / du.total * 100 if du.total else 0
+        items.append(_check_item("ok" if free_pct > 10 else "warn", "Свободное место", f"Свободно: {format_bytes(du.free)} из {format_bytes(du.total)} ({free_pct:.1f}%).", "Освободите место или уменьшите логи, если свободно меньше 10%.", "system"))
+    except Exception:
+        pass
+
+    bad = sum(1 for i in items if i["status"] == "bad")
+    warn = sum(1 for i in items if i["status"] == "warn")
+    ok = sum(1 for i in items if i["status"] == "ok")
+    overall = "bad" if bad else ("warn" if warn else "ok")
+    return {"overall": overall, "ok": ok, "warn": warn, "bad": bad, "items": items, "generated_at": time.time(), "wizard_completed": bool(settings.get("wizard_completed"))}
+
+
+def mark_wizard_completed(value=True):
+    settings = load_settings()
+    settings["wizard_completed"] = bool(value)
+    settings["wizard_completed_at"] = time.time() if value else None
+    save_settings(settings)
+    return settings
 
 
 def merge_routing_defaults(value):
@@ -3452,6 +3625,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/status":
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_monitored_connections(force=False, run_autoban=True); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
                 return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+            if path == "/api/system/check":
+                return self.send_json(system_check_report())
+            if path == "/api/backup":
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                include_events = str((q.get("include_events") or ["0"])[0]).lower() in ["1", "true", "yes"]
+                return self.send_json(export_backup(include_events=include_events))
             if path == "/api/proxies":
                 return self.send_json(get_proxies())
             if path == "/api/connections":
@@ -3934,6 +4113,17 @@ class Handler(BaseHTTPRequestHandler):
                 save_traffic(traffic); log("TRAFFIC", "SAVE", "Traffic settings saved", actor="ui", action="traffic_save", extra={"limit_bytes": traffic.get("limit_bytes"), "used_bytes": traffic.get("used_bytes")}); return self.send_json({"ok": True, "traffic": traffic})
             if path == "/api/traffic/reset":
                 traffic = load_traffic(); traffic["used_bytes"] = 0; traffic["connection_bytes"] = {}; traffic["started_at"] = time.time(); save_traffic(traffic); log("TRAFFIC", "RESET", "Traffic counter reset", actor="ui", action="traffic_reset"); return self.send_json({"ok": True, "traffic": traffic})
+            if path == "/api/backup/import":
+                payload = body.get("backup") if isinstance(body, dict) and "backup" in body else body
+                mode = body.get("mode", "replace") if isinstance(body, dict) else "replace"
+                restored = import_backup(payload, mode=mode)
+                validate_singbox_config()
+                restart_singbox()
+                return self.send_json({"ok": True, "restored": restored, "message": "Резервная копия восстановлена. sing-box проверен и перезапущен."})
+            if path == "/api/wizard/complete":
+                settings = mark_wizard_completed(bool(body.get("completed", True)))
+                log("WIZARD", "SAVE", "Wizard state changed", actor="ui", action="wizard_complete", extra={"completed": settings.get("wizard_completed")})
+                return self.send_json({"ok": True, "settings": settings, "check": system_check_report()})
             if path == "/api/restart":
                 restart_singbox(); return self.send_json({"ok": True})
             self.send_json({"error": "not found"}, 404)

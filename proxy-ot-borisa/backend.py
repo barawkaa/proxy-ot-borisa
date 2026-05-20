@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.10.1"
+APP_VERSION = "1.11.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -129,6 +129,40 @@ PRESET_DOMAINS = {
     "spotify": ["spotify.com", "scdn.co", "spotifycdn.com", "spoti.fi"],
 }
 
+DEFAULT_SECURITY = {
+    "country_filter_enabled": False,
+    "allowed_countries": ["RU"],
+    "country_source": "ipdeny",
+    "custom_allowed_cidrs": [],
+    "custom_denied_cidrs": [],
+    "autoban_enabled": True,
+    "autoban_max_connections_per_ip": 120,
+    "autoban_duration_seconds": 3600,
+    "http_public_warning_ack": False,
+    "updated_at": 0,
+    "country_lists": {}
+}
+
+PRIVATE_SOURCE_CIDRS = [
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10"
+]
+
+COUNTRY_SOURCES = {
+    "RU": {
+        "name": "Russia IPv4 — IPdeny",
+        "url": "https://www.ipdeny.com/ipblocks/data/countries/ru.zone",
+        "path": "/data/rules/country_ru.json",
+    }
+}
+
+
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -238,6 +272,180 @@ def load_options():
             merged[key] = defaults[key]
     return merged
 
+
+
+def deep_merge(default, actual):
+    if not isinstance(actual, dict):
+        actual = {}
+    result = dict(default)
+    for k, v in actual.items():
+        if isinstance(result.get(k), dict) and isinstance(v, dict):
+            result[k] = deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def load_security():
+    sec = read_json(data_path("security.json"), {})
+    sec = deep_merge(DEFAULT_SECURITY, sec if isinstance(sec, dict) else {})
+    if not isinstance(sec.get("allowed_countries"), list):
+        sec["allowed_countries"] = ["RU"]
+    if not isinstance(sec.get("custom_allowed_cidrs"), list):
+        sec["custom_allowed_cidrs"] = []
+    if not isinstance(sec.get("custom_denied_cidrs"), list):
+        sec["custom_denied_cidrs"] = []
+    if not isinstance(sec.get("country_lists"), dict):
+        sec["country_lists"] = {}
+    return sec
+
+
+def save_security(sec):
+    sec = deep_merge(DEFAULT_SECURITY, sec if isinstance(sec, dict) else {})
+    sec["updated_at"] = time.time()
+    write_json(data_path("security.json"), sec)
+    return sec
+
+
+def normalize_cidr_list(values):
+    result = []
+    seen = set()
+    for item in values or []:
+        if item is None:
+            continue
+        raw = str(item).strip()
+        if not raw:
+            continue
+        try:
+            if "/" in raw:
+                net = ipaddress.ip_network(raw, strict=False)
+            else:
+                addr = ipaddress.ip_address(raw)
+                net = ipaddress.ip_network(raw + ("/32" if addr.version == 4 else "/128"), strict=False)
+            cidr = str(net)
+            if cidr not in seen:
+                seen.add(cidr)
+                result.append(cidr)
+        except Exception:
+            continue
+    return result
+
+
+def country_rule_file(country):
+    cc = str(country or "").upper()
+    return data_path(f"rules/country_{cc.lower()}.json")
+
+
+def load_country_cidrs(country):
+    cc = str(country or "").upper()
+    data = read_json(country_rule_file(cc), {})
+    cidrs = data.get("cidrs") if isinstance(data, dict) else []
+    return normalize_cidr_list(cidrs)
+
+
+def fetch_country_cidrs(country="RU"):
+    cc = str(country or "RU").upper()
+    src = COUNTRY_SOURCES.get(cc)
+    if not src:
+        raise ValueError(f"Источник для страны {cc} не настроен")
+    text = fetch_text(src["url"], timeout=30)
+    cidrs = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        cidrs.append(line)
+    cidrs = normalize_cidr_list(cidrs)
+    if not cidrs:
+        raise ValueError(f"Список {cc} пустой или не распознан")
+    payload = {"country": cc, "source": src["url"], "updated_at": time.time(), "count": len(cidrs), "cidrs": cidrs}
+    write_json(country_rule_file(cc), payload)
+    sec = load_security()
+    sec.setdefault("country_lists", {})[cc] = {"updated_at": payload["updated_at"], "count": len(cidrs), "source": src["url"]}
+    save_security(sec)
+    log("SECURITY", "COUNTRY_UPDATE", f"Updated country list {cc}: {len(cidrs)} CIDR", actor="backend", action="country_update", target=cc)
+    return payload
+
+
+def allowed_source_cidrs_from_security(sec=None):
+    sec = sec or load_security()
+    allowed = list(PRIVATE_SOURCE_CIDRS)
+    for cc in sec.get("allowed_countries") or []:
+        allowed.extend(load_country_cidrs(cc))
+    allowed.extend(sec.get("custom_allowed_cidrs") or [])
+    return normalize_cidr_list(allowed)
+
+
+def denied_source_cidrs_from_security(sec=None):
+    sec = sec or load_security()
+    return normalize_cidr_list(sec.get("custom_denied_cidrs") or [])
+
+
+def security_summary(sec=None, options=None):
+    sec = sec or load_security()
+    options = options or load_options()
+    allowed = allowed_source_cidrs_from_security(sec)
+    denied = denied_source_cidrs_from_security(sec)
+    warnings = []
+    if not bool(options.get("http_auth_enabled")):
+        warnings.append("HTTP-прокси без авторизации. Если порт 2081 открыт наружу — это открытый публичный proxy.")
+    if sec.get("country_filter_enabled") and not any(load_country_cidrs(cc) for cc in (sec.get("allowed_countries") or [])):
+        warnings.append("Фильтр по стране включён, но список CIDR ещё не загружен. Нажми обновление списка RU.")
+    return {
+        "country_filter_enabled": bool(sec.get("country_filter_enabled")),
+        "allowed_countries": sec.get("allowed_countries") or [],
+        "allowed_cidrs_count": len(allowed),
+        "denied_cidrs_count": len(denied),
+        "custom_allowed_cidrs": sec.get("custom_allowed_cidrs") or [],
+        "custom_denied_cidrs": sec.get("custom_denied_cidrs") or [],
+        "autoban_enabled": bool(sec.get("autoban_enabled")),
+        "autoban_max_connections_per_ip": int(sec.get("autoban_max_connections_per_ip") or 0),
+        "autoban_duration_seconds": int(sec.get("autoban_duration_seconds") or 0),
+        "country_lists": sec.get("country_lists") or {},
+        "warnings": warnings,
+        "http_auth_enabled": bool(options.get("http_auth_enabled")),
+        "socks_auth_enabled": bool(options.get("socks_auth_enabled")),
+        "ports": {"http": options.get("http_proxy_port"), "socks": options.get("socks_proxy_port"), "telegram": options.get("telegram_proxy_port")},
+    }
+
+
+def run_security_autoban(connections):
+    sec = load_security()
+    if not sec.get("autoban_enabled"):
+        return []
+    threshold = int(sec.get("autoban_max_connections_per_ip") or 0)
+    if threshold <= 0:
+        return []
+    counts = {}
+    for conn in connections or []:
+        ip = get_source_ip(conn)
+        if not ip or ip == "—" or is_private_ip(ip) or is_loopback_ip(ip):
+            continue
+        counts[ip] = counts.get(ip, 0) + 1
+    added = []
+    if not counts:
+        return added
+    items = load_blocked()
+    existing = {x.get("cidr") for x in items}
+    duration = int(sec.get("autoban_duration_seconds") or 3600)
+    for ip, count in counts.items():
+        if count < threshold:
+            continue
+        cidr = normalize_ip_cidr(ip)
+        if cidr in existing:
+            continue
+        expires_at = time.time() + duration if duration else None
+        items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": f"Автоблокировка: {count} активных соединений", "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at})
+        existing.add(cidr)
+        added.append({"ip": ip, "cidr": cidr, "connections": count})
+    if added:
+        save_blocked(items)
+        log("SECURITY", "AUTOBAN", f"Autobanned {len(added)} IP(s)", actor="backend", action="autoban", extra={"items": added})
+        try:
+            restart_singbox()
+        except Exception as e:
+            log("SECURITY", "WARN", f"Autoban restart failed: {e}")
+    return added
 
 def data_path(name):
     return DATA_DIR / name
@@ -1613,6 +1821,17 @@ def make_singbox_config():
     if blocked_cidrs:
         rules.append({"source_ip_cidr": blocked_cidrs, "outbound": "block"})
 
+    security = load_security()
+    denied_source_cidrs = denied_source_cidrs_from_security(security)
+    if denied_source_cidrs:
+        rules.append({"source_ip_cidr": denied_source_cidrs, "outbound": "block"})
+    if security.get("country_filter_enabled"):
+        allowed_source_cidrs = allowed_source_cidrs_from_security(security)
+        if allowed_source_cidrs:
+            # Разрешаем только частные сети + выбранные страны/ручные CIDR.
+            # Всё остальное блокируется до обычной маршрутизации.
+            rules.append({"source_ip_cidr": allowed_source_cidrs, "invert": True, "outbound": "block"})
+
     # Power switches: if a port is disabled, block it before any routing logic.
     if not settings.get("socks_enabled", True):
         rules.append({"inbound": [socks_tag], "outbound": "block"})
@@ -2327,7 +2546,7 @@ def get_events(limit=200):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.10.1"
+    server_version = "ProxyOtBorisa/1.11.0"
 
     def log_message(self, fmt, *args):
         return
@@ -2382,13 +2601,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_file(path)
             if path == "/api/status":
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_connections_raw(); update_traffic(conns)
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "security": security_summary(options=options), "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/proxies":
                 return self.send_json(get_proxies())
             if path == "/api/connections":
-                conns = get_connections_raw(); update_traffic(conns); return self.send_json({"connections": conns})
+                conns = get_connections_raw(); update_traffic(conns); run_security_autoban(conns); return self.send_json({"connections": conns})
             if path == "/api/clients":
-                conns = get_connections_raw(); update_traffic(conns); return self.send_json({"clients": build_clients(conns)})
+                conns = get_connections_raw(); update_traffic(conns); run_security_autoban(conns); return self.send_json({"clients": build_clients(conns)})
             if path == "/api/servers":
                 settings = load_settings(); servers = load_servers(); return self.send_json({"servers": servers, "subscription_url": settings.get("subscription_url", ""), "pings": load_server_pings(), "auto_tags": auto_server_tags(servers)})
             if path == "/api/routing":
@@ -2403,6 +2622,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"blocked": load_blocked()})
             if path == "/api/trusted":
                 return self.send_json({"trusted": load_trusted()})
+            if path == "/api/security":
+                return self.send_json({"security": load_security(), "summary": security_summary()})
             if path == "/api/servers/priority":
                 tag = str(body.get("tag") or "")
                 priority = int(body.get("priority") or 50)
@@ -2677,6 +2898,22 @@ class Handler(BaseHTTPRequestHandler):
                 trusted = load_trusted(); trusted[ip] = {"name": name, "trusted_at": time.time()}; save_trusted(trusted)
                 log("TRUSTED", "ADD", f"Trusted client {ip} as {name}", actor="ui", action="trusted_add", target=ip)
                 return self.send_json({"ok": True, "trusted": trusted})
+            if path == "/api/security":
+                sec = load_security()
+                for key in ["country_filter_enabled", "allowed_countries", "custom_allowed_cidrs", "custom_denied_cidrs", "autoban_enabled", "autoban_max_connections_per_ip", "autoban_duration_seconds", "http_public_warning_ack"]:
+                    if key in body:
+                        sec[key] = body[key]
+                sec["custom_allowed_cidrs"] = normalize_cidr_list(sec.get("custom_allowed_cidrs") or [])
+                sec["custom_denied_cidrs"] = normalize_cidr_list(sec.get("custom_denied_cidrs") or [])
+                save_security(sec)
+                log("SECURITY", "SAVE", "Security settings saved", actor="ui", action="security_save", extra={"country_filter_enabled": sec.get("country_filter_enabled"), "autoban_enabled": sec.get("autoban_enabled")})
+                restart_singbox()
+                return self.send_json({"ok": True, "security": load_security(), "summary": security_summary()})
+            if path == "/api/security/update_country":
+                country = str(body.get("country") or "RU").upper()
+                payload = fetch_country_cidrs(country)
+                restart_singbox()
+                return self.send_json({"ok": True, "country": country, "count": payload.get("count"), "summary": security_summary()})
             if path == "/api/routing":
                 routing = load_routing()
                 for key in ["mode", "auto_update_enabled", "auto_update_interval_hours", "manual_include_domains", "manual_include_ips", "manual_exclude_domains", "manual_exclude_ips", "presets", "sources"]:

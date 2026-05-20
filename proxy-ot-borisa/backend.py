@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.3"
+APP_VERSION = "1.19.6"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -806,10 +806,7 @@ def run_security_autoban(connections):
     if added:
         save_blocked(items)
         log("SECURITY", "AUTOBAN", f"Autobanned {len(added)} IP(s)", actor="backend", action="autoban", extra={"items": added})
-        try:
-            restart_singbox()
-        except Exception as e:
-            log("SECURITY", "WARN", f"Autoban restart failed: {e}")
+        restart_singbox_background('autoban')
     return added
 
 def data_path(name):
@@ -2286,6 +2283,27 @@ def load_subscription_servers():
     return data
 
 
+
+def convert_subscription_url_to_json(url, save=True):
+    url = str(url or "").strip()
+    if not url:
+        raise ValueError("URL подписки не указан")
+    parsed = fetch_and_parse_subscription(url, timeout=30)
+    info = save_subscription_info(parsed.get("subscription_info") or {})
+    servers = parsed.get("servers") or []
+    if not servers:
+        return {"ok": False, "servers": [], "count": 0, "errors": parsed.get("errors", []), "subscription_info": info}
+    payload = save_subscription_servers(servers, url) if save else {
+        "updated_at": int(time.time()),
+        "source_url": url,
+        "count": len(servers),
+        "servers": [clean_server_for_config(dict(s)) for s in servers if isinstance(s, dict)],
+    }
+    settings = load_settings()
+    settings["subscription_url"] = url
+    save_settings(settings)
+    return {"ok": True, **payload, "errors": parsed.get("errors", []), "subscription_info": info}
+
 def priority_profile_from_value(value):
     try:
         p = int(value)
@@ -2779,6 +2797,114 @@ def parse_vless_uri(uri, index=0):
     return outbound
 
 
+
+def parse_trojan_uri(uri, index=0):
+    uri = uri.strip()
+    if not uri.lower().startswith("trojan://"):
+        raise ValueError("Это не trojan:// ссылка")
+    parsed = urllib.parse.urlparse(uri)
+    password = urllib.parse.unquote(parsed.username or "")
+    server = parsed.hostname or ""
+    port = parsed.port or 443
+    query = urllib.parse.parse_qs(parsed.query)
+    q = {k: v[-1] for k, v in query.items() if v}
+    tag = safe_tag(parsed.fragment or q.get("remarks") or q.get("name") or f"TROJAN-{index}", f"TROJAN-{index}")
+    outbound = {"type": "trojan", "tag": tag, "server": server, "server_port": int(port), "password": password}
+    security = (q.get("security") or "tls").lower()
+    if security != "none":
+        sni = q.get("sni") or q.get("serverName") or q.get("peer") or server
+        fp = q.get("fp") or q.get("fingerprint") or "chrome"
+        outbound["tls"] = {"enabled": True, "server_name": sni, "utls": {"enabled": True, "fingerprint": fp}}
+    transport_type = (q.get("type") or q.get("transport") or "tcp").lower()
+    if transport_type == "ws":
+        transport = {"type": "ws"}
+        if q.get("path"):
+            transport["path"] = q.get("path")
+        if q.get("host"):
+            transport["headers"] = {"Host": q.get("host")}
+        outbound["transport"] = transport
+    elif transport_type == "grpc":
+        outbound["transport"] = {"type": "grpc", "service_name": q.get("serviceName") or q.get("service_name") or ""}
+    return outbound
+
+
+def decode_b64_piece(value):
+    value = str(value or "").strip()
+    padding = "=" * (-len(value) % 4)
+    for decoder in (base64.urlsafe_b64decode, base64.b64decode):
+        try:
+            return decoder((value + padding).encode()).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+    return ""
+
+
+def parse_shadowsocks_uri(uri, index=0):
+    uri = uri.strip()
+    if not uri.lower().startswith(("ss://", "shadowsocks://")):
+        raise ValueError("Это не ss:// ссылка")
+    if uri.lower().startswith("shadowsocks://"):
+        uri = "ss://" + uri.split("://", 1)[1]
+    raw = uri[5:]
+    frag = ""
+    if "#" in raw:
+        raw, frag = raw.split("#", 1)
+    tag = safe_tag(urllib.parse.unquote(frag) or f"SS-{index}", f"SS-{index}")
+    parsed = urllib.parse.urlparse("ss://" + raw)
+    userinfo = ""
+    server = parsed.hostname or ""
+    port = parsed.port or 0
+    if parsed.username:
+        userinfo = urllib.parse.unquote(parsed.username)
+        maybe = decode_b64_piece(userinfo)
+        if maybe and ":" in maybe:
+            userinfo = maybe
+    else:
+        decoded = decode_b64_piece(raw.split("?", 1)[0])
+        if decoded and "@" in decoded:
+            creds, endpoint = decoded.rsplit("@", 1)
+            userinfo = creds
+            if ":" in endpoint:
+                server, port_s = endpoint.rsplit(":", 1)
+                port = int(port_s)
+    if not userinfo or ":" not in userinfo:
+        raise ValueError("Не удалось прочитать method/password")
+    method, password = userinfo.split(":", 1)
+    if not server or not port:
+        raise ValueError("Не удалось прочитать server/port")
+    return {"type": "shadowsocks", "tag": tag, "server": server, "server_port": int(port), "method": method, "password": password}
+
+
+def parse_vmess_uri(uri, index=0):
+    uri = uri.strip()
+    if not uri.lower().startswith("vmess://"):
+        raise ValueError("Это не vmess:// ссылка")
+    raw = uri.split("://", 1)[1].strip()
+    decoded = decode_b64_piece(raw)
+    if not decoded:
+        raise ValueError("Не удалось декодировать vmess base64")
+    data = json.loads(decoded)
+    tag = safe_tag(data.get("ps") or data.get("name") or f"VMESS-{index}", f"VMESS-{index}")
+    server = data.get("add") or data.get("server") or ""
+    port = int(data.get("port") or 443)
+    uuid = data.get("id") or data.get("uuid") or ""
+    outbound = {"type": "vmess", "tag": tag, "server": server, "server_port": port, "uuid": uuid, "security": data.get("scy") or data.get("security") or "auto"}
+    net = str(data.get("net") or data.get("type") or "tcp").lower()
+    tls_mode = str(data.get("tls") or "").lower()
+    sni = data.get("sni") or data.get("host") or server
+    if tls_mode in ["tls", "reality"]:
+        outbound["tls"] = {"enabled": True, "server_name": sni, "utls": {"enabled": True, "fingerprint": data.get("fp") or "chrome"}}
+    if net == "ws":
+        transport = {"type": "ws"}
+        if data.get("path"):
+            transport["path"] = data.get("path")
+        if data.get("host"):
+            transport["headers"] = {"Host": data.get("host")}
+        outbound["transport"] = transport
+    elif net == "grpc":
+        outbound["transport"] = {"type": "grpc", "service_name": data.get("path") or data.get("serviceName") or ""}
+    return outbound
+
 def try_decode_base64(text):
     stripped = re.sub(r"\s+", "", text.strip())
     if not stripped:
@@ -2791,7 +2917,7 @@ def try_decode_base64(text):
     for decoder in (base64.b64decode, base64.urlsafe_b64decode):
         try:
             decoded = decoder((stripped + padding).encode()).decode("utf-8", errors="ignore")
-            if "vless://" in decoded.lower() or decoded.strip().startswith(('{','[')) or re.search(r"(?m)^\s*proxies\s*:", decoded):
+            if any(x in decoded.lower() for x in ["vless://", "vmess://", "trojan://", "ss://", "shadowsocks://"]) or decoded.strip().startswith(('{','[')) or re.search(r"(?m)^\s*proxies\s*:", decoded):
                 return decoded
         except Exception:
             pass
@@ -2818,14 +2944,23 @@ def parse_servers_payload(text):
         errors.append(f"JSON: {e}")
     format_errors = list(errors)
     errors = []
-    candidate = text if "vless://" in text.lower() else try_decode_base64(text)
-    links = re.findall(r"vless://[^\s\r\n]+", candidate, flags=re.IGNORECASE)
+    known_link_markers = ["vless://", "vmess://", "trojan://", "ss://", "shadowsocks://"]
+    candidate = text if any(x in text.lower() for x in known_link_markers) else try_decode_base64(text)
+    link_patterns = [
+        (r"vless://[^\s\r\n]+", parse_vless_uri),
+        (r"vmess://[^\s\r\n]+", parse_vmess_uri),
+        (r"trojan://[^\s\r\n]+", parse_trojan_uri),
+        (r"(?:ss|shadowsocks)://[^\s\r\n]+", parse_shadowsocks_uri),
+    ]
     servers = []
-    for i, link in enumerate(links):
-        try:
-            servers.append(parse_vless_uri(link, i))
-        except Exception as e:
-            errors.append(f"{link[:60]}...: {e}")
+    idx = 0
+    for pattern, parser in link_patterns:
+        for link in re.findall(pattern, candidate, flags=re.IGNORECASE):
+            try:
+                servers.append(parser(link, idx))
+                idx += 1
+            except Exception as e:
+                errors.append(f"{link[:60]}...: {e}")
     if servers:
         validated = validate_servers(normalize_subscription_tags(servers))
         validated["errors"].extend(errors)
@@ -3691,10 +3826,18 @@ def refresh_auto_after_ping(results=None):
         # Запускаем именно delay у группы auto — это заставляет urltest обновить выбор сейчас,
         # а не ждать очередные 2 минуты. Если API конкретной версии sing-box не даст выбрать
         # best вручную, delay всё равно обновит внутренний результат urltest.
+        # Сначала пробуем явно подсказать группе auto лучший сервер.
+        # В разных версиях sing-box Clash API это может быть не поддержано,
+        # поэтому ошибки не считаем критичными.
+        if best:
+            try:
+                clash_request("PUT", "/proxies/auto", {"name": best}, timeout=5)
+            except Exception as e:
+                details["error"] = str(e)
         try:
             clash_request("GET", f"/proxies/{urllib.parse.quote('auto')}/delay?timeout=5000&url={urllib.parse.quote('https://www.gstatic.com/generate_204')}", timeout=8)
         except Exception as e:
-            details["error"] = str(e)
+            details["error"] = (details.get("error") + " | " if details.get("error") else "") + str(e)
         try:
             clash_request("PUT", "/proxies/Proxy", {"name": "auto"}, timeout=5)
         except Exception as e:
@@ -4221,8 +4364,8 @@ class Handler(BaseHTTPRequestHandler):
                     items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at, "source": "manual"})
                     save_blocked(items)
                     log("BLOCK", "ADD", f"Blocked {cidr}", actor="ui", action="block_add", target=cidr, extra={"duration_seconds": duration, "expires_at": expires_at})
-                    restart_singbox()
-                return self.send_json({"ok": True, "blocked": items})
+                    restart_singbox_background('blocklist_add')
+                return self.send_json({"ok": True, "blocked": items, "apply_background": True})
             if path == "/api/clients/block":
                 ip = body.get("ip"); comment = body.get("comment") or "Blocked from clients panel"
                 duration = block_duration_to_seconds(body.get("duration_seconds"))
@@ -4233,17 +4376,15 @@ class Handler(BaseHTTPRequestHandler):
                     items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": comment, "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at, "source": "manual"})
                     save_blocked(items)
                     log("BLOCK", "ADD", f"Blocked client {cidr}", actor="ui", action="client_block", target=cidr, extra={"duration_seconds": duration, "expires_at": expires_at})
-                restart_singbox(); close_all_connections()
-                return self.send_json({"ok": True, "blocked": items})
+                restart_singbox_background('client_block')
+                close_all_connections()
+                return self.send_json({"ok": True, "blocked": items, "apply_background": True})
             if path == "/api/trusted":
                 ip = body.get("ip"); name = body.get("name") or "Моё устройство"
                 trusted = load_trusted(); trusted[ip] = {"name": name, "trusted_at": time.time()}; save_trusted(trusted)
                 removed_autobans = purge_exempt_autobans(load_security())
                 if removed_autobans:
-                    try:
-                        restart_singbox()
-                    except Exception:
-                        pass
+                    restart_singbox_background('trusted_purge_autobans')
                 log("TRUSTED", "ADD", f"Trusted client {ip} as {name}", actor="ui", action="trusted_add", target=ip, extra={"removed_autobans": removed_autobans})
                 return self.send_json({"ok": True, "trusted": trusted, "removed_autobans": removed_autobans})
             if path == "/api/security":
@@ -4281,12 +4422,18 @@ class Handler(BaseHTTPRequestHandler):
                         routing[key] = body[key]
                 routing = save_routing(routing)
                 log("ROUTING", "SAVE", "Routing settings saved", actor="ui", action="routing_save", extra={"mode": routing.get("mode")})
-                restart_singbox()
-                return self.send_json({"ok": True, "routing": routing, "summary": routing_summary(routing)})
+                restart_singbox_background('routing_save')
+                return self.send_json({"ok": True, "routing": routing, "summary": routing_summary(routing), "apply_background": True})
             if path == "/api/routing/update_sources":
                 result = update_routing_sources(body.get("tags") or None)
-                restart_singbox()
-                return self.send_json({"ok": True, **result, "summary": routing_summary(result.get("routing"))})
+                restart_singbox_background('routing_update_sources')
+                return self.send_json({"ok": True, **result, "summary": routing_summary(result.get("routing")), "apply_background": True})
+            if path == "/api/servers/subscription_json":
+                url = body.get("url") or load_settings().get("subscription_url")
+                result = convert_subscription_url_to_json(url, save=True)
+                if not result.get("ok"):
+                    return self.send_json({"ok": False, **result}, 400)
+                return self.send_json({"ok": True, **result, "json_text": json.dumps(result.get("servers") or [], ensure_ascii=False, indent=2)})
             if path == "/api/servers/import":
                 mode = body.get("mode", "json")
                 append = bool(body.get("append", False))
@@ -4322,8 +4469,8 @@ class Handler(BaseHTTPRequestHandler):
                     subscription_info["servers_count"] = len(new_servers)
                     subscription_info = save_subscription_info(subscription_info)
                 log("SERVERS", "IMPORT", f"Imported {len(new_servers)} server(s), total {len(final)}", actor="ui", action="servers_import", extra={"mode": mode, "append": append, "subscription": subscription_info})
-                restart_singbox()
-                return self.send_json({"ok": True, "count": len(final), "imported": len(new_servers), "errors": parsed.get("errors", []), "subscription_info": subscription_info})
+                restart_singbox_background('servers_import')
+                return self.send_json({"ok": True, "count": len(final), "imported": len(new_servers), "errors": parsed.get("errors", []), "subscription_info": subscription_info, "apply_background": True})
             if path == "/api/servers/refresh":
                 settings = load_settings(); url = body.get("url") or settings.get("subscription_url")
                 if not url:
@@ -4335,8 +4482,8 @@ class Handler(BaseHTTPRequestHandler):
                 settings["subscription_url"] = url; save_settings(settings)
                 save_subscription_servers(parsed["servers"], url)
                 merged_servers = preserve_server_metadata(load_servers(), parsed["servers"])
-                save_servers(merged_servers); log("SERVERS", "REFRESH", f"Subscription refreshed, {len(parsed['servers'])} server(s), priorities preserved", actor="ui", action="servers_refresh", target=url, extra={"subscription": subscription_info}); restart_singbox()
-                return self.send_json({"ok": True, "count": len(merged_servers), "imported": len(parsed["servers"]), "priorities_preserved": True, "errors": parsed.get("errors", []), "subscription_info": subscription_info})
+                save_servers(merged_servers); log("SERVERS", "REFRESH", f"Subscription refreshed, {len(parsed['servers'])} server(s), priorities preserved", actor="ui", action="servers_refresh", target=url, extra={"subscription": subscription_info}); restart_singbox_background('servers_refresh')
+                return self.send_json({"ok": True, "count": len(merged_servers), "imported": len(parsed["servers"]), "priorities_preserved": True, "errors": parsed.get("errors", []), "subscription_info": subscription_info, "apply_background": True})
             if path == "/api/servers/priority":
                 tag = str(body.get("tag") or "")
                 profile = body.get("profile")
@@ -4368,8 +4515,8 @@ class Handler(BaseHTTPRequestHandler):
                 new_servers.extend(by_tag.values())
                 save_servers(new_servers)
                 log("SERVERS", "REORDER", "Server priorities reordered", actor="ui", action="server_reorder", extra={"count": len(new_servers)})
-                restart_singbox()
-                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
+                restart_singbox_background('servers_reorder')
+                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "apply_background": True})
             if path == "/api/servers/priorities":
                 updates = body.get("updates") or []
                 apply = bool(body.get("apply", True))
@@ -4390,11 +4537,12 @@ class Handler(BaseHTTPRequestHandler):
                 save_servers(servers)
                 applied = False
                 if apply and changed:
-                    validate_singbox_config()
-                    restart_singbox()
+                    # Priority changes cannot corrupt server credentials. Do not block HA Ingress
+                    # on full sing-box restart; apply it in the background.
+                    restart_singbox_background('server_priorities')
                     applied = True
                 log("SERVERS", "PRIORITIES", f"Saved server priority profiles: {len(changed)}", actor="ui", action="server_priorities", extra={"count": len(changed), "applied": applied})
-                return self.send_json({"ok": True, "changed": changed, "applied": applied, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "message": "Профили сохранены" + (" и применены." if applied else ".")})
+                return self.send_json({"ok": True, "changed": changed, "applied": applied, "apply_background": bool(applied), "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "message": "Профили сохранены" + (" и применяются в фоне." if applied else ".")})
             if path == "/api/subscription/refresh_traffic":
                 settings = load_settings(); url = body.get("url") or settings.get("subscription_url") or load_subscription_info().get("url")
                 if not url:
@@ -4448,7 +4596,7 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/blocklist/"):
                 cidr_or_ip = urllib.parse.unquote(path.split("/api/blocklist/", 1)[1])
                 items = [x for x in load_blocked(include_expired=True) if x.get("cidr") != cidr_or_ip and x.get("ip") != cidr_or_ip]
-                save_blocked(items); log("BLOCK", "DELETE", f"Unblocked {cidr_or_ip}", actor="ui", action="block_delete", target=cidr_or_ip); restart_singbox(); return self.send_json({"ok": True, "blocked": items})
+                save_blocked(items); log("BLOCK", "DELETE", f"Unblocked {cidr_or_ip}", actor="ui", action="block_delete", target=cidr_or_ip); restart_singbox_background('blocklist_delete'); return self.send_json({"ok": True, "blocked": items, "apply_background": True})
             if path.startswith("/api/users/"):
                 uid = urllib.parse.unquote(path.split("/api/users/", 1)[1])
                 users = [u for u in load_proxy_users() if str(u.get("id")) != uid]
@@ -4462,7 +4610,7 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/servers/"):
                 tag = urllib.parse.unquote(path.split("/api/servers/", 1)[1])
                 servers = [s for s in load_servers() if s.get("tag") != tag]
-                save_servers(servers); restart_singbox(); return self.send_json({"ok": True, "servers": servers})
+                save_servers(servers); restart_singbox_background('server_delete'); return self.send_json({"ok": True, "servers": servers, "apply_background": True})
             self.send_json({"error": "not found"}, 404)
         except Exception as e:
             log_exception("API", "DELETE", e, actor="ui", target=getattr(self, "path", ""), extra={"method": "DELETE"})

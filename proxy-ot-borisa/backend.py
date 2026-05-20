@@ -18,13 +18,14 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.14.0"
+APP_VERSION = "1.15.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
 DEFAULT_SERVERS_FILE = Path("/defaults/servers.example.json")
 OPTIONS_FILE = Path("/data/options.json")
 RUNTIME_PORTS_FILE = Path("/data/runtime_ports.json")
+SUBSCRIPTION_INFO_FILE = Path("/data/subscription_info.json")
 PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port"]
 SINGBOX_BIN = "/usr/local/bin/sing-box"
 SINGBOX_CONFIG = TMP_DIR / "sing-box.json"
@@ -894,7 +895,7 @@ def write_source_ruleset(path, tag, kind, values):
 
 def fetch_text_with_fallback(url, timeout=35):
     errors = []
-    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.14"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.15"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="ignore"), "direct"
@@ -1896,6 +1897,353 @@ def save_traffic(items):
     write_json(data_path("traffic.json"), items)
 
 
+def load_subscription_info():
+    base = {
+        "url": "",
+        "status": "not_loaded",
+        "message": "Подписка ещё не обновлялась",
+        "updated_at": 0,
+        "user_agent": "",
+        "content_type": "",
+        "source": "",
+        "servers_count": 0,
+        "traffic": {},
+        "errors": [],
+    }
+    value = read_json(SUBSCRIPTION_INFO_FILE, {})
+    if isinstance(value, dict):
+        base.update(value)
+    return base
+
+
+def save_subscription_info(info):
+    info = dict(info or {})
+    info["updated_at"] = time.time()
+    write_json(SUBSCRIPTION_INFO_FILE, info)
+    return info
+
+
+def parse_subscription_userinfo(value):
+    value = str(value or "").strip()
+    if not value:
+        return {}
+    # Common format: upload=123; download=456; total=789; expire=1712345678
+    result = {}
+    for part in re.split(r"[;,&]", value):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k = k.strip().lower().replace("-", "_")
+        v = v.strip().strip('"\'')
+        if k == "totl":
+            k = "total"
+        if k in ["upload", "download", "total", "expire"]:
+            try:
+                result[k] = int(float(v))
+            except Exception:
+                pass
+    upload = int(result.get("upload") or 0)
+    download = int(result.get("download") or 0)
+    total = int(result.get("total") or 0)
+    used = upload + download
+    result["used"] = used
+    if total > 0:
+        result["remaining"] = max(total - used, 0)
+        result["percent_used"] = round(min(100.0, used * 100.0 / total), 2)
+    else:
+        result["remaining"] = None
+        result["percent_used"] = None
+    if result.get("expire"):
+        try:
+            result["expire_iso"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(result["expire"])))
+        except Exception:
+            result["expire_iso"] = ""
+    return result
+
+
+def extract_subscription_userinfo_from_text(text):
+    text = str(text or "")
+    patterns = [
+        r"(?im)^\s*#?\s*subscription-userinfo\s*[:=]\s*(.+)$",
+        r"(?im)^\s*#?\s*subscription_userinfo\s*[:=]\s*(.+)$",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            parsed = parse_subscription_userinfo(m.group(1))
+            if parsed:
+                parsed["source"] = "body"
+                return parsed
+    return {}
+
+
+def normalize_header_map(headers):
+    result = {}
+    try:
+        items = headers.items()
+    except Exception:
+        items = []
+    for k, v in items:
+        result[str(k).lower()] = str(v)
+    return result
+
+
+def fetch_url_with_headers(url, user_agent, timeout=25):
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.7,en;q=0.6",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return {
+                "text": raw.decode("utf-8", errors="ignore"),
+                "headers": normalize_header_map(resp.headers),
+                "content_type": resp.headers.get("Content-Type", ""),
+                "status": getattr(resp, "status", 200),
+                "user_agent": user_agent,
+                "via": "direct",
+            }
+    except Exception as direct_error:
+        # Fallback via local HTTP proxy: useful when subscription host is unavailable directly.
+        try:
+            options = load_options()
+            http_port = int(options.get("http_proxy_port", 2081))
+            proxy_url = f"http://127.0.0.1:{http_port}"
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+            with opener.open(req, timeout=timeout) as resp:
+                raw = resp.read()
+                return {
+                    "text": raw.decode("utf-8", errors="ignore"),
+                    "headers": normalize_header_map(resp.headers),
+                    "content_type": resp.headers.get("Content-Type", ""),
+                    "status": getattr(resp, "status", 200),
+                    "user_agent": user_agent,
+                    "via": "local_proxy",
+                }
+        except Exception as proxy_error:
+            raise RuntimeError(f"direct: {direct_error}; via local proxy: {proxy_error}")
+
+
+def extract_subscription_traffic(headers, text):
+    h = normalize_header_map(headers)
+    for key in ["subscription-userinfo", "subscription_userinfo", "profile-update-interval"]:
+        if key in h and key != "profile-update-interval":
+            parsed = parse_subscription_userinfo(h.get(key))
+            if parsed:
+                parsed["source"] = "http_header"
+                return parsed
+    parsed = extract_subscription_userinfo_from_text(text)
+    if parsed:
+        return parsed
+    return {}
+
+
+def parse_yaml_scalar(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if value[0:1] in ['"', "'"] and value[-1:] == value[0]:
+        return value[1:-1]
+    low = value.lower()
+    if low in ["true", "yes", "on"]:
+        return True
+    if low in ["false", "no", "off"]:
+        return False
+    try:
+        if re.match(r"^-?\d+$", value):
+            return int(value)
+    except Exception:
+        pass
+    return value
+
+
+def split_inline_map_items(s):
+    parts, cur, depth, quote = [], "", 0, ""
+    for ch in s:
+        if quote:
+            cur += ch
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in ['"', "'"]:
+            quote = ch; cur += ch; continue
+        if ch in "[{":
+            depth += 1; cur += ch; continue
+        if ch in "]}":
+            depth -= 1; cur += ch; continue
+        if ch == "," and depth == 0:
+            parts.append(cur.strip()); cur = ""; continue
+        cur += ch
+    if cur.strip():
+        parts.append(cur.strip())
+    return parts
+
+
+def parse_inline_yaml_map(value):
+    value = str(value or "").strip()
+    if value.startswith("{") and value.endswith("}"):
+        value = value[1:-1]
+    result = {}
+    for part in split_inline_map_items(value):
+        if ":" not in part:
+            continue
+        k, v = part.split(":", 1)
+        k = k.strip().strip('"\'')
+        v = v.strip()
+        if v.startswith("{") and v.endswith("}"):
+            result[k] = parse_inline_yaml_map(v)
+        else:
+            result[k] = parse_yaml_scalar(v)
+    return result
+
+
+def parse_clash_yaml_vless(text):
+    lines = str(text or "").splitlines()
+    proxies_start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*proxies\s*:\s*$", line):
+            proxies_start = i + 1
+            break
+    if proxies_start is None:
+        return []
+    blocks = []
+    current = None
+    current_nested = None
+    for raw in lines[proxies_start:]:
+        if re.match(r"^\S", raw) and not raw.strip().startswith("-"):
+            # next top-level section
+            if current:
+                blocks.append(current)
+            break
+        if not raw.strip() or raw.strip().startswith("#"):
+            continue
+        m = re.match(r"^\s*-\s*(.*)$", raw)
+        if m:
+            if current:
+                blocks.append(current)
+            current = {}
+            current_nested = None
+            rest = m.group(1).strip()
+            if rest.startswith("{"):
+                current.update(parse_inline_yaml_map(rest))
+            elif rest and ":" in rest:
+                k, v = rest.split(":", 1)
+                current[k.strip()] = parse_yaml_scalar(v.strip())
+            continue
+        if current is None:
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        line = raw.strip()
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k = k.strip(); v = v.strip()
+        if not v:
+            current[k] = {}
+            current_nested = k
+        else:
+            if current_nested and indent >= 6:
+                if not isinstance(current.get(current_nested), dict):
+                    current[current_nested] = {}
+                current[current_nested][k] = parse_yaml_scalar(v)
+            else:
+                current[k] = parse_inline_yaml_map(v) if v.startswith("{") else parse_yaml_scalar(v)
+                current_nested = None
+    if current:
+        blocks.append(current)
+    result = []
+    for i, item in enumerate(blocks):
+        typ = str(item.get("type") or "").lower()
+        if typ != "vless":
+            continue
+        server = item.get("server") or item.get("address")
+        uuid = item.get("uuid") or item.get("id")
+        if not server or not uuid:
+            continue
+        tag = safe_tag(item.get("name") or item.get("tag") or f"VLESS-{i}", f"VLESS-{i}")
+        out = {"type": "vless", "tag": tag, "server": str(server), "server_port": int(item.get("port") or 443), "uuid": str(uuid), "packet_encoding": "xudp"}
+        if item.get("flow"):
+            out["flow"] = str(item.get("flow"))
+        tls_enabled = bool(item.get("tls") is True or str(item.get("tls")).lower() == "true" or item.get("servername") or item.get("sni") or item.get("reality-opts") or item.get("reality_opts"))
+        if tls_enabled:
+            server_name = item.get("servername") or item.get("sni") or item.get("server_name") or server
+            fp = item.get("client-fingerprint") or item.get("fingerprint") or item.get("fp") or "chrome"
+            tls = {"enabled": True, "server_name": str(server_name), "utls": {"enabled": True, "fingerprint": str(fp)}}
+            ro = item.get("reality-opts") or item.get("reality_opts") or {}
+            if isinstance(ro, dict):
+                pk = ro.get("public-key") or ro.get("public_key") or ro.get("pbk")
+                sid = ro.get("short-id") or ro.get("short_id") or ro.get("sid") or ""
+                if pk:
+                    tls["reality"] = {"enabled": True, "public_key": str(pk), "short_id": str(sid)}
+            out["tls"] = tls
+        result.append(out)
+    return result
+
+
+def fetch_and_parse_subscription(url, timeout=25):
+    user_agents = [
+        "ClashMetaForAndroid/2.10",
+        "clash-verge/v2.0",
+        "HiddifyNext/2.0",
+        "v2rayN/6.0",
+        "sing-box/1.11",
+        "NekoBox/1.3",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "ProxyOtBorisa/1.15",
+    ]
+    attempts = []
+    best = None
+    for ua in user_agents:
+        try:
+            fetched = fetch_url_with_headers(url, ua, timeout=timeout)
+            text = fetched.get("text") or ""
+            traffic = extract_subscription_traffic(fetched.get("headers") or {}, text)
+            parsed = parse_servers_payload(text)
+            attempt = {
+                "user_agent": ua,
+                "via": fetched.get("via"),
+                "content_type": fetched.get("content_type"),
+                "status": fetched.get("status"),
+                "servers": len(parsed.get("servers") or []),
+                "traffic_found": bool(traffic),
+                "errors": parsed.get("errors") or [],
+            }
+            attempts.append(attempt)
+            if parsed.get("servers"):
+                info = {
+                    "url": url,
+                    "status": "ok",
+                    "message": f"Подписка загружена: {len(parsed['servers'])} сервер(ов)",
+                    "user_agent": ua,
+                    "via": fetched.get("via"),
+                    "content_type": fetched.get("content_type"),
+                    "servers_count": len(parsed["servers"]),
+                    "traffic": traffic,
+                    "traffic_source": traffic.get("source") if isinstance(traffic, dict) else "",
+                    "attempts": attempts,
+                    "errors": parsed.get("errors") or [],
+                }
+                return {"servers": parsed["servers"], "errors": parsed.get("errors") or [], "subscription_info": info}
+            if traffic and not best:
+                best = {"traffic": traffic, "fetched": fetched, "parsed": parsed, "ua": ua}
+        except Exception as e:
+            attempts.append({"user_agent": ua, "error": str(e), "servers": 0})
+    traffic = best.get("traffic") if best else {}
+    info = {
+        "url": url,
+        "status": "error",
+        "message": "Серверы в подписке не найдены. Провайдер мог отдать HTML/пустой ответ/нестандартный формат.",
+        "traffic": traffic or {},
+        "traffic_source": traffic.get("source") if isinstance(traffic, dict) else "",
+        "servers_count": 0,
+        "attempts": attempts,
+        "errors": [a.get("error") or "; ".join(a.get("errors") or []) for a in attempts if a.get("error") or a.get("errors")],
+    }
+    return {"servers": [], "errors": info["errors"], "subscription_info": info}
+
 def safe_tag(value, fallback="SERVER"):
     value = urllib.parse.unquote(str(value or "")).strip()
     value = re.sub(r"[^A-Za-z0-9_.@()\-]+", "-", value)
@@ -1976,10 +2324,16 @@ def try_decode_base64(text):
     stripped = re.sub(r"\s+", "", text.strip())
     if not stripped:
         return text
+    # Do not try to decode YAML/JSON/HTML as base64. Python's base64 decoder
+    # may otherwise ignore non-base64 chars and return garbage.
+    if not re.fullmatch(r"[A-Za-z0-9_+/=-]+", stripped):
+        return text
     padding = "=" * (-len(stripped) % 4)
     for decoder in (base64.b64decode, base64.urlsafe_b64decode):
         try:
-            return decoder((stripped + padding).encode()).decode("utf-8", errors="ignore")
+            decoded = decoder((stripped + padding).encode()).decode("utf-8", errors="ignore")
+            if "vless://" in decoded.lower() or decoded.strip().startswith(('{','[')) or re.search(r"(?m)^\s*proxies\s*:", decoded):
+                return decoded
         except Exception:
             pass
     return text
@@ -2015,7 +2369,17 @@ def parse_servers_payload(text):
         validated = validate_servers(servers)
         validated["errors"].extend(errors)
         return validated
-    return {"servers": [], "errors": errors or ["Не найден JSON или vless:// ссылки"]}
+    # Clash YAML subscriptions often return a proxies: list instead of raw links.
+    try:
+        clash_servers = parse_clash_yaml_vless(candidate)
+        if clash_servers:
+            validated = validate_servers(clash_servers)
+            validated["errors"].extend(errors)
+            return validated
+        errors.append("Clash YAML: vless proxies not found")
+    except Exception as e:
+        errors.append(f"Clash YAML: {e}")
+    return {"servers": [], "errors": errors or ["Не найден JSON, Clash YAML или vless:// ссылки"]}
 
 
 def validate_servers(servers):
@@ -2052,7 +2416,7 @@ def validate_servers(servers):
 
 
 def fetch_text(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.14"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.15"})
     errors = []
 
     # 1) Пробуем напрямую. Это работает, если подписка доступна с Raspberry/HAOS.
@@ -2928,7 +3292,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.14.0"
+    server_version = "ProxyOtBorisa/1.15.0"
 
     def log_message(self, fmt, *args):
         return
@@ -2989,7 +3353,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_file(path)
             if path == "/api/status":
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_monitored_connections(force=False, run_autoban=True); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/proxies":
                 return self.send_json(get_proxies())
             if path == "/api/connections":
@@ -2999,7 +3363,7 @@ class Handler(BaseHTTPRequestHandler):
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 conns = get_monitored_connections(force=(qs.get("force", ["0"])[0] == "1"), run_autoban=True); return self.send_json({"clients": build_clients(conns), "updated_at": connections_cache.get("updated_at", 0)})
             if path == "/api/servers":
-                settings = load_settings(); servers = load_servers(); return self.send_json({"servers": servers, "subscription_url": settings.get("subscription_url", ""), "pings": load_server_pings(), "auto_tags": auto_server_tags(servers)})
+                settings = load_settings(); servers = load_servers(); return self.send_json({"servers": servers, "subscription_url": settings.get("subscription_url", ""), "subscription_info": load_subscription_info(), "pings": load_server_pings(), "auto_tags": auto_server_tags(servers)})
             if path == "/api/routing":
                 return self.send_json({"routing": load_routing(), "summary": routing_summary()})
             if path == "/api/telegram":
@@ -3063,7 +3427,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/ports":
                 return self.send_json(ports_summary())
             if path == "/api/traffic":
-                return self.send_json(load_traffic())
+                tr = load_traffic(); tr["subscription_info"] = load_subscription_info(); return self.send_json(tr)
             if path == "/api/logs":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 limit = (qs.get("limit") or [200])[-1]
@@ -3375,33 +3739,41 @@ class Handler(BaseHTTPRequestHandler):
                 text = body.get("text", "")
                 url = body.get("url", "")
                 settings = load_settings()
+                subscription_info = load_subscription_info()
                 if mode == "url":
                     if not url:
                         raise ValueError("URL подписки не указан")
-                    text = fetch_text(url, timeout=25)
+                    parsed = fetch_and_parse_subscription(url, timeout=30)
+                    subscription_info = save_subscription_info(parsed.get("subscription_info") or {})
                     settings["subscription_url"] = url
                     save_settings(settings)
-                parsed = parse_servers_payload(text)
+                else:
+                    parsed = parse_servers_payload(text)
                 new_servers = parsed["servers"]
                 if not new_servers:
+                    if mode == "url":
+                        return self.send_json({"ok": False, "errors": parsed.get("errors", []), "subscription_info": subscription_info}, 400)
                     return self.send_json({"ok": False, "errors": parsed.get("errors", [])}, 400)
                 final = load_servers() + new_servers if append else new_servers
                 final = validate_servers(final)["servers"]
                 save_servers(final)
-                log("SERVERS", "IMPORT", f"Imported {len(new_servers)} server(s), total {len(final)}", actor="ui", action="servers_import", extra={"mode": mode, "append": append})
+                if mode == "url":
+                    subscription_info["servers_count"] = len(new_servers)
+                    subscription_info = save_subscription_info(subscription_info)
+                log("SERVERS", "IMPORT", f"Imported {len(new_servers)} server(s), total {len(final)}", actor="ui", action="servers_import", extra={"mode": mode, "append": append, "subscription": subscription_info})
                 restart_singbox()
-                return self.send_json({"ok": True, "count": len(final), "imported": len(new_servers), "errors": parsed.get("errors", [])})
+                return self.send_json({"ok": True, "count": len(final), "imported": len(new_servers), "errors": parsed.get("errors", []), "subscription_info": subscription_info})
             if path == "/api/servers/refresh":
                 settings = load_settings(); url = body.get("url") or settings.get("subscription_url")
                 if not url:
                     raise ValueError("Ссылка подписки не сохранена")
-                text = fetch_text(url, timeout=25)
-                parsed = parse_servers_payload(text)
+                parsed = fetch_and_parse_subscription(url, timeout=30)
+                subscription_info = save_subscription_info(parsed.get("subscription_info") or {})
                 if not parsed["servers"]:
-                    return self.send_json({"ok": False, "errors": parsed.get("errors", [])}, 400)
+                    return self.send_json({"ok": False, "errors": parsed.get("errors", []), "subscription_info": subscription_info}, 400)
                 settings["subscription_url"] = url; save_settings(settings)
-                save_servers(parsed["servers"]); log("SERVERS", "REFRESH", f"Subscription refreshed, {len(parsed['servers'])} server(s)", actor="ui", action="servers_refresh", target=url); restart_singbox()
-                return self.send_json({"ok": True, "count": len(parsed["servers"]), "errors": parsed.get("errors", [])})
+                save_servers(parsed["servers"]); log("SERVERS", "REFRESH", f"Subscription refreshed, {len(parsed['servers'])} server(s)", actor="ui", action="servers_refresh", target=url, extra={"subscription": subscription_info}); restart_singbox()
+                return self.send_json({"ok": True, "count": len(parsed["servers"]), "errors": parsed.get("errors", []), "subscription_info": subscription_info})
             if path == "/api/servers/priority":
                 tag = str(body.get("tag") or "")
                 priority = int(body.get("priority") or 50)

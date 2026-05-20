@@ -18,7 +18,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.13.0"
+APP_VERSION = "1.14.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -894,7 +894,7 @@ def write_source_ruleset(path, tag, kind, values):
 
 def fetch_text_with_fallback(url, timeout=35):
     errors = []
-    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.9"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.14"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="ignore"), "direct"
@@ -2052,7 +2052,7 @@ def validate_servers(servers):
 
 
 def fetch_text(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.6"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.14"})
     errors = []
 
     # 1) Пробуем напрямую. Это работает, если подписка доступна с Raspberry/HAOS.
@@ -2928,7 +2928,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.11.0"
+    server_version = "ProxyOtBorisa/1.14.0"
 
     def log_message(self, fmt, *args):
         return
@@ -2969,6 +2969,12 @@ class Handler(BaseHTTPRequestHandler):
             ctype = "application/javascript; charset=utf-8"
         elif p.suffix == ".css":
             ctype = "text/css; charset=utf-8"
+        elif p.suffix == ".png":
+            ctype = "image/png"
+        elif p.suffix in [".jpg", ".jpeg"]:
+            ctype = "image/jpeg"
+        elif p.suffix == ".svg":
+            ctype = "image/svg+xml"
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")

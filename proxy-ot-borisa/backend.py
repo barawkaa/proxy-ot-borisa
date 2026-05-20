@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.18.0"
+APP_VERSION = "1.18.1"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -216,6 +216,20 @@ def iso_time(ts=None):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts or time.time()))
 
 
+def format_bytes(value):
+    try:
+        value = float(value or 0)
+    except Exception:
+        value = 0.0
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    idx = 0
+    while abs(value) >= 1024 and idx < len(units) - 1:
+        value /= 1024.0
+        idx += 1
+    if idx == 0:
+        return f"{int(value)} {units[idx]}"
+    return f"{value:.2f} {units[idx]}"
+
 
 def event_category(stage, result=""):
     stage = str(stage or "").upper()
@@ -259,6 +273,12 @@ def append_event(stage, result, message, actor="system", action="", target="", e
 def log(stage, result, message, actor="system", action="", target="", extra=None):
     print(f"[{time.strftime('%H:%M:%S')}] INFO: [STAGE={stage}] [RESULT={result}] {message}", flush=True)
     append_event(stage, result, message, actor=actor, action=action or stage, target=target, extra=extra)
+
+
+def log_exception(stage, action, error, actor="system", target="", extra=None):
+    tb = traceback.format_exc()
+    print(f"[{time.strftime('%H:%M:%S')}] ERROR: [STAGE={stage}] [ACTION={action}] {error}", flush=True)
+    append_event(stage, "ERROR", str(error), actor=actor, action=action or stage, target=target, extra={**(extra or {}), "traceback": tb[-4000:]})
 
 
 def read_json(path, default):
@@ -2482,6 +2502,11 @@ def fetch_and_parse_subscription(url, timeout=25):
             }
             attempts.append(attempt)
             if parsed.get("servers"):
+                # If a later parser (vless/base64/Clash YAML) successfully decoded the
+                # subscription, earlier probe errors such as "JSON: Expecting value"
+                # are not real user-facing errors. Keep them only in attempts for
+                # diagnostics, but do not show them as subscription errors.
+                visible_errors = []
                 info = {
                     "url": url,
                     "status": "ok",
@@ -2493,13 +2518,15 @@ def fetch_and_parse_subscription(url, timeout=25):
                     "traffic": traffic,
                     "traffic_source": traffic.get("source") if isinstance(traffic, dict) else "",
                     "attempts": attempts,
-                    "errors": parsed.get("errors") or [],
+                    "errors": visible_errors,
                 }
-                return {"servers": parsed["servers"], "errors": parsed.get("errors") or [], "subscription_info": info}
+                log("SERVERS", "SUBSCRIPTION_OK", f"Subscription parsed: {len(parsed['servers'])} server(s), traffic: {'yes' if traffic else 'no'}", actor="system", action="subscription_parse", target=url, extra={"user_agent": ua, "via": fetched.get("via"), "content_type": fetched.get("content_type")})
+                return {"servers": parsed["servers"], "errors": visible_errors, "subscription_info": info}
             if traffic and not best:
                 best = {"traffic": traffic, "fetched": fetched, "parsed": parsed, "ua": ua}
         except Exception as e:
             attempts.append({"user_agent": ua, "error": str(e), "servers": 0})
+            log_exception("SERVERS", "subscription_fetch", e, actor="system", target=url, extra={"user_agent": ua})
     traffic = best.get("traffic") if best else {}
     info = {
         "url": url,
@@ -2511,6 +2538,7 @@ def fetch_and_parse_subscription(url, timeout=25):
         "attempts": attempts,
         "errors": [a.get("error") or "; ".join(a.get("errors") or []) for a in attempts if a.get("error") or a.get("errors")],
     }
+    log("SERVERS", "SUBSCRIPTION_ERROR", "Subscription parsed with no servers", actor="system", action="subscription_parse", target=url, extra={"errors": info.get("errors"), "attempts": attempts})
     return {"servers": [], "errors": info["errors"], "subscription_info": info}
 
 def safe_tag(value, fallback="SERVER"):
@@ -3563,7 +3591,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.18.0"
+    server_version = "ProxyOtBorisa/1.18.1"
 
     def log_message(self, fmt, *args):
         return
@@ -3690,7 +3718,7 @@ class Handler(BaseHTTPRequestHandler):
                 ip = urllib.parse.unquote(path.split("/api/geo/", 1)[1]); return self.send_json(geo_lookup(ip))
             self.send_json({"error": "not found"}, 404)
         except Exception as e:
-            traceback.print_exc()
+            log_exception("API", "GET", e, actor="ui", target=getattr(self, "path", ""), extra={"method": "GET"})
             self.send_json({"error": str(e)}, 500)
 
     def do_POST(self):
@@ -4118,7 +4146,7 @@ class Handler(BaseHTTPRequestHandler):
                 restart_singbox(); return self.send_json({"ok": True})
             self.send_json({"error": "not found"}, 404)
         except Exception as e:
-            traceback.print_exc()
+            log_exception("API", "POST", e, actor="ui", target=getattr(self, "path", ""), extra={"method": "POST", "body_keys": list(body.keys()) if isinstance(locals().get("body"), dict) else []})
             self.send_json({"error": str(e)}, 500)
 
     def do_DELETE(self):
@@ -4144,7 +4172,7 @@ class Handler(BaseHTTPRequestHandler):
                 save_servers(servers); restart_singbox(); return self.send_json({"ok": True, "servers": servers})
             self.send_json({"error": "not found"}, 404)
         except Exception as e:
-            traceback.print_exc()
+            log_exception("API", "DELETE", e, actor="ui", target=getattr(self, "path", ""), extra={"method": "DELETE"})
             self.send_json({"error": str(e)}, 500)
 
 
@@ -4172,8 +4200,7 @@ def main():
             start_singbox()
         except Exception as e:
             last_error = str(e)
-            log("SING_BOX", "BOOT_ERROR", f"sing-box bootstrap failed: {e}", action="singbox_boot_error")
-            traceback.print_exc()
+            log_exception("SING_BOX", "singbox_boot_error", e, actor="system")
 
     threading.Thread(target=bootstrap_proxy, name="bootstrap-sing-box", daemon=True).start()
 

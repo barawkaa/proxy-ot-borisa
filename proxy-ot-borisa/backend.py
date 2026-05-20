@@ -5,6 +5,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -17,12 +18,14 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
 DEFAULT_SERVERS_FILE = Path("/defaults/servers.example.json")
 OPTIONS_FILE = Path("/data/options.json")
+RUNTIME_PORTS_FILE = Path("/data/runtime_ports.json")
+PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port"]
 SINGBOX_BIN = "/usr/local/bin/sing-box"
 SINGBOX_CONFIG = TMP_DIR / "sing-box.json"
 BACKEND_PORT = 8099
@@ -273,9 +276,8 @@ def write_json(path, data):
                 pass
 
 
-def load_options():
-    options = read_json(OPTIONS_FILE, {})
-    defaults = {
+def _default_options():
+    return {
         "secret": "ChangeThisSecret_2026",
         "http_proxy_port": 2081,
         "socks_proxy_port": 2080,
@@ -291,13 +293,98 @@ def load_options():
         "telegram_proxy_port": 2083,
         "telegram_front_domain": "www.google.com",
     }
+
+def _safe_port(value, fallback):
+    try:
+        port = int(value)
+        if 1 <= port <= 65535:
+            return port
+    except Exception:
+        pass
+    return int(fallback)
+
+def load_addon_options():
+    options = read_json(OPTIONS_FILE, {})
+    defaults = _default_options()
     merged = {**defaults, **options}
     for key in ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port", "urltest_tolerance"]:
-        try:
-            merged[key] = int(merged[key])
-        except Exception:
-            merged[key] = defaults[key]
+        merged[key] = _safe_port(merged.get(key), defaults[key])
     return merged
+
+def load_runtime_ports():
+    raw = read_json(RUNTIME_PORTS_FILE, {})
+    addon = load_addon_options()
+    ports = {}
+    for key in PORT_KEYS:
+        ports[key] = _safe_port(raw.get(key, addon.get(key)), addon.get(key))
+    return ports
+
+def save_runtime_ports(ports):
+    addon = load_addon_options()
+    clean = {}
+    for key in PORT_KEYS:
+        clean[key] = _safe_port(ports.get(key), addon.get(key))
+    write_json(RUNTIME_PORTS_FILE, clean)
+    return clean
+
+def load_options():
+    merged = load_addon_options()
+    runtime_ports = load_runtime_ports()
+    for key, value in runtime_ports.items():
+        merged[key] = value
+    return merged
+
+def _port_is_free(port, current_ports=None, host="0.0.0.0"):
+    port = int(port)
+    if current_ports and port in set(int(x) for x in current_ports):
+        return True, "current"
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+        return True, "free"
+    except OSError as e:
+        return False, str(e)
+
+def validate_runtime_ports(candidate, allow_current=True):
+    addon = load_addon_options()
+    current = load_options() if allow_current else addon
+    ports = {key: _safe_port(candidate.get(key), current.get(key, addon.get(key))) for key in PORT_KEYS}
+    values = list(ports.values())
+    if len(values) != len(set(values)):
+        raise ValueError("Порты HTTP, SOCKS5 и Telegram должны быть разными")
+    reserved = {BACKEND_PORT, 9090, MTG_UPSTREAM_SOCKS_PORT}
+    conflict_reserved = [p for p in values if p in reserved]
+    if conflict_reserved:
+        raise ValueError("Нельзя использовать служебные порты: " + ", ".join(map(str, conflict_reserved)))
+    current_values = [int(current.get(k)) for k in PORT_KEYS] if allow_current else []
+    checks = {}
+    for key, port in ports.items():
+        ok, reason = _port_is_free(port, current_values)
+        checks[key] = {"port": port, "ok": ok, "reason": reason}
+        if not ok:
+            raise ValueError(f"Порт {port} занят или недоступен: {reason}")
+    return ports, checks
+
+def ports_summary():
+    addon = load_addon_options()
+    runtime_raw = read_json(RUNTIME_PORTS_FILE, {})
+    active = load_options()
+    runtime_exists = RUNTIME_PORTS_FILE.exists()
+    return {
+        "active": {key: int(active.get(key)) for key in PORT_KEYS},
+        "addon_defaults": {key: int(addon.get(key)) for key in PORT_KEYS},
+        "runtime": {key: int(load_runtime_ports().get(key)) for key in PORT_KEYS},
+        "runtime_file_exists": runtime_exists,
+        "runtime_file": str(RUNTIME_PORTS_FILE),
+        "source": "runtime_ports.json" if runtime_exists else "addon configuration",
+        "raw_runtime": runtime_raw if isinstance(runtime_raw, dict) else {},
+        "notes": [
+            "Порты меняются внутри приложения и сохраняются в /data/runtime_ports.json.",
+            "После изменения внешние пробросы на роутере нужно изменить вручную.",
+            "Конфигурация add-on остаётся резервным источником для первого запуска и восстановления."
+        ]
+    }
 
 
 
@@ -2967,6 +3054,8 @@ class Handler(BaseHTTPRequestHandler):
                 log("SERVERS", "REORDER", "Server priorities reordered", actor="ui", action="server_reorder", extra={"count": len(new_servers)})
                 restart_singbox()
                 return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers())})
+            if path == "/api/ports":
+                return self.send_json(ports_summary())
             if path == "/api/traffic":
                 return self.send_json(load_traffic())
             if path == "/api/logs":
@@ -3009,6 +3098,24 @@ class Handler(BaseHTTPRequestHandler):
                     close_all_connections()
                 log("POWER", "CHANGE", "Power settings changed", actor="ui", action="power_change", extra={"http_enabled": settings.get("http_enabled"), "socks_enabled": settings.get("socks_enabled"), "telegram_enabled": telegram_enabled})
                 return self.send_json({"ok": True, "settings": settings, "power": power_summary(settings, mtg_status()), "telegram": mtg_status()})
+            if path == "/api/ports":
+                candidate = {
+                    "http_proxy_port": body.get("http_proxy_port"),
+                    "socks_proxy_port": body.get("socks_proxy_port"),
+                    "telegram_proxy_port": body.get("telegram_proxy_port"),
+                }
+                old_ports = load_options()
+                ports, checks = validate_runtime_ports(candidate, allow_current=True)
+                changed = any(int(old_ports.get(k)) != int(ports.get(k)) for k in PORT_KEYS)
+                save_runtime_ports(ports)
+                applied = False
+                if bool(body.get("apply", True)) and changed:
+                    validate_singbox_config()
+                    restart_singbox()
+                    restart_mtg()
+                    applied = True
+                log("PORTS", "SAVE", "Runtime ports saved", actor="ui", action="ports_save", extra={"ports": ports, "applied": applied, "changed": changed})
+                return self.send_json({"ok": True, "changed": changed, "applied": applied, "checks": checks, "ports": ports_summary(), "message": "Порты сохранены" + (" и применены." if applied else ".")})
             if path == "/api/telegram":
                 tg = load_telegram_settings()
                 action = body.get("action") or "update"

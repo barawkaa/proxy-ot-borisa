@@ -1,5 +1,5 @@
 name: "Proxy от Бориса"
-version: "1.12.0"
+version: "1.13.0"
 slug: "proxy_ot_borisa"
 description: "Управляемый HTTP/SOCKS/Telegram MTProto прокси на базе sing-box"
 arch:
@@ -56,7 +56,7 @@ ports:
   8099/tcp: null
 
 ports_description:
-  2080/tcp: "SOCKS5 proxy"
-  2081/tcp: "HTTP proxy"
-  2083/tcp: "Telegram MTProto proxy, single shared port for all Telegram users"
+  2080/tcp: "SOCKS5 proxy default port"
+  2081/tcp: "HTTP proxy default port"
+  2083/tcp: "Telegram MTProto default port, single shared port for all Telegram users"
   8099/tcp: "Management UI through Home Assistant Ingress"

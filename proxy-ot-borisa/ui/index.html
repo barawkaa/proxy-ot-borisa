@@ -53,7 +53,7 @@
   </section>
 
   <section id="tab-wizard" class="tab"><div class="grid">
-    <div class="card full"><h2>Мастер первого запуска</h2><div class="muted">Пошаговая настройка add-on. Мастер ничего не ломает: он показывает, что уже сделано, и ведёт по нужным вкладкам.</div><div id="wizardSummary" style="margin-top:12px">Загрузка...</div></div>
+    <div class="card full"><div class="row"><button onclick="openTab('settings')">← Назад в настройки</button></div><h2>Мастер первого запуска</h2><div class="muted">Пошаговая настройка add-on. Мастер ничего не ломает: он показывает, что уже сделано, и ведёт по нужным вкладкам.</div><div id="wizardSummary" style="margin-top:12px">Загрузка...</div></div>
     <div class="card full"><h2>Рекомендуемый порядок</h2>
       <div class="wizard-step"><h3>1. Добавить VPN-подписку или серверы</h3><div class="muted">Сначала добавьте ссылку подписки, JSON или vless:// ссылки.</div><button onclick="openTab('servers')">Открыть VPN-серверы</button></div>
       <div class="wizard-step"><h3>2. Проверить пинг и выбрать сервер</h3><div class="muted">Проверьте все серверы и оставьте auto или выберите сервер вручную.</div><button onclick="openTab('overview')">Открыть обзор</button></div>
@@ -65,7 +65,7 @@
   </div></section>
 
   <section id="tab-system" class="tab"><div class="grid">
-    <div class="card full"><h2>Проверка системы</h2><div class="muted">Быстрая диагностика: серверы, VPN, маршрутизация, безопасность, порты, пользователи и место на диске.</div><div class="row"><button class="primary" id="btnSystemCheck">Проверить сейчас</button><button id="btnSystemCheckRefresh">Обновить данные</button></div><div id="systemCheckSummary" class="stats" style="margin-top:10px"></div></div>
+    <div class="card full"><div class="row"><button onclick="openTab('settings')">← Назад в настройки</button></div><h2>Проверка системы</h2><div class="muted">Быстрая диагностика: серверы, VPN, маршрутизация, безопасность, порты, пользователи и место на диске.</div><div class="row"><button class="primary" id="btnSystemCheck">Проверить сейчас</button><button id="btnSystemCheckRefresh">Обновить данные</button></div><div id="systemCheckSummary" class="stats" style="margin-top:10px"></div></div>
     <div class="card full"><h2>Результаты проверки</h2><div id="systemCheckBox">Загрузка...</div></div>
   </div></section>
 
@@ -84,7 +84,7 @@
   </div></section>
 
   <section id="tab-backup" class="tab"><div class="grid">
-    <div class="card full"><h2>Резервная копия и восстановление</h2><div class="danger-note">Резервная копия содержит серверы, логины, пароли, Telegram secrets и другие чувствительные настройки. Храните файл осторожно и не публикуйте его.</div></div>
+    <div class="card full"><div class="row"><button onclick="openTab('settings')">← Назад в настройки</button></div><h2>Резервная копия и восстановление</h2><div class="danger-note">Резервная копия содержит серверы, логины, пароли, Telegram secrets и другие чувствительные настройки. Храните файл осторожно и не публикуйте его.</div></div>
     <div class="card full"><h2>Создать резервную копию</h2><div class="row"><label><input type="checkbox" id="backupIncludeLogs"> включить логи</label><button class="primary" id="btnCreateBackup">Создать копию</button><button id="btnDownloadBackup">Скачать JSON</button><button id="btnCopyBackup">Скопировать</button></div><textarea id="backupOutput" class="backup-area" readonly placeholder="Здесь появится JSON резервной копии"></textarea><div id="backupMsg" class="muted"></div></div>
     <div class="card full"><h2>Восстановить из резервной копии</h2><div class="muted">Вставьте JSON резервной копии. После восстановления add-on проверит конфиг и перезапустит sing-box.</div><textarea id="backupInput" class="backup-area" placeholder="Вставьте JSON резервной копии"></textarea><div class="row"><button class="danger" id="btnRestoreBackup">Восстановить</button></div><div class="small muted">Логи из копии по умолчанию не восстанавливаются, чтобы не засорять текущую диагностику.</div></div>
   </div></section>
@@ -156,7 +156,7 @@
 
 
   <section id="tab-security" class="tab"><div class="grid">
-    <div class="card full"><h2>Безопасность внешнего доступа</h2>
+    <div class="card full"><div class="row"><button onclick="openTab('settings')">← Назад в настройки</button></div><h2>Безопасность внешнего доступа</h2>
       <div class="muted">Здесь собрана защита открытых портов. Фильтр по стране не заменяет логин/пароль, но сильно уменьшает мусорные сканирования из Китая/США/Европы. Включай аккуратно: если будешь подключаться из-за границы, добавь свой IP/CIDR в ручной белый список.</div>
       <div id="securityPills" style="margin-top:10px"></div>
       <div class="stats" style="margin-top:10px">
@@ -207,7 +207,7 @@
   </div></section>
 
   <section id="tab-ports" class="tab"><div class="grid">
-    <div class="card full"><h2>Порты и внешний доступ</h2>
+    <div class="card full"><div class="row"><button onclick="openTab('settings')">← Назад в настройки</button></div><h2>Порты и внешний доступ</h2>
       <div class="muted">Это рабочие порты приложения. Они сохраняются в <span class="tag">/data/runtime_ports.json</span> и используются во всём интерфейсе, ссылках и конфигурации sing-box. После изменения портов не забудь вручную изменить проброс портов на внешнем роутере.</div>
       <div class="stats" style="margin-top:10px">
         <div class="stat"><div class="label">HTTP proxy</div><div class="value" id="portHttpNow">—</div></div>
@@ -241,7 +241,7 @@
   <section id="tab-telegram" class="tab"><div class="grid"><div class="card full"><h2>Telegram MTProto</h2><div id="telegramBox">Загрузка...</div><div class="row"><button class="safe" id="btnTgEnable">Включить</button><button class="danger" id="btnTgDisable">Выключить</button><button id="btnTgRestart">Перезапустить</button><button id="btnTgSecret">Новый secret</button></div><div class="row"><input id="tgPublicHost" style="width:260px" placeholder="Внешний IP или DDNS"><button id="btnTgSaveHost">Сохранить внешний адрес</button></div></div></div></section>
 
   <section id="tab-diag" class="tab"><div class="grid">
-    <div class="card full"><h2>Диагностика и логи</h2>
+    <div class="card full"><div class="row"><button onclick="openTab('settings')">← Назад в настройки</button></div><h2>Диагностика и логи</h2>
       <div class="muted">Логи хранятся в <span class="tag">/data/events.json</span>. Приложение оставляет последние 2000 событий и автоматически обрезает старые записи.</div>
       <div class="log-tabs">
         <button class="log-tab active" data-logcat="all">Все</button>
@@ -549,8 +549,8 @@ async function setPower(part,value){const body={};if(part==='all'){body.http_ena
 async function selectServer(name){if(!name)name='auto';await post('/api/proxy/select',{name});$('pingNote').textContent='Выбран сервер: '+name;await refreshAll()}
 async function savePriority(tag){const inp=$('prio-'+tag);const profile=inp?.value||'primary';const r=await post('/api/servers/priority',{tag,profile});const label=inp?.options?.[inp.selectedIndex]?.textContent||profile;msg('Профиль сохранён локально: '+tag+' = '+label+'. Для применения auto-пула нажми «Сохранить все приоритеты».');state.autoTags=r.auto_tags||state.autoTags;await loadServers();}
 async function saveAllPriorities(){const updates=(state.servers||[]).map(s=>{const inp=$('prio-'+s.tag);return {tag:s.tag,profile:inp?.value||priorityProfile(s).id}});const r=await post('/api/servers/priorities',{updates,apply:true});msg(r.message||'Все приоритеты сохранены и применены');await loadServers();await loadStatus();await loadLogs();}
-async function pingOne(name){if(!name||name==='—')name='auto';$('pingNote').textContent='Проверяю пинг '+name+'...';const r=await post('/api/ping',{names:[name]});state.serverPings={...state.serverPings,...Object.fromEntries(Object.entries(r.results||{}).map(([k,v])=>[k,{...v,checked_at:r.checked_at}]))};const val=r.results?.[name];const txt=val?.delay?val.delay+' мс':(val?.error||'ошибка');const el=$('ping-'+name);if(el)el.textContent=txt;$('pingNote').textContent='Пинг обновлён: '+name+' = '+txt;await loadStatus();renderServerSelector()}
-async function pingAll(){msg('Проверяю пинг всех серверов...');$('pingNote').textContent='Проверяю пинг всех серверов...';const r=await post('/api/ping',{names:state.servers.map(s=>s.tag)});for(const [k,v] of Object.entries(r.results||{})){state.serverPings[k]={...v,checked_at:r.checked_at};const el=$('ping-'+k);if(el)el.textContent=v.delay?v.delay+' мс':(v.error||'ошибка')}msg('Проверка пинга завершена');$('pingNote').textContent='Пинг всех серверов обновлён';await loadServers();await loadStatus();await loadLogs()}
+async function pingOne(name){if(!name||name==='—')name='auto';$('pingNote').textContent='Проверяю пинг '+name+'...';const r=await post('/api/ping',{names:[name],auto_apply:true});state.serverPings={...state.serverPings,...Object.fromEntries(Object.entries(r.results||{}).map(([k,v])=>[k,{...v,checked_at:r.checked_at}]))};const val=r.results?.[name];const txt=val?.delay?val.delay+' мс':(val?.error||'ошибка');const el=$('ping-'+name);if(el)el.textContent=txt;$('pingNote').textContent='Пинг обновлён: '+name+' = '+txt;await loadStatus();renderServerSelector()}
+async function pingAll(){msg('Проверяю пинг всех серверов...');$('pingNote').textContent='Проверяю пинг всех серверов...';const r=await post('/api/ping',{names:state.servers.map(s=>s.tag),auto_apply:true});for(const [k,v] of Object.entries(r.results||{})){state.serverPings[k]={...v,checked_at:r.checked_at};const el=$('ping-'+k);if(el)el.textContent=v.delay?v.delay+' мс':(v.error||'ошибка')}let note='Пинг всех серверов обновлён';if(r.auto_refresh?.triggered){note+='; auto переоценён сразу';if(r.auto_refresh.best)note+=`: лучший по проверке ${r.auto_refresh.best} (${r.auto_refresh.best_delay} мс)`}msg('Проверка пинга завершена');$('pingNote').textContent=note;await loadServers();await loadStatus();await loadLogs()}
 async function importServers(append){try{$('serverImportMsg').textContent='Идёт импорт серверов...';const mode=$('importMode').value;const body={mode,append,text:$('serversInput').value,url:$('subUrl').value};const r=await post('/api/servers/import',body);state.subscriptionInfo=r.subscription_info||state.subscriptionInfo;$('serverImportMsg').textContent=`Готово. Импортировано ${r.imported}, всего ${r.count}. sing-box перезапущен.`;msg(`Серверы обновлены: импортировано ${r.imported}, всего ${r.count}`);renderSubscriptionInfo();await refreshAll()}catch(e){$('serverImportMsg').textContent=e.message;msg(e.message,true)}}
 async function blockClientPrompt(ip){$('blockIp').value=ip;document.querySelector('[data-tab="blocks"]').click()}
 async function trustClient(ip){const name=prompt('Название клиента/устройства',ip);if(!name)return;await post('/api/trusted',{ip,name});await loadClients();await loadLogs()} async function untrustClient(ip){await del('/api/trusted/'+encodeURIComponent(ip));await loadClients();await loadLogs()}

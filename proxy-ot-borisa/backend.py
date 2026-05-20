@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.1"
+APP_VERSION = "1.19.2"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -326,7 +326,7 @@ def _default_options():
         "proxy_username": "user",
         "proxy_password": "ChangeThisProxyPassword",
         "urltest_interval": "2m",
-        "urltest_tolerance": 50,
+        "urltest_tolerance": 5,
         "log_level": "info",
         "servers_json": "[]",
         "telegram_proxy_enabled": False,
@@ -2066,7 +2066,9 @@ def load_servers():
             log("SERVERS_INIT", "OK", f"Loaded {len(servers)} servers from defaults")
         write_json(path, sort_servers_for_display(servers))
     servers = read_json(path, [])
-    normalized = sort_servers_for_display(servers)
+    # Миграция старых/неудачно импортированных generic-тегов Vless-1, Vless-2 и т.п.
+    # в понятные DE1-vless, NL1-vless и т.д., если страну можно определить по имени/хосту/SNI.
+    normalized = sort_servers_for_display(normalize_subscription_tags(servers))
     if normalized != servers:
         write_json(path, normalized)
     return normalized
@@ -2685,6 +2687,12 @@ def infer_country_code_from_text(*parts):
     for code, needles in rules:
         if any(n in padded or n in s for n in needles):
             return code
+    # Часто подписки называют хосты коротко: de1.example.com, nl-2..., us_03...
+    # Старый вариант это не всегда распознавал и оставлял Vless-1/Vless-2.
+    for code in ["DE", "NL", "US", "RU", "SE", "AT", "FI", "FR", "GB", "TR"]:
+        c = code.lower()
+        if re.search(rf"(^|[^a-z]){c}[0-9._-]", s) or re.search(rf"[._-]{c}([._-]|$)", s):
+            return code
     return "VPN"
 
 def normalize_subscription_tags(servers):
@@ -2795,7 +2803,7 @@ def parse_servers_payload(text):
             servers = parsed["servers"]
         else:
             raise ValueError("JSON должен быть массивом серверов или объектом с outbounds/servers")
-        return validate_servers(servers)
+        return validate_servers(normalize_subscription_tags(servers))
     except Exception as e:
         errors.append(f"JSON: {e}")
     format_errors = list(errors)
@@ -2940,7 +2948,23 @@ def make_singbox_config():
         proxy_selector,
     ]
     if auto_tags:
-        outbounds.append({"type": "urltest", "tag": "auto", "outbounds": auto_tags, "url": "https://www.gstatic.com/generate_204", "interval": options.get("urltest_interval", "2m"), "tolerance": int(options.get("urltest_tolerance", 50))})
+        try:
+            tol = int(options.get("urltest_tolerance", 5))
+        except Exception:
+            tol = 5
+        # В старых установках в options мог остаться tolerance=50. Для наших задач это слишком
+        # широко: auto может держаться за средний сервер, хотя уже есть явно более быстрый.
+        if tol == 50:
+            tol = 5
+        outbounds.append({
+            "type": "urltest",
+            "tag": "auto",
+            "outbounds": auto_tags,
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": options.get("urltest_interval", "2m"),
+            "tolerance": max(0, tol),
+            "interrupt_exist_connections": True,
+        })
     outbounds.extend([server_to_singbox_outbound(s) for s in servers])
     outbounds.extend([{"type": "block", "tag": "block"}, {"type": "direct", "tag": "direct"}])
 
@@ -3610,6 +3634,68 @@ def risk_level(client):
         return 'medium'
     return 'medium' if client.get('status') == 'online' else 'low'
 
+def numeric_delay(value):
+    try:
+        if isinstance(value, dict):
+            value = value.get("delay")
+        if value is None or value == "":
+            return None
+        value = int(float(value))
+        return value if value >= 0 else None
+    except Exception:
+        return None
+
+
+def best_ping_tag(results, allowed_tags=None):
+    allowed = set(allowed_tags or [])
+    best_tag = None
+    best_delay = None
+    for tag, data in (results or {}).items():
+        if allowed and tag not in allowed:
+            continue
+        delay = numeric_delay(data)
+        if delay is None:
+            continue
+        if best_delay is None or delay < best_delay:
+            best_tag = tag
+            best_delay = delay
+    return best_tag, best_delay
+
+
+def refresh_auto_after_ping(results=None):
+    """Force sing-box urltest to re-evaluate immediately after UI ping.
+
+    Manual ping buttons previously only refreshed numbers in the web UI. sing-box
+    still waited for its own urltest interval, which looked like auto ignored the
+    better server for several minutes.
+    """
+    details = {"triggered": False, "best": "", "best_delay": None, "error": ""}
+    try:
+        proxies = get_proxies()
+        current = current_server_info(proxies)
+        if current.get("mode") != "auto":
+            return details
+        tags = auto_server_tags(load_servers())
+        best, delay = best_ping_tag(results or load_server_pings(), tags)
+        details.update({"best": best or "", "best_delay": delay})
+        # Запускаем именно delay у группы auto — это заставляет urltest обновить выбор сейчас,
+        # а не ждать очередные 2 минуты. Если API конкретной версии sing-box не даст выбрать
+        # best вручную, delay всё равно обновит внутренний результат urltest.
+        try:
+            clash_request("GET", f"/proxies/{urllib.parse.quote('auto')}/delay?timeout=5000&url={urllib.parse.quote('https://www.gstatic.com/generate_204')}", timeout=8)
+        except Exception as e:
+            details["error"] = str(e)
+        try:
+            clash_request("PUT", "/proxies/Proxy", {"name": "auto"}, timeout=5)
+        except Exception as e:
+            details["error"] = (details.get("error") + " | " if details.get("error") else "") + str(e)
+        details["triggered"] = True
+        return details
+    except Exception as e:
+        details["error"] = str(e)
+        return details
+
+
 def current_server_info(proxies):
     group = proxies.get("Proxy") or proxies.get("GLOBAL") or {}
     mode = group.get("now") or group.get("selected") or "—"
@@ -4076,8 +4162,9 @@ class Handler(BaseHTTPRequestHandler):
                         results[name] = {"error": str(e)}
                     pings[name] = {"checked_at": checked_at, **(results[name] if isinstance(results[name], dict) else {})}
                 save_server_pings(pings)
-                log("PING", "OK", f"Ping test completed for {len(names)} server(s)", actor="ui", action="ping", extra={"count": len(names)})
-                return self.send_json({"ok": True, "results": results, "checked_at": checked_at})
+                auto_refresh = refresh_auto_after_ping(results) if body.get("auto_apply", True) else {"triggered": False}
+                log("PING", "OK", f"Ping test completed for {len(names)} server(s)", actor="ui", action="ping", extra={"count": len(names), "auto_refresh": auto_refresh})
+                return self.send_json({"ok": True, "results": results, "checked_at": checked_at, "auto_refresh": auto_refresh})
             if path == "/api/connections/close_all":
                 return self.send_json({"ok": close_all_connections()})
             if path == "/api/clients/disconnect":

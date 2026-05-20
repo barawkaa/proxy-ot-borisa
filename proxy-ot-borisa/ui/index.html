@@ -309,7 +309,7 @@ function renderHeaderSummary(){const s=state.status||{},cur=s.current||{},vpn=s.
 
 async function refreshAll(){try{await Promise.all([loadStatus(),loadServers(),loadRouting(),loadSecurity(),loadPorts(),loadClients(false),loadUsers(),loadBlocks(),loadTraffic(),loadConnections(false),loadLogs(),loadSystemCheck(false)]);msg('Данные обновлены')}catch(e){msg(e.message,true)}}
 async function refreshLight(){try{await Promise.all([loadStatus(),loadTraffic()]);if(['clients','connections'].includes(state.activeTab)){await loadClients(false);await loadConnections(false)}if(state.activeTab==='diag')await loadLogs()}catch(e){msg(e.message,true)}}
-async function refreshCurrentTab(force=false){try{if(state.activeTab==='overview')await loadStatus();if(state.activeTab==='wizard')await loadSystemCheck(true);if(state.activeTab==='system')await loadSystemCheck(true);if(state.activeTab==='backup'){}if(state.activeTab==='servers')await loadServers();if(state.activeTab==='routing')await loadRouting();if(state.activeTab==='security')await loadSecurity();if(state.activeTab==='ports')await loadPorts();if(state.activeTab==='clients')await loadClients(force);if(state.activeTab==='connections')await loadConnections(force);if(state.activeTab==='traffic')await loadTraffic();if(state.activeTab==='diag')await loadLogs()}catch(e){msg(e.message,true)}}
+async function refreshCurrentTab(force=false){try{if(state.activeTab==='overview')await loadStatus();if(state.activeTab==='wizard')await loadSystemCheck(true);if(state.activeTab==='system')await loadSystemCheck(true);if(state.activeTab==='backup'){}if(state.activeTab==='servers')await loadServers();if(state.activeTab==='routing')await loadRouting();if(state.activeTab==='security')await loadSecurity();if(state.activeTab==='ports')await loadPorts();if(state.activeTab==='clients')await loadClients(force);if(state.activeTab==='users')await loadUsers();if(state.activeTab==='connections')await loadConnections(force);if(state.activeTab==='traffic')await loadTraffic();if(state.activeTab==='diag')await loadLogs()}catch(e){msg(e.message,true)}}
 async function loadStatus(){state.status=await api('/api/status');state.subscriptionInfo=state.status.subscription_info||state.subscriptionInfo;renderOverview();renderTelegram();renderSubscriptionInfo()}
 async function loadServers(){const d=await api('/api/servers');state.servers=d.servers||[];state.serverPings=d.pings||{};state.autoTags=d.auto_tags||[];state.subscriptionUrl=d.subscription_url||'';state.subscriptionInfo=d.subscription_info||state.subscriptionInfo;state.subscriptionJson=d.subscription_json||state.subscriptionJson;renderServers();renderServerSelector();renderSubscriptionInfo();renderSubscriptionJson()}
 async function loadRouting(){const d=await api('/api/routing');state.routing=d.routing||{};renderRouting()}
@@ -458,6 +458,31 @@ async function saveSecurity(){
 
 function renderClients(){const online=state.clients.filter(c=>c.status==='online'),offline=state.clients.filter(c=>c.status!=='online'),trusted=state.clients.filter(c=>c.trusted),unknown=state.clients.filter(c=>!c.trusted);$('clientsOnlineBox').innerHTML=online.map(clientCard).join('')||'<div class="muted">Онлайн клиентов нет.</div>';$('clientsUnknownBox').innerHTML=unknown.map(clientCard).join('')||'<div class="muted">Незарегистрированных клиентов нет.</div>';$('clientsTrustedBox').innerHTML=trusted.map(clientCard).join('')||'<div class="muted">Доверенных клиентов нет.</div>';$('clientsOfflineBox').innerHTML=offline.map(clientCard).join('')||'<div class="muted">Оффлайн клиентов нет.</div>'}
 
+
+function connectionIp(c){return c?.metadata?.sourceIP||c?.metadata?.source_ip||c?.sourceIP||c?.source_ip||c?.ip||'—'}
+function connectionHost(c){return c?.metadata?.host||c?.metadata?.destinationIP||c?.metadata?.destination_ip||c?.metadata?.destination||c?.host||c?.destination||'—'}
+function connectionProto(c){return c?.metadata?.network||c?.metadata?.type||c?.network||c?.type||'—'}
+function connectionUser(c){return c?.metadata?.user||c?.metadata?.username||c?.user||c?.username||''}
+function renderConnections(){
+  const box=$('connectionsGrouped'); if(!box)return;
+  const list=Array.isArray(state.connections)?state.connections:[];
+  if(!list.length){box.innerHTML='<div class="muted">Активных соединений нет. Если клиент точно подключен, нажми «Обновить» или проверь External Controller sing-box в диагностике.</div>';return;}
+  const groups={};
+  for(const c of list){
+    const ip=connectionIp(c), user=connectionUser(c), key=(user?user+' / ':'')+ip;
+    if(!groups[key])groups[key]={ip,user,items:[],hosts:{},down:0,up:0};
+    const g=groups[key]; g.items.push(c);
+    const h=mainHost(connectionHost(c)); if(h&&h!=='—')g.hosts[h]=(g.hosts[h]||0)+1;
+    g.down+=Number(c.download||c.downloaded||c.down||0); g.up+=Number(c.upload||c.uploaded||c.up||0);
+  }
+  const html=Object.values(groups).sort((a,b)=>b.items.length-a.items.length).map(g=>{
+    const hosts=Object.entries(g.hosts).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([h,n])=>pill(`${h} ×${n}`,'purple')).join('')||'—';
+    const rows=g.items.slice(0,80).map(c=>`<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(c.chains?c.chains.join(' → '):(c.chain||c.rule||'—'))}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`).join('');
+    return `<div class="client-box"><div class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${pill(g.items.length+' соединений','green')}</div><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span></div><details style="margin-top:8px"><summary>Показать подробности</summary><table><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></details></div></div>`;
+  }).join('');
+  box.innerHTML=html;
+}
+
 function renderUsers(){
   const users=state.users||[];
   const rows=users.map(u=>{
@@ -484,7 +509,10 @@ function renderUsers(){
 }
 async function createUser(){
   const body={action:'create',name:$('newUserName').value,username:$('newUserLogin').value,password:$('newUserPassword').value,socks_enabled:$('newUserSocks').checked,http_enabled:$('newUserHttp').checked,telegram_enabled:$('newUserTelegram').checked};
-  await post('/api/users',body);$('newUserName').value='';$('newUserLogin').value='';$('newUserPassword').value='';await refreshAll();
+  const r=await post('/api/users',body);
+  if(r&&Array.isArray(r.users)){state.users=r.users;renderUsers();renderTelegram()}
+  $('newUserName').value='';$('newUserLogin').value='';$('newUserPassword').value='';
+  loadStatus().catch(()=>{});loadLogs().catch(()=>{});
 }
 async function editUser(id){
   const u=(state.users||[]).find(x=>x.id===id); if(!u)return;
@@ -492,14 +520,20 @@ async function editUser(id){
   const username=prompt('Логин',u.username); if(username===null)return;
   const password=prompt('Пароль',u.password); if(password===null)return;
   const notes=prompt('Комментарий/заметка',u.notes||''); if(notes===null)return;
-  await post('/api/users',{action:'update',id,name,username,password,notes}); await refreshAll();
+  const r=await post('/api/users',{action:'update',id,name,username,password,notes});
+  if(r&&Array.isArray(r.users)){state.users=r.users;renderUsers();renderTelegram()}
+  loadStatus().catch(()=>{});loadLogs().catch(()=>{});
 }
-async function toggleUser(id,value){await post('/api/users',{action:'update',id,enabled:value});await refreshAll()}
-async function regenUserPassword(id){if(confirm('Сгенерировать новый пароль? Старый перестанет работать.')){await post('/api/users',{action:'regenerate_password',id});await refreshAll()}}
-async function regenUserSecret(id){if(confirm('Сгенерировать новый Telegram secret? Старая Telegram-ссылка перестанет работать.')){await post('/api/users',{action:'regenerate_secret',id});await refreshAll()}}
-async function blockUserPrompt(id){const duration=prompt('Срок блокировки в секундах. Пусто = навсегда. Примеры: 300, 3600, 86400','3600');await post('/api/users',{action:'block',id,duration_seconds:duration||'permanent',comment:'Blocked from users panel'});await refreshAll()}
-async function unblockUser(id){await post('/api/users',{action:'unblock',id});await refreshAll()}
-async function deleteUser(id){if(confirm('Удалить пользователя?')){await del('/api/users/'+encodeURIComponent(id));await refreshAll()}}
+function applyUsersResponse(r){
+  if(r&&Array.isArray(r.users)){state.users=r.users;renderUsers();renderTelegram()}
+  loadStatus().catch(()=>{});loadLogs().catch(()=>{});
+}
+async function toggleUser(id,value){applyUsersResponse(await post('/api/users',{action:'update',id,enabled:value}))}
+async function regenUserPassword(id){if(confirm('Сгенерировать новый пароль? Старый перестанет работать.')){applyUsersResponse(await post('/api/users',{action:'regenerate_password',id}))}}
+async function regenUserSecret(id){if(confirm('Сгенерировать новый Telegram secret? Старая Telegram-ссылка перестанет работать.')){applyUsersResponse(await post('/api/users',{action:'regenerate_secret',id}))}}
+async function blockUserPrompt(id){const duration=prompt('Срок блокировки в секундах. Пусто = навсегда. Примеры: 300, 3600, 86400','3600');applyUsersResponse(await post('/api/users',{action:'block',id,duration_seconds:duration||'permanent',comment:'Blocked from users panel'}))}
+async function unblockUser(id){applyUsersResponse(await post('/api/users',{action:'unblock',id}))}
+async function deleteUser(id){if(confirm('Удалить пользователя?')){applyUsersResponse(await del('/api/users/'+encodeURIComponent(id)))}}
 
 function renderBlocks(){const now=Date.now()/1000;const rows=state.blocks.map(b=>{const src=b.source==='autoban'?pill('автобан','red'):pill('ручная','blue');const details=b.source==='autoban'?`<br><span class="muted">Причина: ${esc(b.reason||'—')}; значение ${esc(b.count||'—')}; порог ${esc(b.threshold||'—')}</span>`:'';return `<tr><td class="tag">${esc(b.cidr||b.ip)}</td><td>${src}<br>${esc(b.comment||'')}${details}</td><td>${fmtTime(b.created_at)}</td><td>${b.expires_at?fmtTime(b.expires_at):'навсегда'} ${b.expires_at&&b.expires_at>now?`<br><span class="muted">осталось ${fmtDur(b.expires_at-now)}</span>`:''}</td><td><button onclick="unblock('${encodeURIComponent(b.cidr||b.ip)}')">Разблокировать</button></td></tr>`}).join('');$('blocksTable').innerHTML=rows?`<div class="muted">Здесь отображаются ручные блокировки и IP, добавленные автоблокировкой. Любую запись можно снять кнопкой «Разблокировать».</div><table><thead><tr><th>IP/CIDR</th><th>Тип / комментарий</th><th>Создана</th><th>Истекает</th><th></th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="muted">Блокировок нет.</div>'}
 function renderTraffic(){const t=state.traffic||{},limit=Number(t.limit_bytes||0),used=Number(t.used_bytes||0),left=Math.max(0,limit-used),pct=limit?Math.min(100,used/limit*100):0;$('trafficSource').textContent=t.source==='subscription'?'VPN-подписка':'локальный счётчик';$('trafficLimit').textContent=limit?fmtBytes(limit):'не задан';$('trafficUsed').textContent=fmtBytes(used);$('trafficLeft').textContent=limit?fmtBytes(left):'—';if($('trafficLeftShort'))$('trafficLeftShort').textContent=limit?fmtBytes(left):'—';$('trafficPercent').textContent=limit?pct.toFixed(1)+'%':'—';$('trafficBar').style.width=pct+'%';if($('trafficLimitGb'))$('trafficLimitGb').value=limit?bytesToGb(limit).toFixed(2):'';if($('trafficUsedGb'))$('trafficUsedGb').value=used?bytesToGb(used).toFixed(2):'';const extra=t.source==='subscription'&&t.provider_updated_at?` · данные провайдера: ${fmtTime(t.provider_updated_at)}`:'';$('trafficNote').textContent='Обновлено: '+fmtTime(t.updated_at)+extra}

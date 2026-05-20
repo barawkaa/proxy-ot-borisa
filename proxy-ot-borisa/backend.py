@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.0"
+APP_VERSION = "1.19.1"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -2245,7 +2245,33 @@ def save_subscription_servers(servers, source_url=""):
 
 
 def load_subscription_servers():
-    return read_json(SUBSCRIPTION_SERVERS_FILE, {"updated_at": 0, "source_url": "", "count": 0, "servers": []})
+    data = read_json(SUBSCRIPTION_SERVERS_FILE, {"updated_at": 0, "source_url": "", "count": 0, "servers": []})
+    # v1.19.1: old installations may have an empty subscription_servers.json,
+    # while the real imported VPN servers are already stored in servers.json.
+    # Do not show [] in the UI in that case; expose a readable fallback JSON.
+    if not isinstance(data, dict):
+        data = {"updated_at": 0, "source_url": "", "count": 0, "servers": []}
+    servers = data.get("servers") if isinstance(data.get("servers"), list) else []
+    if servers:
+        data["count"] = int(data.get("count") or len(servers))
+        return data
+    fallback = []
+    try:
+        fallback = [clean_server_for_config(dict(s)) for s in (load_servers() or []) if isinstance(s, dict)]
+    except Exception as e:
+        log("SERVERS", "WARN", f"Subscription JSON fallback failed: {e}")
+        fallback = []
+    if fallback:
+        return {
+            "updated_at": int(data.get("updated_at") or 0),
+            "source_url": data.get("source_url") or "fallback: current servers.json",
+            "count": len(fallback),
+            "servers": fallback,
+            "fallback": True,
+        }
+    data["count"] = 0
+    data["servers"] = []
+    return data
 
 
 def priority_profile_from_value(value):
@@ -3068,6 +3094,22 @@ def restart_singbox():
         stop_mtg()
         stop_singbox()
         start_singbox()
+
+
+def restart_singbox_background(reason="background apply"):
+    """Apply sing-box config without blocking Home Assistant Ingress response.
+
+    User operations like create/delete must return immediately, otherwise HA Ingress
+    can show 502 even though the data was already saved.
+    """
+    def worker():
+        try:
+            log("BACKEND", "APPLY", f"Applying sing-box in background: {reason}", actor="ui", action="singbox_background_apply")
+            restart_singbox()
+            log("BACKEND", "APPLY", f"Background sing-box apply completed: {reason}", actor="ui", action="singbox_background_apply")
+        except Exception as e:
+            log_exception("BACKEND", "APPLY", e, actor="ui", action="singbox_background_apply", target=reason)
+    threading.Thread(target=worker, name="singbox-background-apply", daemon=True).start()
 
 
 def apply_power_selectors():
@@ -3949,8 +3991,8 @@ class Handler(BaseHTTPRequestHandler):
                     users.append(candidate)
                     users = save_proxy_users(users)
                     log('USERS', 'CREATE', 'Created proxy client', actor='ui', action='user_create', target=candidate.get('username'))
-                    restart_singbox()
-                    return self.send_json({'ok': True, 'users': users_safe()})
+                    restart_singbox_background('user_create')
+                    return self.send_json({'ok': True, 'users': users_safe(), 'apply_background': True})
                 if action == 'update':
                     uid = str(body.get('id') or body.get('username') or '')
                     changed = False
@@ -3971,8 +4013,8 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('Клиент не найден')
                     users = save_proxy_users(users)
                     log('USERS', 'UPDATE', 'Updated proxy client', actor='ui', action='user_update', target=uid)
-                    restart_singbox()
-                    return self.send_json({'ok': True, 'users': users_safe()})
+                    restart_singbox_background('user_update')
+                    return self.send_json({'ok': True, 'users': users_safe(), 'apply_background': True})
                 if action == 'regenerate_password':
                     uid = str(body.get('id') or '')
                     for u in users:
@@ -3982,8 +4024,8 @@ class Handler(BaseHTTPRequestHandler):
                             break
                     users = save_proxy_users(users)
                     log('USERS', 'PASSWORD', 'Regenerated proxy client password', actor='ui', action='user_password', target=uid)
-                    restart_singbox()
-                    return self.send_json({'ok': True, 'users': users_safe()})
+                    restart_singbox_background('user_password')
+                    return self.send_json({'ok': True, 'users': users_safe(), 'apply_background': True})
                 if action == 'regenerate_secret':
                     uid = str(body.get('id') or '')
                     for u in users:
@@ -3993,8 +4035,8 @@ class Handler(BaseHTTPRequestHandler):
                             break
                     users = save_proxy_users(users)
                     log('USERS', 'SECRET', 'Regenerated proxy client Telegram secret', actor='ui', action='user_secret', target=uid)
-                    restart_singbox()
-                    return self.send_json({'ok': True, 'users': users_safe()})
+                    restart_singbox_background('user_secret')
+                    return self.send_json({'ok': True, 'users': users_safe(), 'apply_background': True})
                 if action in ['block','unblock']:
                     uid = str(body.get('id') or '')
                     duration = block_duration_to_seconds(body.get('duration_seconds'))
@@ -4010,8 +4052,9 @@ class Handler(BaseHTTPRequestHandler):
                             break
                     users = save_proxy_users(users)
                     log('USERS', action.upper(), f'User {action}', actor='ui', action='user_'+action, target=uid)
-                    restart_singbox(); close_all_connections()
-                    return self.send_json({'ok': True, 'users': users_safe()})
+                    close_all_connections()
+                    restart_singbox_background('user_'+action)
+                    return self.send_json({'ok': True, 'users': users_safe(), 'apply_background': True})
                 raise ValueError('Неизвестное действие users')
             if path == "/api/proxy/select":
                 name = body.get("name")
@@ -4314,8 +4357,8 @@ class Handler(BaseHTTPRequestHandler):
                 users = [u for u in load_proxy_users() if str(u.get("id")) != uid]
                 save_proxy_users(users)
                 log("USERS", "DELETE", f"Deleted proxy client {uid}", actor="ui", action="user_delete", target=uid)
-                restart_singbox()
-                return self.send_json({"ok": True, "users": users_safe()})
+                restart_singbox_background('user_delete')
+                return self.send_json({"ok": True, "users": users_safe(), "apply_background": True})
             if path.startswith("/api/trusted/"):
                 ip = urllib.parse.unquote(path.split("/api/trusted/", 1)[1])
                 trusted = load_trusted(); trusted.pop(ip, None); save_trusted(trusted); log("TRUSTED", "DELETE", f"Untrusted client {ip}", actor="ui", action="trusted_delete", target=ip); return self.send_json({"ok": True, "trusted": trusted})

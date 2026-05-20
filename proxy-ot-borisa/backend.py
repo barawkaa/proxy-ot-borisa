@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.6"
+APP_VERSION = "1.19.7"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -1869,78 +1869,116 @@ def mtg_status():
     }
 
 
-def get_mtg_client_connections():
-    """Return real MTProto client peers.
+def _mtg_stat_int(item, *keys):
+    """Read an integer counter from mtg-multi stats with tolerant key names."""
+    if not isinstance(item, dict):
+        return 0
+    for key in keys:
+        try:
+            val = item.get(key)
+            if val is not None and val != '':
+                return int(val)
+        except Exception:
+            continue
+    return 0
 
-    Important: registered Telegram users/secrets are NOT clients by themselves.
-    A client is shown only when there is a real TCP peer connected to the shared
-    MTProto port. Older builds created synthetic clients like telegram:<user> from
-    mtg-multi stats; that made newly created users appear online without traffic.
+
+def active_mtg_users_from_stats():
+    """Return Telegram users that mtg-multi reports as active by their secret name.
+
+    This is the correct identity source for Telegram MTProto clients on one
+    shared port: TCP tables can show only remote IP:port, while mtg-multi knows
+    which configured secret/user accepted the connection.
     """
-    real_peers = list_tcp_peers_for_local_port(telegram_shared_port())
-    if not real_peers:
+    stats = mtg_multi_stats()
+    stats_users = stats.get('users') if isinstance(stats, dict) else {}
+    if not isinstance(stats_users, dict):
         return []
 
-    status = mtg_status()
-    stats = status.get('stats') or {}
-    stats_users = stats.get('users') if isinstance(stats, dict) else {}
     users_by_name = user_by_username_map()
+    result = []
+    for username, su in stats_users.items():
+        if not isinstance(su, dict):
+            continue
+        user = users_by_name.get(str(username))
+        if not user:
+            continue
 
-    active_stats = []
-    if isinstance(stats_users, dict):
-        for username, su in stats_users.items():
-            if not isinstance(su, dict):
-                continue
-            user = users_by_name.get(username)
-            if not user:
-                continue
-            connections = int(su.get('connections') or 0)
-            bytes_in = int(su.get('bytes_in') or 0)
-            bytes_out = int(su.get('bytes_out') or 0)
-            last_seen = su.get('last_seen') or ''
-            # Treat stats as useful only as identity metadata. Do not create a
-            # client from stats alone. Some mtg-multi builds expose configured
-            # secrets in stats even before a real network peer is active.
-            if connections > 0 or bytes_in > 0 or bytes_out > 0 or last_seen:
-                active_stats.append({
-                    'user': user,
-                    'username': username,
-                    'connections': connections,
-                    'bytes_in': bytes_in,
-                    'bytes_out': bytes_out,
-                    'last_seen': last_seen,
-                })
+        connections = _mtg_stat_int(su, 'connections', 'active_connections', 'connection_count', 'conn', 'conns')
+        bytes_in = _mtg_stat_int(su, 'bytes_in', 'bytesIn', 'in', 'rx', 'download')
+        bytes_out = _mtg_stat_int(su, 'bytes_out', 'bytesOut', 'out', 'tx', 'upload')
+        last_seen = su.get('last_seen') or su.get('lastSeen') or su.get('updated_at') or su.get('updatedAt') or ''
 
-    mapped_user = None
-    mapped_stat = None
-    # Safe automatic mapping: only one active user in mtg stats. If multiple
-    # users are active on one shared port, do not guess; show real IP as
-    # Telegram MTProto unknown user. Later this can be improved with mtg logs.
-    if len(active_stats) == 1:
-        mapped_stat = active_stats[0]
-        mapped_user = mapped_stat.get('user')
+        # Не считаем пользователя онлайн только из-за накопленных байтов или
+        # last_seen: некоторые сборки mtg-multi возвращают сохранённые счётчики
+        # даже после отключения клиента. Онлайн = есть активные соединения.
+        if connections <= 0:
+            continue
 
+        result.append({
+            'user': user,
+            'username': str(username),
+            'connections': max(1, connections),
+            'bytes_in': bytes_in,
+            'bytes_out': bytes_out,
+            'last_seen': last_seen,
+            'raw': su,
+        })
+    return result
+
+
+def get_mtg_client_connections():
+    """Return Telegram MTProto clients identified by registered secret when possible.
+
+    For Telegram MTProto the login/password fields are irrelevant. The identity
+    is the per-user MTProto secret. With a shared external port the OS TCP table
+    cannot tell which secret was used, so the primary source is mtg-multi
+    /stats, where counters are grouped by configured user/secret name. Real TCP
+    peers are kept only as a fallback when stats are unavailable.
+    """
+    real_peers = list_tcp_peers_for_local_port(telegram_shared_port())
+    active_stats = active_mtg_users_from_stats()
+
+    # Correct path: identify by secret/user from mtg-multi stats. This works
+    # even when client IP changes because of mobile Internet/NAT.
+    if active_stats:
+        peer_count = len(real_peers)
+        result = []
+        for stat in active_stats:
+            user = stat.get('user') or {}
+            username = stat.get('username') or user.get('username') or user.get('id') or 'unknown'
+            result.append({
+                'ip': 'telegram:' + str(username),
+                'display_ip': 'Telegram secret: ' + str(username),
+                'source': 'telegram_mtproto',
+                'identity_method': 'telegram_secret',
+                'user_id': user.get('id') or '',
+                'username': user.get('username') or str(username),
+                'user_name': user.get('name') or str(username),
+                'connections': max(1, int(stat.get('connections') or 1)),
+                'bytes_in': int(stat.get('bytes_in') or 0),
+                'bytes_out': int(stat.get('bytes_out') or 0),
+                'last_seen': stat.get('last_seen') or '',
+                'telegram_port': telegram_shared_port(),
+                'tcp_peer_count': peer_count,
+                'unmapped': False,
+            })
+        return result
+
+    # Fallback: mtg-multi stats are unavailable/empty, but TCP peers exist. In
+    # this mode we intentionally do not guess a registered user by IP.
     result = []
     for peer in real_peers:
-        if mapped_user:
-            peer['user_id'] = mapped_user.get('id')
-            peer['username'] = mapped_user.get('username')
-            peer['user_name'] = mapped_user.get('name')
-            peer['connections'] = max(1, int(mapped_stat.get('connections') or 1))
-            peer['bytes_in'] = int(mapped_stat.get('bytes_in') or 0)
-            peer['bytes_out'] = int(mapped_stat.get('bytes_out') or 0)
-            peer['last_seen'] = mapped_stat.get('last_seen') or ''
-            peer['unmapped'] = False
-        else:
-            peer['user_id'] = ''
-            peer['username'] = ''
-            peer['user_name'] = ''
-            peer['connections'] = 1
-            peer['bytes_in'] = 0
-            peer['bytes_out'] = 0
-            peer['last_seen'] = ''
-            peer['unmapped'] = True
+        peer['user_id'] = ''
+        peer['username'] = ''
+        peer['user_name'] = ''
+        peer['connections'] = 1
+        peer['bytes_in'] = 0
+        peer['bytes_out'] = 0
+        peer['last_seen'] = ''
         peer['telegram_port'] = telegram_shared_port()
+        peer['identity_method'] = 'tcp_peer_fallback'
+        peer['unmapped'] = True
         result.append(peer)
     return result
 
@@ -3664,16 +3702,23 @@ def build_clients(connections):
             continue
         user = users_by_id.get(str(peer.get('user_id')))
         item = ensure_client_group(grouped, history, trusted, ip, now, 'Telegram MTProto', user=user, username=user.get('username') if user else '')
+        if peer.get('display_ip'):
+            item['display_ip'] = peer.get('display_ip')
         item['mtproto_connections'] = int(item.get('mtproto_connections') or 0) + int(peer.get('connections') or 1)
         item['upload'] += int(peer.get('bytes_in') or 0)
         item['download'] += int(peer.get('bytes_out') or 0)
         item['hosts'].add('Telegram MTProto proxy')
         item.setdefault('main_hosts', {})['telegram'] = item.setdefault('main_hosts', {}).get('telegram', 0) + 1
         item.setdefault('identities', set()).add('service:Telegram MTProto')
+        if peer.get('identity_method'):
+            item.setdefault('identities', set()).add('identity:' + str(peer.get('identity_method')))
+        if peer.get('tcp_peer_count') is not None:
+            item.setdefault('identities', set()).add('tcp_peers:' + str(peer.get('tcp_peer_count')))
         if user:
             item.setdefault('identities', set()).add('telegram_user:' + user.get('name', ''))
+            item.setdefault('identities', set()).add('telegram_secret_user:' + user.get('username', ''))
             item.setdefault('identities', set()).add('auth_user:' + user.get('username', ''))
-        state = peer.get('state') or 'UNKNOWN'
+        state = peer.get('state') or ('SECRET_IDENTIFIED' if peer.get('identity_method') == 'telegram_secret' else 'UNKNOWN')
         item['tcp_states'][state] = item['tcp_states'].get(state, 0) + 1
 
     active_keys = set(grouped.keys())
@@ -3683,6 +3728,7 @@ def build_clients(connections):
         history[key] = {
             'key': key,
             'ip': item['ip'],
+            'display_ip': item.get('display_ip') or '',
             'username': item.get('username') or '',
             'registered_user_id': item.get('registered_user_id') or '',
             'registered_name': item.get('registered_name') or '',
@@ -3719,6 +3765,7 @@ def build_clients(connections):
         grouped[key] = {
             'key': key,
             'ip': ip,
+            'display_ip': old.get('display_ip') or '',
             'username': old.get('username') or (user.get('username') if user else ''),
             'registered_user_id': old.get('registered_user_id') or (user.get('id') if user else ''),
             'registered_name': old.get('registered_name') or (user.get('name') if user else ''),
@@ -3755,6 +3802,8 @@ def build_clients(connections):
         item['services'] = sorted(item.get('services') or [])
         item['identities'] = sorted(item.get('identities') or [])
         item['geo'] = geo_lookup(item.get('ip') or '—')
+        if item.get('display_ip'):
+            item['display_ip'] = item.get('display_ip')
         item['connections_count'] = len(item.get('connections') or []) + int(item.get('mtproto_connections') or 0)
         item['risk'] = risk_level(item)
         item['registered'] = bool(item.get('registered_user_id')) or bool(item.get('trusted'))

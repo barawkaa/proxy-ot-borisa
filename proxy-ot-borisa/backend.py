@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.11.1"
+APP_VERSION = "1.11.3"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -34,6 +34,7 @@ SESSION_BREAK_SECONDS = 60
 RECENT_CLIENT_SECONDS = 300
 OFFLINE_CLIENT_KEEP_SECONDS = 30 * 24 * 3600
 EVENT_LOG_LIMIT = 1000
+SINGBOX_STARTED_AT = 0
 
 RULES_DIR = DATA_DIR / "rules"
 RULES_DIR.mkdir(parents=True, exist_ok=True)
@@ -136,10 +137,14 @@ DEFAULT_SECURITY = {
     "custom_allowed_cidrs": [],
     "custom_denied_cidrs": [],
     "autoban_enabled": True,
-    "autoban_max_connections_per_ip": 40,
-    "autoban_max_new_connections_per_minute": 80,
+    "autoban_max_connections_per_ip": 120,
+    "autoban_max_new_connections_per_minute": 240,
     "autoban_window_seconds": 60,
     "autoban_duration_seconds": 3600,
+    "autoban_exempt_trusted_clients": True,
+    "autoban_exempt_registered_users": True,
+    "autoban_exempt_allowlist": True,
+    "autoban_exempt_cidrs": [],
     "http_public_warning_ack": False,
     "updated_at": 0,
     "country_lists": {}
@@ -299,11 +304,27 @@ def load_security():
         sec["custom_denied_cidrs"] = []
     if not isinstance(sec.get("country_lists"), dict):
         sec["country_lists"] = {}
-    for key, fallback in [("autoban_max_connections_per_ip", 40), ("autoban_max_new_connections_per_minute", 80), ("autoban_window_seconds", 60), ("autoban_duration_seconds", 3600)]:
+    for key in ["autoban_exempt_trusted_clients", "autoban_exempt_registered_users", "autoban_exempt_allowlist"]:
+        sec[key] = bool(sec.get(key, True))
+    if not isinstance(sec.get("autoban_exempt_cidrs"), list):
+        sec["autoban_exempt_cidrs"] = []
+    sec["autoban_exempt_cidrs"] = normalize_cidr_list(sec.get("autoban_exempt_cidrs") or [])
+    for key, fallback in [("autoban_max_connections_per_ip", 120), ("autoban_max_new_connections_per_minute", 240), ("autoban_window_seconds", 60), ("autoban_duration_seconds", 3600)]:
         try:
             sec[key] = int(sec.get(key) or fallback)
         except Exception:
             sec[key] = fallback
+    # One-time migration from the overly aggressive v1.11.1 defaults.
+    # Preserve custom values if the user already changed them to something else.
+    if sec.get("autoban_defaults_version") != "1.11.3":
+        if sec.get("autoban_max_connections_per_ip") == 40:
+            sec["autoban_max_connections_per_ip"] = 120
+        if sec.get("autoban_max_new_connections_per_minute") == 80:
+            sec["autoban_max_new_connections_per_minute"] = 240
+        sec["autoban_exempt_trusted_clients"] = bool(sec.get("autoban_exempt_trusted_clients", True))
+        sec["autoban_exempt_registered_users"] = bool(sec.get("autoban_exempt_registered_users", True))
+        sec["autoban_exempt_allowlist"] = bool(sec.get("autoban_exempt_allowlist", True))
+        sec["autoban_defaults_version"] = "1.11.3"
     return sec
 
 
@@ -418,6 +439,73 @@ def security_summary(sec=None, options=None):
     }
 
 
+
+def ip_in_any_cidr(ip, cidrs):
+    try:
+        addr = ipaddress.ip_address(str(ip))
+    except Exception:
+        return False
+    for raw in cidrs or []:
+        try:
+            if addr in ipaddress.ip_network(str(raw), strict=False):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def autoban_exempt_cidrs(sec=None):
+    """CIDRs that must never be autobanned.
+
+    This includes manually trusted clients, optional manual exemptions, and
+    optionally the security allow-list.  It is deliberately evaluated before any
+    counters are updated so a trusted router/gateway is not accidentally banned
+    even if it legitimately has hundreds or thousands of connections behind it.
+    """
+    sec = sec or load_security()
+    cidrs = []
+    cidrs.extend(normalize_cidr_list(sec.get("autoban_exempt_cidrs") or []))
+    if sec.get("autoban_exempt_trusted_clients", True):
+        for ip in (load_trusted() or {}).keys():
+            cidrs.append(ip)
+    if sec.get("autoban_exempt_allowlist", True):
+        cidrs.extend(sec.get("custom_allowed_cidrs") or [])
+    return normalize_cidr_list(cidrs)
+
+
+def is_autoban_exempt_ip(ip, sec=None):
+    if not ip or ip == "—":
+        return True
+    if is_private_ip(ip) or is_loopback_ip(ip):
+        return True
+    return ip_in_any_cidr(ip, autoban_exempt_cidrs(sec))
+
+
+def purge_exempt_autobans(sec=None):
+    """Remove old autobans that now match trusted/allowed clients.
+
+    If a user has already marked a work PC or a router as trusted, it must not
+    remain blocked because of an older automatic ban. Manual bans are not
+    removed here.
+    """
+    sec = sec or load_security()
+    exempt = autoban_exempt_cidrs(sec)
+    if not exempt:
+        return 0
+    items = load_blocked(include_expired=True)
+    kept = []
+    removed = []
+    for item in items:
+        ip = item.get("ip") or extract_ip_from_cidr(item.get("cidr") or "")
+        if item.get("source") == "autoban" and ip and ip_in_any_cidr(ip, exempt):
+            removed.append(item)
+            continue
+        kept.append(item)
+    if removed:
+        save_blocked(kept)
+        log("SECURITY", "AUTOBAN_EXEMPT_CLEAN", f"Removed {len(removed)} autoban(s) for trusted/allowed clients", actor="backend", action="autoban_exempt_clean", extra={"removed": removed})
+    return len(removed)
+
 def run_security_autoban(connections):
     """Autoban by two signals:
     1) too many active connections from one public IP;
@@ -451,9 +539,24 @@ def run_security_autoban(connections):
             compacted[ip] = recent
     events = compacted
 
+    users_by_name = user_by_username_map()
+    purge_exempt_autobans(sec)
+    exempt_cidrs = autoban_exempt_cidrs(sec)
+    exempt_seen = set()
     for conn in connections or []:
         ip = get_source_ip(conn)
         if not ip or ip == "—" or is_private_ip(ip) or is_loopback_ip(ip):
+            continue
+        # Never autoban trusted/allowed IPs. This is critical for routers/gateways:
+        # one trusted router may have hundreds or thousands of legitimate LAN connections behind it.
+        if ip_in_any_cidr(ip, exempt_cidrs):
+            if ip not in exempt_seen:
+                log("SECURITY", "AUTOBAN_SKIP", f"Skip autoban for trusted/allowed IP {ip}", actor="backend", action="autoban_skip", target=ip)
+                exempt_seen.add(ip)
+            continue
+        # Never autoban a known authenticated user, unless this protection is explicitly disabled.
+        username = get_connection_username(conn)
+        if sec.get("autoban_exempt_registered_users", True) and username and username in users_by_name:
             continue
         active_counts[ip] = active_counts.get(ip, 0) + 1
         cid = str(get_conn_id(conn) or "")
@@ -463,6 +566,10 @@ def run_security_autoban(connections):
             cid = f"{ip}|{meta.get('host') or meta.get('domain') or meta.get('destinationIP') or ''}|{meta.get('destinationPort') or ''}|{conn.get('start') or ''}"
         events.setdefault(ip, {})[cid] = now
 
+    # Remove event history for exempt IPs so a trusted client is not banned from old counters.
+    for ip in list(events.keys()):
+        if ip_in_any_cidr(ip, exempt_cidrs):
+            events.pop(ip, None)
     write_json(data_path("security_autoban_events.json"), events)
 
     items = load_blocked()
@@ -1988,7 +2095,7 @@ def stop_singbox():
 
 
 def start_singbox():
-    global singbox_process, last_error
+    global singbox_process, last_error, SINGBOX_STARTED_AT
     write_config()
     log("SING_BOX", "START", f"Starting sing-box with {SINGBOX_CONFIG}")
     singbox_process = subprocess.Popen([SINGBOX_BIN, "run", "-c", str(SINGBOX_CONFIG)], stdout=sys.stdout, stderr=sys.stderr)
@@ -1998,6 +2105,7 @@ def start_singbox():
         log("SING_BOX", "ERROR", last_error)
         raise RuntimeError(last_error)
     last_error = ""
+    SINGBOX_STARTED_AT = time.time()
     apply_power_selectors()
     start_mtg()
 
@@ -2561,8 +2669,10 @@ def power_summary(settings=None, tg_status=None):
     else:
         state = "partial"
         label = "Включены не все прокси"
-    started_at = settings.get("proxy_started_at") or settings.get("proxy_last_enabled_at") or settings.get("created_at")
-    uptime = int(time.time() - started_at) if any(flags) and started_at else 0
+    # Runtime uptime: do not use stale /data value after add-on or sing-box restart.
+    # This shows how long the currently running proxy core has really been alive.
+    started_at = SINGBOX_STARTED_AT if any(flags) and SINGBOX_STARTED_AT else None
+    uptime = int(time.time() - started_at) if started_at else 0
     return {"state": state, "label": label, "http_enabled": http_on, "socks_enabled": socks_on, "telegram_enabled": telegram_on, "proxy_started_at": started_at, "uptime_seconds": uptime, "last_disabled_at": settings.get("proxy_last_disabled_at")}
 
 
@@ -2959,24 +3069,35 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/trusted":
                 ip = body.get("ip"); name = body.get("name") or "Моё устройство"
                 trusted = load_trusted(); trusted[ip] = {"name": name, "trusted_at": time.time()}; save_trusted(trusted)
-                log("TRUSTED", "ADD", f"Trusted client {ip} as {name}", actor="ui", action="trusted_add", target=ip)
-                return self.send_json({"ok": True, "trusted": trusted})
+                removed_autobans = purge_exempt_autobans(load_security())
+                if removed_autobans:
+                    try:
+                        restart_singbox()
+                    except Exception:
+                        pass
+                log("TRUSTED", "ADD", f"Trusted client {ip} as {name}", actor="ui", action="trusted_add", target=ip, extra={"removed_autobans": removed_autobans})
+                return self.send_json({"ok": True, "trusted": trusted, "removed_autobans": removed_autobans})
             if path == "/api/security":
                 sec = load_security()
-                for key in ["country_filter_enabled", "allowed_countries", "custom_allowed_cidrs", "custom_denied_cidrs", "autoban_enabled", "autoban_max_connections_per_ip", "autoban_max_new_connections_per_minute", "autoban_window_seconds", "autoban_duration_seconds", "http_public_warning_ack"]:
+                for key in ["country_filter_enabled", "allowed_countries", "custom_allowed_cidrs", "custom_denied_cidrs", "autoban_enabled", "autoban_max_connections_per_ip", "autoban_max_new_connections_per_minute", "autoban_window_seconds", "autoban_duration_seconds", "autoban_exempt_trusted_clients", "autoban_exempt_registered_users", "autoban_exempt_allowlist", "autoban_exempt_cidrs", "http_public_warning_ack"]:
                     if key in body:
                         sec[key] = body[key]
                 sec["custom_allowed_cidrs"] = normalize_cidr_list(sec.get("custom_allowed_cidrs") or [])
                 sec["custom_denied_cidrs"] = normalize_cidr_list(sec.get("custom_denied_cidrs") or [])
+                sec["autoban_exempt_cidrs"] = normalize_cidr_list(sec.get("autoban_exempt_cidrs") or [])
                 save_security(sec)
+                removed_autobans = purge_exempt_autobans(sec)
                 log("SECURITY", "SAVE", "Security settings saved", actor="ui", action="security_save", extra={"country_filter_enabled": sec.get("country_filter_enabled"), "autoban_enabled": sec.get("autoban_enabled")})
                 restart_singbox()
-                return self.send_json({"ok": True, "security": load_security(), "summary": security_summary()})
+                return self.send_json({"ok": True, "security": load_security(), "summary": security_summary(), "removed_autobans": removed_autobans})
             if path == "/api/security/update_country":
                 country = str(body.get("country") or "RU").upper()
                 payload = fetch_country_cidrs(country)
-                restart_singbox()
-                return self.send_json({"ok": True, "country": country, "count": payload.get("count"), "summary": security_summary()})
+                # Do not restart sing-box here. Updating the country database is a data refresh,
+                # not a rule change by itself. Restarting here made the UI look like the whole
+                # add-on rebooted and hid the operation result. Security settings save/apply will
+                # restart sing-box when the filter is enabled or changed.
+                return self.send_json({"ok": True, "country": country, "count": payload.get("count"), "updated_at": payload.get("updated_at"), "summary": security_summary(), "message": "RU IP-список обновлён. Если фильтр уже включён, нажми Сохранить безопасность для применения."})
             if path == "/api/routing":
                 routing = load_routing()
                 for key in ["mode", "auto_update_enabled", "auto_update_interval_hours", "manual_include_domains", "manual_include_ips", "manual_exclude_domains", "manual_exclude_ips", "presets", "sources"]:

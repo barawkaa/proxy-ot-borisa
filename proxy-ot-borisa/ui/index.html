@@ -6,13 +6,14 @@
   <title>Proxy от Бориса</title>
   <style>
     :root{color-scheme:dark;--bg:#0f172a;--card:#172033;--card2:#0b1220;--bd:#334155;--txt:#e5e7eb;--mut:#94a3b8;--blue:#2563eb;--green:#16a34a;--red:#dc2626;--yellow:#ca8a04;--purple:#7c3aed;--orange:#ea580c}
-    *{box-sizing:border-box} body{margin:0;padding:16px;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",sans-serif} .wrap{max-width:1500px;margin:auto} h1{margin:0;font-size:28px} h2{margin:0 0 10px;font-size:18px}.muted{color:var(--mut);font-size:14px}.small{font-size:13px}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px;border-bottom:1px solid var(--bd);padding-bottom:10px}.tab-btn,button,select,input,textarea{border:1px solid var(--bd);background:var(--card2);color:var(--txt);border-radius:10px;padding:9px 11px;font-size:14px}.tab-btn{border-radius:999px;cursor:pointer}.tab-btn.active{background:var(--blue);border-color:var(--blue)}button{cursor:pointer}button:hover{filter:brightness(1.12)}button.primary{background:var(--blue);border-color:var(--blue)}button.safe{background:#065f46;border-color:#047857}button.danger{background:#7f1d1d;border-color:#991b1b}button.warn{background:#713f12;border-color:#a16207}.tab{display:none}.tab.active{display:block}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:14px;box-shadow:0 10px 25px rgba(0,0,0,.18);overflow:hidden}.full{grid-column:1/-1}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}.stats{display:flex;gap:8px;flex-wrap:wrap}.stat{background:var(--card2);border:1px solid var(--bd);border-radius:12px;padding:9px 11px;min-width:135px}.stat .label{color:var(--mut);font-size:12px}.stat .value{font-weight:700;font-size:18px;overflow-wrap:anywhere}.pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid var(--bd);background:var(--card2);padding:4px 8px;font-size:12px;margin:2px}.pill.green{background:#064e3b;border-color:#047857}.pill.red{background:#7f1d1d;border-color:#991b1b}.pill.yellow{background:#713f12;border-color:#a16207}.pill.blue{background:#1e3a8a;border-color:#2563eb}.pill.purple{background:#4c1d95;border-color:#7c3aed}.pill.gray{background:#1f2937}.switch{min-width:160px;font-weight:700}.switch.on{background:#065f46;border-color:#16a34a}.switch.off{background:#7f1d1d;border-color:#dc2626}.switch.partial{background:#713f12;border-color:#ca8a04}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border-bottom:1px solid var(--bd);padding:9px;text-align:left;vertical-align:top;font-size:14px}th{color:var(--mut);font-weight:600}.tag{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;overflow-wrap:anywhere}.ok{color:#86efac}.bad{color:#fca5a5}.warntext{color:#fde68a}textarea{width:100%;min-height:210px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.progress{height:16px;background:var(--card2);border:1px solid var(--bd);border-radius:99px;overflow:hidden}.bar{height:100%;width:0;background:var(--blue);transition:.2s}.actions{display:flex;gap:6px;flex-direction:column}.log{max-height:520px;overflow:auto;background:#050816;border:1px solid var(--bd);border-radius:12px;padding:8px}.log-row{border-bottom:1px solid #1f2937;padding:6px 2px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}.client-box{margin-top:12px;border:1px solid var(--bd);border-radius:14px;overflow:hidden}.client-head{padding:10px;background:var(--card2);font-weight:700}.client-body{padding:10px}.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}.mini-list{display:flex;gap:4px;flex-wrap:wrap}.nowrap{white-space:nowrap}.hidden{display:none}
+    *{box-sizing:border-box} body{margin:0;padding:16px;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",sans-serif} .wrap{max-width:1500px;margin:auto} h1{margin:0;font-size:28px} h2{margin:0 0 10px;font-size:18px}.muted{color:var(--mut);font-size:14px}.small{font-size:13px}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px;border-bottom:1px solid var(--bd);padding-bottom:10px}.tab-btn,button,select,input,textarea{border:1px solid var(--bd);background:var(--card2);color:var(--txt);border-radius:10px;padding:9px 11px;font-size:14px}.tab-btn{border-radius:999px;cursor:pointer}.tab-btn.active{background:var(--blue);border-color:var(--blue)}button{cursor:pointer}button:hover{filter:brightness(1.12)}button.primary{background:var(--blue);border-color:var(--blue)}button.safe{background:#065f46;border-color:#047857}button.danger{background:#7f1d1d;border-color:#991b1b}button.warn{background:#713f12;border-color:#a16207}.tab{display:none}.tab.active{display:block}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:14px;box-shadow:0 10px 25px rgba(0,0,0,.18);overflow:hidden}.full{grid-column:1/-1}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}.stats{display:flex;gap:8px;flex-wrap:wrap}.stat{background:var(--card2);border:1px solid var(--bd);border-radius:12px;padding:9px 11px;min-width:135px}.stat .label{color:var(--mut);font-size:12px}.stat .value{font-weight:700;font-size:18px;overflow-wrap:anywhere}.pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid var(--bd);background:var(--card2);padding:4px 8px;font-size:12px;margin:2px}.pill.green{background:#064e3b;border-color:#047857}.pill.red{background:#7f1d1d;border-color:#991b1b}.pill.yellow{background:#713f12;border-color:#a16207}.pill.blue{background:#1e3a8a;border-color:#2563eb}.pill.purple{background:#4c1d95;border-color:#7c3aed}.pill.gray{background:#1f2937}.switch{min-width:160px;font-weight:700}.switch.on{background:#065f46;border-color:#16a34a}.switch.off{background:#7f1d1d;border-color:#dc2626}.switch.partial{background:#713f12;border-color:#ca8a04}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border-bottom:1px solid var(--bd);padding:9px;text-align:left;vertical-align:top;font-size:14px}th{color:var(--mut);font-weight:600}.tag{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;overflow-wrap:anywhere}.ok{color:#86efac}.bad{color:#fca5a5}.warntext{color:#fde68a}textarea{width:100%;min-height:210px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.progress{height:16px;background:var(--card2);border:1px solid var(--bd);border-radius:99px;overflow:hidden}.bar{height:100%;width:0;background:var(--blue);transition:.2s}.actions{display:flex;gap:6px;flex-direction:column}.log{max-height:520px;overflow:auto;background:#050816;border:1px solid var(--bd);border-radius:12px;padding:8px}.log-row{border-bottom:1px solid #1f2937;padding:6px 2px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}.client-box{margin-top:12px;border:1px solid var(--bd);border-radius:14px;overflow:hidden}.client-head{padding:10px;background:var(--card2);font-weight:700}.client-body{padding:10px}.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}.mini-list{display:flex;gap:4px;flex-wrap:wrap}.nowrap{white-space:nowrap}.hidden{display:none}.toast{position:fixed;right:16px;bottom:16px;z-index:9999;max-width:min(620px,calc(100vw - 32px));background:#0b1220;border:1px solid var(--bd);border-left:5px solid var(--blue);border-radius:12px;padding:12px 14px;box-shadow:0 10px 35px rgba(0,0,0,.35);font-size:14px}.toast.err{border-left-color:var(--red);color:#fecaca}.toast.ok{border-left-color:var(--green)}
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Proxy от Бориса</h1>
   <div class="muted">Управление HTTP/SOCKS/Telegram MTProto, серверами, клиентами, блокировками и трафиком.</div>
+  <div id="toast" class="toast hidden">Готово.</div>
   <div class="tabs">
     <button class="tab-btn active" data-tab="overview">Обзор</button>
     <button class="tab-btn" data-tab="servers">VPN-серверы</button>
@@ -129,7 +130,13 @@
         <label>Окно, секунд <input id="secAutobanWindow" type="number" min="10" step="10" style="width:120px"></label>
         <label>Бан, секунд <input id="secAutobanDuration" type="number" min="60" step="60" style="width:140px"></label>
       </div>
-      <div class="small muted">Рекомендуемый старт: 40 активных соединений или 80 новых соединений за 60 секунд. Все автоблокировки попадают во вкладку «Блокировки», откуда их можно снять вручную.</div>
+      <div class="small muted">Для неизвестных внешних IP автобан полезен. Для роутеров/шлюзов лимиты могут быть очень большими, поэтому доверенные и зарегистрированные клиенты должны быть исключены из автобана.</div>
+      <div style="margin-top:12px"><b>Исключения автоблокировки</b></div>
+      <label><input type="checkbox" id="secExemptTrusted"> Не банить доверенные IP/клиенты</label><br>
+      <label><input type="checkbox" id="secExemptRegistered"> Не банить зарегистрированных пользователей по логину/паролю</label><br>
+      <label><input type="checkbox" id="secExemptAllowlist"> Не банить IP из ручного белого списка</label>
+      <div style="margin-top:8px"><b>Дополнительные IP/CIDR, которые никогда не банить</b></div>
+      <textarea id="secExemptCidrs" placeholder="IP рабочего ПК или роутера Фермы, например 1.2.3.4/32"></textarea>
     </div>
     <div class="card full"><h2>Предупреждения</h2><div id="securityWarnings">—</div></div>
   </div></section>
@@ -148,11 +155,11 @@ function ingressBase(){const p=location.pathname;const m=p.match(/^(.*\/api\/has
 const BASE=ingressBase();
 async function api(path,opt={}){const r=await fetch(BASE+path,{...opt,cache:'no-store',headers:{'Content-Type':'application/json',...(opt.headers||{})}});const t=await r.text();if(!r.ok)throw new Error(`HTTP ${r.status}: ${t||r.statusText}`);return t?JSON.parse(t):null}
 function post(path,obj={}){return api(path,{method:'POST',body:JSON.stringify(obj)})} function del(path){return api(path,{method:'DELETE'})}
-function $(id){return document.getElementById(id)} function msg(t,err=false){$('message').textContent=t;$('message').className=err?'bad':'muted'}
+function $(id){return document.getElementById(id)} function msg(t,err=false){const m=$('message');if(m){m.textContent=t;m.className=err?'bad':'muted'}const toast=$('toast');if(toast){toast.textContent=t;toast.className='toast '+(err?'err':'ok');clearTimeout(window.__toastTimer);window.__toastTimer=setTimeout(()=>toast.classList.add('hidden'), err?9000:5000)}}
 function setBusy(on,label=''){
   document.body.style.cursor=on?'progress':'';
   document.querySelectorAll('button').forEach(b=>{ if(on){b.dataset.oldText=b.textContent; b.disabled=true;} else {b.disabled=false; if(b.dataset.oldText){b.textContent=b.dataset.oldText; delete b.dataset.oldText;}} });
-  if(label) msg(label);
+  if(on && label){ const active=document.activeElement; if(active && active.tagName==='BUTTON'){active.textContent='⏳ '+label;} msg(label); }
 }
 async function runUiAction(label, fn, okLabel){
   try{setBusy(true,label+'...'); const res=await fn(); msg(okLabel||('Готово: '+label)); return res;}
@@ -197,10 +204,14 @@ function renderSecurity(summary={}){
   $('secAllowCidrs').value=(sec.custom_allowed_cidrs||[]).join('\n');
   $('secDenyCidrs').value=(sec.custom_denied_cidrs||[]).join('\n');
   $('secAutobanEnabled').checked=!!sec.autoban_enabled;
-  $('secAutobanThreshold').value=sec.autoban_max_connections_per_ip||40;
-  $('secAutobanNewThreshold').value=sec.autoban_max_new_connections_per_minute||80;
+  $('secAutobanThreshold').value=sec.autoban_max_connections_per_ip||120;
+  $('secAutobanNewThreshold').value=sec.autoban_max_new_connections_per_minute||240;
   $('secAutobanWindow').value=sec.autoban_window_seconds||60;
   $('secAutobanDuration').value=sec.autoban_duration_seconds||3600;
+  $('secExemptTrusted').checked=sec.autoban_exempt_trusted_clients!==false;
+  $('secExemptRegistered').checked=sec.autoban_exempt_registered_users!==false;
+  $('secExemptAllowlist').checked=sec.autoban_exempt_allowlist!==false;
+  $('secExemptCidrs').value=(sec.autoban_exempt_cidrs||[]).join('\n');
   $('secHttpAuth').innerHTML=summary.http_auth_enabled?'<span class="ok">включена</span>':'<span class="bad">выключена</span>';
   $('secSocksAuth').innerHTML=summary.socks_auth_enabled?'<span class="ok">включена</span>':'<span class="bad">выключена</span>';
   $('secAllowedCount').textContent=summary.allowed_cidrs_count??'—';
@@ -210,7 +221,8 @@ function renderSecurity(summary={}){
     pill(sec.country_filter_enabled?'Геофильтр RU включён':'Геофильтр выключен',sec.country_filter_enabled?'green':'yellow'),
     pill('RU CIDR: '+(ru.count||0),ru.count?'blue':'yellow'),
     pill(sec.autoban_enabled?'Автобан включён':'Автобан выключен',sec.autoban_enabled?'green':'yellow'),
-    pill('Автобан: active '+(sec.autoban_max_connections_per_ip||40)+' / new '+(sec.autoban_max_new_connections_per_minute||80), sec.autoban_enabled?'blue':'gray')
+    pill('Автобан: active '+(sec.autoban_max_connections_per_ip||120)+' / new '+(sec.autoban_max_new_connections_per_minute||240), sec.autoban_enabled?'blue':'gray'),
+    pill('Исключений автобана: '+((sec.autoban_exempt_cidrs||[]).length+(summary.autoban_exempt_cidrs_count||0)), 'green')
   ].join('');
   $('securityWarnings').innerHTML=warnings.length?warnings.map(w=>`<div class="bad">⚠ ${esc(w)}</div>`).join(''):'<span class="ok">Критичных предупреждений нет.</span>';
 }
@@ -221,10 +233,14 @@ async function saveSecurity(){
     custom_allowed_cidrs:$('secAllowCidrs').value.split(/\n|,|;/).map(x=>x.trim()).filter(Boolean),
     custom_denied_cidrs:$('secDenyCidrs').value.split(/\n|,|;/).map(x=>x.trim()).filter(Boolean),
     autoban_enabled:$('secAutobanEnabled').checked,
-    autoban_max_connections_per_ip:Number($('secAutobanThreshold').value||40),
-    autoban_max_new_connections_per_minute:Number($('secAutobanNewThreshold').value||80),
+    autoban_max_connections_per_ip:Number($('secAutobanThreshold').value||120),
+    autoban_max_new_connections_per_minute:Number($('secAutobanNewThreshold').value||240),
     autoban_window_seconds:Number($('secAutobanWindow').value||60),
-    autoban_duration_seconds:Number($('secAutobanDuration').value||3600)
+    autoban_duration_seconds:Number($('secAutobanDuration').value||3600),
+    autoban_exempt_trusted_clients:$('secExemptTrusted').checked,
+    autoban_exempt_registered_users:$('secExemptRegistered').checked,
+    autoban_exempt_allowlist:$('secExemptAllowlist').checked,
+    autoban_exempt_cidrs:$('secExemptCidrs').value.split(/\n|,|;/).map(x=>x.trim()).filter(Boolean)
   };
   await post('/api/security',body); await refreshAll();
 }
@@ -294,7 +310,7 @@ async function blockClientPrompt(ip){$('blockIp').value=ip;document.querySelecto
 async function trustClient(ip){const name=prompt('Название клиента/устройства',ip);if(!name)return;await post('/api/trusted',{ip,name});await loadClients();await loadLogs()} async function untrustClient(ip){await del('/api/trusted/'+encodeURIComponent(ip));await loadClients();await loadLogs()}
 async function disconnectClient(ip){await post('/api/clients/disconnect',{ip});await loadClients();await loadConnections();await loadLogs()}
 async function deleteClient(key,ip){if(!confirm('Удалить клиента из списка? Если он подключен, активные соединения будут закрыты.'))return;await post('/api/clients/delete',{key,ip});await loadClients();await loadConnections();await loadLogs()}
-async function unblock(x){await del('/api/blocklist/'+x);await loadBlocks();await loadClients();await loadLogs()}
+async function unblock(x){return runUiAction('Разблокирую IP и применяю правила',async()=>{await del('/api/blocklist/'+x);await loadBlocks();await loadClients();await loadLogs();await loadSecurity();},'IP разблокирован, правила применены')}
 async function deleteServer(tag){if(!confirm('Удалить сервер '+tag+'?'))return;await del('/api/servers/'+encodeURIComponent(tag));await refreshAll()}
 async function saveTraffic(){await post('/api/traffic',{limit_bytes:gbToBytes($('trafficLimitGb').value),used_bytes:gbToBytes($('trafficUsedGb').value)});await loadTraffic();await loadLogs()}
 // events
@@ -324,7 +340,7 @@ $('btnTgSaveHost').onclick=()=>runUiAction('Сохраняю публичный 
 $('btnRefreshLogs').onclick=()=>runUiAction('Обновляю логи',loadLogs,'Логи обновлены');
 $('btnCreateUser').onclick=()=>runUiAction('Создаю пользователя',createUser,'Пользователь создан');
 $('btnSaveSecurity').onclick=()=>runUiAction('Сохраняю безопасность',saveSecurity,'Настройки безопасности сохранены');
-$('btnUpdateRuList').onclick=()=>runUiAction('Обновляю RU IP-список',async()=>{msg('Скачиваю RU IP-список...');const r=await post('/api/security/update_country',{country:'RU'});msg(`RU IP-список обновлён: ${r.count||0} CIDR`);await refreshAll()},'RU IP-список обновлён');
+$('btnUpdateRuList').onclick=()=>runUiAction('Обновляю RU IP-список',async()=>{msg('Скачиваю RU IP-список... Это может занять 10–60 секунд.');const r=await post('/api/security/update_country',{country:'RU'});msg(r.message||`RU IP-список обновлён: ${r.count||0} CIDR`);await loadSecurity();await loadLogs();},'RU IP-список обновлён');
 $('btnSaveRouting').onclick=()=>runUiAction('Сохраняю маршрутизацию',()=>saveRouting(false),'Маршрутизация сохранена');
 $('btnUpdateRoutingSources').onclick=()=>runUiAction('Обновляю списки маршрутизации',async()=>{ $('routingStatusText').textContent='Обновляю источники списков...'; await saveRouting(true); $('routingStatusText').textContent='Списки обновлены: '+new Date().toLocaleString('ru-RU');},'Списки маршрутизации обновлены');
 refreshAll();setInterval(refreshAll,10000);

@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.18.1"
+APP_VERSION = "1.19.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -836,6 +836,19 @@ def save_settings(settings):
     write_json(data_path("settings.json"), settings)
 
 
+def app_activity():
+    if last_error:
+        return {"state": "error", "message": f"Ошибка: {last_error}", "updated_at": time.time()}
+    if not (singbox_process and singbox_process.poll() is None):
+        return {"state": "starting", "message": "sing-box ещё не запущен или перезапускается", "updated_at": time.time()}
+    cur = current_server_info(get_proxies())
+    if not cur.get("server") or cur.get("server") == "—":
+        return {"state": "connecting", "message": "Прокси запущен, идёт определение текущего VPN-сервера", "updated_at": time.time()}
+    if not cur.get("delay"):
+        return {"state": "checking", "message": f"Прокси работает через {cur.get('server')}; пинг ещё не проверен", "updated_at": time.time()}
+    return {"state": "ok", "message": f"Прокси работает через {cur.get('server')}, пинг {cur.get('delay')} мс", "updated_at": time.time()}
+
+
 def export_backup(include_events=False):
     files = {}
     for key, fname in BACKUP_FILES.items():
@@ -1089,7 +1102,7 @@ def write_source_ruleset(path, tag, kind, values):
 
 def fetch_text_with_fallback(url, timeout=35):
     errors = []
-    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.16"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.19"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="ignore"), "direct"
@@ -2134,6 +2147,56 @@ def save_traffic(items):
     write_json(data_path("traffic.json"), items)
 
 
+def load_client_limits():
+    return read_json(data_path("client_limits.json"), {})
+
+
+def save_client_limits(items):
+    write_json(data_path("client_limits.json"), items if isinstance(items, dict) else {})
+
+
+def monthly_key(ts=None):
+    return time.strftime("%Y-%m", time.localtime(ts or time.time()))
+
+
+def client_monthly_usage(key):
+    # Current implementation provides monitoring limits; historical per-client
+    # accounting can be extended later without changing the public API.
+    return 0
+
+
+def client_limit_payload(key):
+    limits = load_client_limits()
+    item = limits.get(key) or {}
+    limit_gb = float(item.get("monthly_limit_gb") or 0)
+    used = int(item.get("used_bytes") or client_monthly_usage(key))
+    limit_bytes = int(limit_gb * 1024 * 1024 * 1024) if limit_gb > 0 else 0
+    return {
+        "monthly_limit_gb": limit_gb,
+        "limit_bytes": limit_bytes,
+        "used_bytes": used,
+        "left_bytes": max(0, limit_bytes - used) if limit_bytes else 0,
+        "period": item.get("period") or monthly_key(),
+        "updated_at": item.get("updated_at") or 0,
+        "enabled": bool(limit_bytes),
+    }
+
+
+def sanitize_subscription_info(info):
+    info = dict(info or {})
+    # Older builds could store a non-critical JSON probe error even when the
+    # subscription was successfully parsed later as Clash/VLESS/base64.
+    if info.get("status") == "ok" and int(info.get("servers_count") or 0) > 0:
+        filtered = []
+        for e in info.get("errors") or []:
+            s = str(e)
+            if "JSON: Expecting value" in s:
+                continue
+            filtered.append(e)
+        info["errors"] = filtered
+    return info
+
+
 def load_subscription_info():
     base = {
         "url": "",
@@ -2150,11 +2213,17 @@ def load_subscription_info():
     value = read_json(SUBSCRIPTION_INFO_FILE, {})
     if isinstance(value, dict):
         base.update(value)
-    return base
+    clean = sanitize_subscription_info(base)
+    if clean != base:
+        try:
+            write_json(SUBSCRIPTION_INFO_FILE, clean)
+        except Exception:
+            pass
+    return clean
 
 
 def save_subscription_info(info):
-    info = dict(info or {})
+    info = sanitize_subscription_info(dict(info or {}))
     info["updated_at"] = time.time()
     write_json(SUBSCRIPTION_INFO_FILE, info)
     return info
@@ -2481,7 +2550,7 @@ def fetch_and_parse_subscription(url, timeout=25):
         "sing-box/1.11",
         "NekoBox/1.3",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "ProxyOtBorisa/1.16",
+        "ProxyOtBorisa/1.19",
     ]
     attempts = []
     best = None
@@ -2521,7 +2590,7 @@ def fetch_and_parse_subscription(url, timeout=25):
                     "errors": visible_errors,
                 }
                 log("SERVERS", "SUBSCRIPTION_OK", f"Subscription parsed: {len(parsed['servers'])} server(s), traffic: {'yes' if traffic else 'no'}", actor="system", action="subscription_parse", target=url, extra={"user_agent": ua, "via": fetched.get("via"), "content_type": fetched.get("content_type")})
-                return {"servers": parsed["servers"], "errors": visible_errors, "subscription_info": info}
+                return {"servers": normalize_subscription_tags(parsed["servers"]), "errors": visible_errors, "subscription_info": info}
             if traffic and not best:
                 best = {"traffic": traffic, "fetched": fetched, "parsed": parsed, "ua": ua}
         except Exception as e:
@@ -2566,6 +2635,55 @@ def extract_ip_from_cidr(cidr):
     except Exception:
         return cidr.split("/")[0]
 
+
+COUNTRY_EMOJI = {"🇩🇪":"DE","🇳🇱":"NL","🇺🇸":"US","🇷🇺":"RU","🇸🇪":"SE","🇦🇹":"AT","🇫🇮":"FI","🇫🇷":"FR","🇬🇧":"GB","🇬🇧":"GB","🇹🇷":"TR"}
+
+def infer_country_code_from_text(*parts):
+    raw = " ".join(str(x or "") for x in parts)
+    for emoji, code in COUNTRY_EMOJI.items():
+        if emoji in raw:
+            return code
+    s = raw.lower()
+    rules = [
+        ("DE", ["germany", "german", "deutsch", "de.", "-de", "_de", " de "]),
+        ("NL", ["netherlands", "holland", "nl.", "-nl", "_nl", " nl "]),
+        ("US", ["usa", "united states", "us.", "-us", "_us", " us "]),
+        ("RU", ["russia", "russian", "ru.", "-ru", "_ru", " ru "]),
+        ("SE", ["sweden", "se.", "-se", "_se", " se "]),
+        ("AT", ["austria", "at.", "-at", "_at", " at "]),
+        ("FI", ["finland", "fi.", "-fi", "_fi", " fi "]),
+        ("FR", ["france", "fr.", "-fr", "_fr", " fr "]),
+        ("GB", ["uk.", "gb.", "-uk", "-gb", "united kingdom", "great britain"]),
+    ]
+    padded = " " + s + " "
+    for code, needles in rules:
+        if any(n in padded or n in s for n in needles):
+            return code
+    return "VPN"
+
+def normalize_subscription_tags(servers):
+    counts = {}
+    used = set()
+    out = []
+    for srv in servers or []:
+        if not isinstance(srv, dict):
+            continue
+        item = dict(srv)
+        typ = str(item.get("type") or "vless").lower()
+        old_tag = str(item.get("tag") or "")
+        # Preserve user-friendly country tags; replace generic vless1/vless-1 tags.
+        generic = bool(re.fullmatch(r"(?i)vless[-_ ]?\d+|vless|server[-_ ]?\d+", old_tag.strip()))
+        if not old_tag or generic:
+            code = infer_country_code_from_text(old_tag, item.get("server"), item.get("tls", {}).get("server_name") if isinstance(item.get("tls"), dict) else "")
+            counts[code] = counts.get(code, 0) + 1
+            tag = f"{code}{counts[code]}-{typ}"
+            while tag in used:
+                counts[code] += 1
+                tag = f"{code}{counts[code]}-{typ}"
+            item["tag"] = tag
+        used.add(str(item.get("tag")))
+        out.append(item)
+    return out
 
 def parse_vless_uri(uri, index=0):
     uri = uri.strip()
@@ -2665,14 +2783,14 @@ def parse_servers_payload(text):
         except Exception as e:
             errors.append(f"{link[:60]}...: {e}")
     if servers:
-        validated = validate_servers(servers)
+        validated = validate_servers(normalize_subscription_tags(servers))
         validated["errors"].extend(errors)
         return validated
     # Clash YAML subscriptions often return a proxies: list instead of raw links.
     try:
         clash_servers = parse_clash_yaml_vless(candidate)
         if clash_servers:
-            validated = validate_servers(clash_servers)
+            validated = validate_servers(normalize_subscription_tags(clash_servers))
             validated["errors"].extend(errors)
             return validated
         errors.append("Clash YAML: vless proxies not found")
@@ -2715,7 +2833,7 @@ def validate_servers(servers):
 
 
 def fetch_text(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.16"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ProxyOtBorisa/1.19"})
     errors = []
 
     # 1) Пробуем напрямую. Это работает, если подписка доступна с Raspberry/HAOS.
@@ -3429,6 +3547,7 @@ def build_clients(connections):
         item['connections_count'] = len(item.get('connections') or []) + int(item.get('mtproto_connections') or 0)
         item['risk'] = risk_level(item)
         item['registered'] = bool(item.get('registered_user_id')) or bool(item.get('trusted'))
+        item['traffic_limit'] = client_limit_payload(key)
         item.pop('connections', None)
         result.append(item)
 
@@ -3591,7 +3710,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.18.1"
+    server_version = "ProxyOtBorisa/1.19.0"
 
     def log_message(self, fmt, *args):
         return
@@ -3652,7 +3771,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_file(path)
             if path == "/api/status":
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_monitored_connections(force=False, run_autoban=True); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/system/check":
                 return self.send_json(system_check_report())
             if path == "/api/backup":
@@ -3708,7 +3827,21 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/ports":
                 return self.send_json(ports_summary())
             if path == "/api/traffic":
-                tr = load_traffic(); tr["subscription_info"] = load_subscription_info(); return self.send_json(tr)
+                tr = load_traffic()
+                sub = load_subscription_info()
+                tr["subscription_info"] = sub
+                traffic = sub.get("traffic") or {}
+                if traffic.get("total"):
+                    tr["source"] = "subscription"
+                    tr["limit_bytes"] = int(traffic.get("total") or 0)
+                    tr["used_bytes"] = int(traffic.get("upload") or 0) + int(traffic.get("download") or 0)
+                    tr["expire_at"] = traffic.get("expire") or 0
+                    tr["provider_updated_at"] = sub.get("updated_at") or 0
+                else:
+                    tr["source"] = "local"
+                return self.send_json(tr)
+            if path == "/api/client_limits":
+                return self.send_json({"limits": load_client_limits()})
             if path == "/api/logs":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 limit = (qs.get("limit") or [200])[-1]
@@ -4122,6 +4255,26 @@ class Handler(BaseHTTPRequestHandler):
                     applied = True
                 log("SERVERS", "PRIORITIES", f"Saved server priority profiles: {len(changed)}", actor="ui", action="server_priorities", extra={"count": len(changed), "applied": applied})
                 return self.send_json({"ok": True, "changed": changed, "applied": applied, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "message": "Профили сохранены" + (" и применены." if applied else ".")})
+            if path == "/api/subscription/refresh_traffic":
+                settings = load_settings(); url = body.get("url") or settings.get("subscription_url") or load_subscription_info().get("url")
+                if not url:
+                    raise ValueError("Ссылка подписки не сохранена")
+                parsed = fetch_and_parse_subscription(url, timeout=30)
+                info = save_subscription_info(parsed.get("subscription_info") or {})
+                return self.send_json({"ok": True, "subscription_info": info})
+            if path == "/api/client_limits":
+                key = str(body.get("key") or "")
+                if not key:
+                    raise ValueError("Ключ клиента не указан")
+                limits = load_client_limits()
+                gb = float(body.get("monthly_limit_gb") or 0)
+                if gb <= 0:
+                    limits.pop(key, None)
+                else:
+                    limits[key] = {"monthly_limit_gb": gb, "period": monthly_key(), "updated_at": time.time()}
+                save_client_limits(limits)
+                log("CLIENT", "LIMIT", f"Client traffic limit changed: {key} = {gb} GB", actor="ui", action="client_limit", target=key)
+                return self.send_json({"ok": True, "limits": limits})
             if path == "/api/traffic":
                 traffic = load_traffic()
                 if "limit_bytes" in body:

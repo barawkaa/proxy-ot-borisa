@@ -128,14 +128,15 @@ assert "api('/api/audit" in html
 assert "function secretText" in html and "function toggleSecretValue" in html
 assert "productionMode" in html and "saveProductionMode" in html
 
-# Dockerfile hardening: avoid mutable :latest for core proxy binaries.
+# Dockerfile build sanity. For Home Assistant local builds we intentionally
+# use the upstream prebuilt :latest images for sing-box and mtg-multi.
+# Building mtg-multi from source inside HA proved fragile because upstream
+# Go requirements can move faster than available builder images.
 dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-assert "ghcr.io/sagernet/sing-box:v" in dockerfile
-assert "MTG_MULTI_VERSION=v" in dockerfile
-assert "ghcr.io/dolonet/mtg-multi:latest" not in dockerfile
-mtg_builder = re.search(r"FROM\s+golang:(\d+)\.(\d+)(?:\.\d+)?-alpine\s+AS\s+mtg", dockerfile)
-assert mtg_builder, "Dockerfile must pin golang:<version>-alpine AS mtg"
-assert tuple(map(int, mtg_builder.groups())) >= (1, 26), "mtg-multi v1.10.0 requires Go >= 1.26"
+assert "ghcr.io/sagernet/sing-box:latest" in dockerfile
+assert "ghcr.io/dolonet/mtg-multi:latest" in dockerfile
+assert "go build" not in dockerfile
+assert "golang:" not in dockerfile
 
 cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
 assert cfg["version"] == backend.APP_VERSION

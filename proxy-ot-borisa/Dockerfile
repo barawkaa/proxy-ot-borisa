@@ -1,19 +1,7 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base-python:latest
-ARG SING_BOX_IMAGE=ghcr.io/sagernet/sing-box:v1.12.15
-ARG MTG_MULTI_VERSION=v1.10.0
 
-FROM ${SING_BOX_IMAGE} AS singbox
-
-# mtg-multi is built from a fixed release tag instead of copying a mutable
-# :latest image. This makes the add-on build reproducible enough for long-term
-# local use. If you later want fully offline builds, put prebuilt binaries into
-# bin/<arch>/ and adjust this stage to COPY them directly.
-FROM golang:1.26.3-alpine AS mtg
-ARG MTG_MULTI_VERSION
-RUN apk add --no-cache git ca-certificates
-RUN git clone --depth 1 --branch ${MTG_MULTI_VERSION} https://github.com/dolonet/mtg-multi.git /src
-WORKDIR /src
-RUN go build -trimpath -ldflags="-s -w" -o /mtg ./main.go
+FROM ghcr.io/sagernet/sing-box:latest AS singbox
+FROM ghcr.io/dolonet/mtg-multi:latest AS mtg
 
 FROM ${BUILD_FROM}
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.21.1
+## 1.21.2
 
 - Удалены дублирующиеся top-level функции backend: теперь smoke-test падает, если в коде снова появятся перезаписывающиеся определения.
 - Добавлен расширенный API-contract smoke-test: все литеральные `/api/...` вызовы интерфейса проверяются на наличие backend-роута.
@@ -11,7 +11,7 @@
 - Добавлен runtime `production_mode`: обычный, диагностика, отладка и безопасный режим.
 - Безопасный режим блокирует изменяющие API-операции, кроме смены режима, обслуживания и очистки аудита.
 - Прямые перезапуски sing-box/MTProto в пользовательских API заменены фоновым применением там, где это возможно.
-- Dockerfile больше не использует `ghcr.io/dolonet/mtg-multi:latest`: mtg-multi собирается из фиксированного release tag, sing-box привязан к фиксированному Docker tag.
+- Dockerfile возвращён на проверенную схему с `ghcr.io/sagernet/sing-box:latest` и `ghcr.io/dolonet/mtg-multi:latest`, чтобы Home Assistant снова собирал add-on без fragile source-build mtg-multi.
 
 ## 1.20.1
 - Исправлены отсутствующие API `/api/audit` и POST `/api/routing/test`, из-за которых аудит и проверка маршрута возвращали 404.

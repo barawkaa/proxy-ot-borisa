@@ -133,6 +133,9 @@ dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 assert "ghcr.io/sagernet/sing-box:v" in dockerfile
 assert "MTG_MULTI_VERSION=v" in dockerfile
 assert "ghcr.io/dolonet/mtg-multi:latest" not in dockerfile
+mtg_builder = re.search(r"FROM\s+golang:(\d+)\.(\d+)(?:\.\d+)?-alpine\s+AS\s+mtg", dockerfile)
+assert mtg_builder, "Dockerfile must pin golang:<version>-alpine AS mtg"
+assert tuple(map(int, mtg_builder.groups())) >= (1, 26), "mtg-multi v1.10.0 requires Go >= 1.26"
 
 cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
 assert cfg["version"] == backend.APP_VERSION

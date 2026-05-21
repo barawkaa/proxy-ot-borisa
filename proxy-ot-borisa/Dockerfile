@@ -8,7 +8,7 @@ FROM ${SING_BOX_IMAGE} AS singbox
 # :latest image. This makes the add-on build reproducible enough for long-term
 # local use. If you later want fully offline builds, put prebuilt binaries into
 # bin/<arch>/ and adjust this stage to COPY them directly.
-FROM golang:1.24-alpine AS mtg
+FROM golang:1.26.3-alpine AS mtg
 ARG MTG_MULTI_VERSION
 RUN apk add --no-cache git ca-certificates
 RUN git clone --depth 1 --branch ${MTG_MULTI_VERSION} https://github.com/dolonet/mtg-multi.git /src

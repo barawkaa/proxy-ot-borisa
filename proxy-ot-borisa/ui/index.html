@@ -80,7 +80,60 @@
         <button onclick="openTab('security',true)">🛡️ <b>Безопасность</b><br><span class="muted">Геофильтр, автобан, списки</span></button>
         <button onclick="openTab('ports',true)">🔌 <b>Порты и доступ</b><br><span class="muted">Рабочие порты прокси</span></button>
         <button onclick="openTab('diag',true)">📋 <b>Диагностика</b><br><span class="muted">Логи приложения</span></button>
+        <button onclick="openTab('instructions',true)">📘 <b>Инструкции</b><br><span class="muted">Как пользоваться приложением и Keenetic</span></button>
       </div>
+    </div>
+  </div></section>
+
+  <section id="tab-instructions" class="tab"><div class="grid">
+    <div class="card full"><div class="row"><button onclick="openTab('settings')">← Назад в настройки</button></div><h2>Инструкции</h2><div class="muted">Короткая справка по ежедневной работе с приложением. Разделы разбиты по задачам, чтобы не искать всё в одном большом тексте.</div></div>
+
+    <div class="card full"><h2>1. Базовая логика приложения</h2>
+      <div class="wizard-step"><h3>Что делает add-on</h3><div class="muted">Он берёт VPN/VLESS-серверы и отдаёт их наружу как удобные прокси: HTTP, SOCKS5 и Telegram MTProto. Клиенты подключаются к твоему серверу, а сам add-on уже отправляет трафик через выбранный VPN-сервер или напрямую по правилам маршрутизации.</div></div>
+      <div class="wizard-step"><h3>Основной порядок настройки</h3><ol><li>Добавить VPN-подписку или отдельные серверы во вкладке <b>VPN-серверы</b>.</li><li>Проверить ping серверов и оставить <b>auto</b> либо выбрать конкретный сервер.</li><li>Создать пользователей во вкладке <b>Пользователи</b>.</li><li>Проверить порты во вкладке <b>Порты и доступ</b> и пробросить нужные порты на роутере.</li><li>Настроить устройства: браузер, роутер Keenetic, Telegram MTProto или другие клиенты.</li></ol></div>
+    </div>
+
+    <div class="card full"><h2>2. VPN-серверы и подписки</h2>
+      <div class="wizard-step"><h3>Ссылка подписки</h3><div class="muted">Если провайдер дал ссылку вида <span class="tag">https://...</span>, выбирай режим <b>Ссылка подписки</b>, вставляй URL в поле ссылки и нажимай <b>Обновить подписку</b>. При успешном обновлении серверы появятся в списке ниже.</div></div>
+      <div class="wizard-step"><h3>JSON подписки</h3><div class="muted">В под-вкладке <b>JSON подписки</b> можно вставить ссылку подписки и преобразовать её в JSON. Это нужно для проверки, что именно пришло из подписки, и для ручного импорта/резервного копирования списка серверов.</div></div>
+      <div class="wizard-step"><h3>Приоритеты серверов</h3><div class="muted"><b>Приоритетный</b> и <b>Обычный</b> участвуют в auto-выборе. <b>Резервный</b> лучше использовать как запас: он не должен автоматически перетягивать трафик, если нужен только на случай аварии.</div></div>
+    </div>
+
+    <div class="card full"><h2>3. Пользователи и доступы</h2>
+      <div class="wizard-step"><h3>Как выбирать тип пользователя</h3><div class="muted">При создании пользователя выбирай понятный тип доступа: только Telegram MTProto, только SOCKS5, только HTTP, SOCKS5+HTTP или все сервисы. Для учёта и безопасности лучше делать отдельного пользователя под каждое устройство/человека.</div></div>
+      <div class="wizard-step"><h3>Почему не стоит раздавать один доступ всем</h3><div class="muted">Если один логин или один Telegram secret выдать нескольким людям, приложение не сможет честно разделить статистику и историю. Правильная схема: один пользователь — один человек/устройство/роутер.</div></div>
+      <div class="wizard-step"><h3>Включение и выключение</h3><div class="muted">Переключатель рядом с пользователем включает или отключает именно его доступ. Это не выключает весь прокси-сервис. Общие HTTP/SOCKS5/Telegram включаются в <b>Обзоре</b>.</div></div>
+    </div>
+
+    <div class="card full"><h2>4. Telegram MTProto</h2>
+      <div class="wizard-step"><h3>Что вводить в Telegram-клиент</h3><div class="muted">Обычно нужны три поля: <b>сервер</b>, <b>порт</b> и <b>secret</b>. Сервер — твой внешний IP или DDNS. Порт — общий MTProto-порт из вкладки <b>Telegram</b>. Secret — индивидуальный secret конкретного Telegram-пользователя.</div></div>
+      <div class="wizard-step"><h3>Идентификация Telegram-пользователей</h3><div class="muted">Telegram MTProto не использует логин/пароль. Пользователь определяется по индивидуальному <b>secret</b>. IP для мобильных клиентов ненадёжен, потому что он постоянно меняется.</div></div>
+    </div>
+
+    <div class="card full"><h2>5. Маршрутизация</h2>
+      <div class="wizard-step"><h3>Режимы</h3><div class="muted"><b>Всё через прокси</b> удобно для проверки, но может гонять лишний трафик. <b>Заблокированные + ручные списки</b> обычно лучше для повседневной работы: обычные сайты идут напрямую, нужные домены — через VPN.</div></div>
+      <div class="wizard-step"><h3>Ручные домены</h3><div class="muted">Во вкладке <b>Маршрутизация</b> добавляй домены, которые должны идти через VPN: например <span class="tag">chatgpt.com</span>, <span class="tag">openai.com</span>, нужные CDN или API. Домены лучше писать без <span class="tag">https://</span> и без пути.</div></div>
+    </div>
+
+    <div class="card full"><h2>6. Трафик и история</h2>
+      <div class="wizard-step"><h3>Трафик подписки</h3><div class="muted">Если провайдер отдаёт лимит в заголовках подписки, приложение показывает лимит, использовано и остаток. Данные обновляются кнопкой и автоматически на вкладке <b>Трафик</b>.</div></div>
+      <div class="wizard-step"><h3>Ручной учёт</h3><div class="muted">Если добавлен отдельный сервер без общей подписки или провайдер не отдаёт лимит, заведи его в блоке <b>Ручной учёт трафика</b>. Это ручной журнал: приложение не знает лимит провайдера само, но помогает видеть остаток.</div></div>
+      <div class="wizard-step"><h3>История подключений</h3><div class="muted">История сгруппирована по клиентам: последний сеанс, количество подключений, суммарное время и раскрываемые детали. Журнал ограничен по времени и количеству записей, чтобы не забить диск.</div></div>
+    </div>
+
+    <div class="card full"><h2>7. Логирование и диагностика</h2>
+      <div class="wizard-step"><h3>Обычный режим</h3><div class="muted">Для постоянной работы ставь уровень <b>warn</b>. Тогда sing-box не пишет каждое соединение в журнал, а оставляет только предупреждения и важные события.</div></div>
+      <div class="wizard-step"><h3>Когда включать info/debug</h3><div class="muted"><b>info</b> и <b>debug</b> нужны только на время диагностики: например, когда нужно понять, куда именно идёт трафик или почему сервер не выбирается. После проверки лучше вернуть <b>warn</b>, иначе журнал будет быстро разрастаться и станет нечитаемым.</div></div>
+      <div class="wizard-step"><h3>Если после обновления UI открылся раньше backend</h3><div class="muted">После установки новой версии контейнер может быть уже запущен, а backend ещё несколько секунд стартует. Интерфейс проверяет <span class="tag">/api/health</span> и повторяет запросы, но если Home Assistant показал временную ошибку — обычно достаточно подождать несколько секунд и открыть add-on снова.</div></div>
+    </div>
+
+    <div class="card full"><h2>8. Настройка Keenetic через Proxy Client</h2>
+      <div class="support-note"><b>Важно по версии KeeneticOS.</b> Официально Proxy Client появился в KeeneticOS 3.9, но для нормальной работы и актуального интерфейса лучше ориентироваться на KeeneticOS 5.x и новее. На старых версиях названия пунктов меню могут отличаться.</div>
+      <div class="wizard-step"><h3>1. Установить компонент Proxy Client</h3><ol><li>Открой веб-интерфейс Keenetic.</li><li>Перейди: <b>Управление → Настройки системы</b>.</li><li>Нажми <b>Изменить набор компонентов</b>.</li><li>Найди и установи компонент <b>Proxy client / Клиент proxy</b>.</li><li>Дождись установки и перезагрузки компонентов, если роутер попросит.</li></ol></div>
+      <div class="wizard-step"><h3>2. Создать proxy-подключение</h3><ol><li>Перейди: <b>Интернет → Другие подключения</b>.</li><li>В блоке proxy-подключений нажми <b>Добавить подключение</b>.</li><li>Тип: обычно <b>SOCKS5</b>. Если нужен HTTP — выбирай HTTP.</li><li><b>Сервер</b>: внешний IP/DDNS твоего Home Assistant или сервера.</li><li><b>Порт</b>: SOCKS5-порт из add-on, обычно <span class="tag">2080</span>; для HTTP обычно <span class="tag">2081</span>.</li><li><b>Логин</b> и <b>пароль</b>: данные пользователя, созданного во вкладке <b>Пользователи</b>.</li><li>Включи подключение переключателем.</li></ol></div>
+      <div class="wizard-step"><h3>3. Настроить домены, которые должны идти через proxy</h3><ol><li>Перейди: <b>Сетевые правила → Маршрутизация</b>.</li><li>Открой <b>Маршруты DNS</b> или раздел доменных списков, если он доступен в твоей прошивке.</li><li>Создай списки доменов: например <span class="tag">openai.com</span>, <span class="tag">chatgpt.com</span>, <span class="tag">youtube.com</span> — только то, что реально нужно гнать через proxy.</li><li>Создай правило маршрутизации: для этих DNS/доменных списков использовать созданное proxy-подключение.</li></ol><div class="muted">Смысл такой: роутер сам решает, какие домены отправлять через proxy, а весь остальной интернет оставляет напрямую.</div></div>
+      <div class="wizard-step"><h3>4. Настроить DNS через DoT/DoH</h3><ol><li>Перейди: <b>Сетевые правила → Интернет-фильтры → Настройка DNS</b>.</li><li>Добавь DNS-сервер.</li><li>Интерфейс: можно выбрать любой/основной доступный интерфейс, если нет отдельного сценария.</li><li>Адрес: <span class="tag">9.9.9.9</span>.</li><li>Имя TLS-сервера: <span class="tag">dns.quad9.net</span>.</li></ol><div class="muted"><b>Зачем это нужно:</b> при proxy-подключении важно, чтобы DNS-запросы резолвились предсказуемо и не ломали доменную маршрутизацию. Официальная справка Keenetic прямо предупреждает, что доступ через proxy может работать некорректно, если устройства не используют DNS через DoT/DoH. Quad9 дополнительно фильтрует известные вредоносные домены. Это не строго обязательно для каждого сценария, но для схемы «домены через proxy, остальное напрямую» я бы считал это рекомендованной настройкой.</div></div>
+      <div class="wizard-step"><h3>5. Проверка</h3><ol><li>Открой на клиентском устройстве сайт, который должен идти через proxy.</li><li>Во вкладке add-on <b>Клиенты</b> проверь, что роутер появился онлайн.</li><li>Во вкладке <b>Соединения</b> проверь назначение и маршрут.</li><li>Если домен идёт напрямую — проверь DNS-список и правило маршрутизации на Keenetic.</li></ol></div>
     </div>
   </div></section>
 
@@ -347,9 +400,9 @@ function groupConnections(conns){const m={};for(const c of conns){const meta=c.m
 function setHeaderNote(t){if($('headerSummaryNote'))$('headerSummaryNote').textContent=t||'—'}
 function renderHeaderSummary(){const s=state.status||{},cur=s.current||{},vpn=s.vpn||{};if($('headerServerName'))$('headerServerName').textContent=cur.server||'—';if($('headerServerPing'))$('headerServerPing').textContent=cur.delay?cur.delay+' мс':'—';if($('headerServerMode'))$('headerServerMode').textContent=cur.mode||'—';if($('headerVpnState'))$('headerVpnState').textContent=vpn.connected?'подключён':'не подтверждён';if(!($('headerSummaryNote')||{}).dataset?.busy){const checked=cur.checked_at?(' · проверено '+new Date(cur.checked_at*1000).toLocaleString('ru-RU')):'';setHeaderNote((vpn.connected?'VPN активен':'VPN ещё не подтверждён')+checked)}}
 
-async function refreshAll(){try{await Promise.all([loadStatus(),loadServers(),loadRouting(),loadSecurity(),loadPorts(),loadClients(false),loadClientHistory(),loadUsers(),loadBlocks(),loadTraffic(),loadConnections(false),loadLogs(),loadSystemCheck(false)]);msg('Данные обновлены')}catch(e){msg(e.message,true)}}
-async function refreshLight(){try{await Promise.all([loadStatus(),loadTraffic()]);if(['clients','connections'].includes(state.activeTab)){await loadClients(false);await loadConnections(false)}if(state.activeTab==='diag')await loadLogs()}catch(e){msg(e.message,true)}}
-async function refreshCurrentTab(force=false){try{if(state.activeTab==='overview')await loadStatus();if(state.activeTab==='wizard')await loadSystemCheck(true);if(state.activeTab==='system')await loadSystemCheck(true);if(state.activeTab==='backup'){}if(state.activeTab==='servers')await loadServers();if(state.activeTab==='routing')await loadRouting();if(state.activeTab==='security')await loadSecurity();if(state.activeTab==='ports')await loadPorts();if(state.activeTab==='clients')await loadClients(force);if(state.activeTab==='history'){await loadClients(force);await loadClientHistory();}if(state.activeTab==='users')await loadUsers();if(state.activeTab==='connections')await loadConnections(force);if(state.activeTab==='traffic')await loadTraffic();if(state.activeTab==='diag')await loadLogs()}catch(e){msg(e.message,true)}}
+async function refreshAll(){try{await Promise.all([loadStatus(),loadServers(),loadRouting(),loadSecurity(),loadPorts(),loadClients(false),loadClientHistory(),loadUsers(),loadBlocks(),loadTraffic(true),loadConnections(false),loadLogs(),loadSystemCheck(false)]);msg('Данные обновлены')}catch(e){msg(e.message,true)}}
+async function refreshLight(){try{await Promise.all([loadStatus(),loadTraffic(false)]);if(['clients','connections'].includes(state.activeTab)){await loadClients(false);await loadConnections(false)}if(state.activeTab==='diag')await loadLogs()}catch(e){msg(e.message,true)}}
+async function refreshCurrentTab(force=false){try{if(state.activeTab==='overview')await loadStatus();if(state.activeTab==='wizard')await loadSystemCheck(true);if(state.activeTab==='system')await loadSystemCheck(true);if(state.activeTab==='backup'){}if(state.activeTab==='instructions'){}if(state.activeTab==='servers')await loadServers();if(state.activeTab==='routing')await loadRouting();if(state.activeTab==='security')await loadSecurity();if(state.activeTab==='ports')await loadPorts();if(state.activeTab==='clients')await loadClients(force);if(state.activeTab==='history'){await loadClients(force);await loadClientHistory();}if(state.activeTab==='users')await loadUsers();if(state.activeTab==='connections')await loadConnections(force);if(state.activeTab==='traffic')await loadTraffic(true);if(state.activeTab==='diag')await loadLogs()}catch(e){msg(e.message,true)}}
 async function loadStatus(){state.status=await api('/api/status');state.subscriptionInfo=state.status.subscription_info||state.subscriptionInfo;if($('singboxLogLevel'))$('singboxLogLevel').value=(state.status.options||{}).log_level||'warn';renderOverview();renderTelegram();renderSubscriptionInfo()}
 async function loadServers(){const d=await api('/api/servers');state.servers=d.servers||[];state.serverPings=d.pings||{};state.autoTags=d.auto_tags||[];state.subscriptionUrl=d.subscription_url||'';state.subscriptionInfo=d.subscription_info||state.subscriptionInfo;state.subscriptionJson=d.subscription_json||state.subscriptionJson;if($('subUrl')&&!$('subUrl').value)$('subUrl').value=state.subscriptionUrl||'';if($('subscriptionJsonUrl')&&!$('subscriptionJsonUrl').value)$('subscriptionJsonUrl').value=state.subscriptionUrl||'';renderServers();renderServerSelector();renderSubscriptionInfo();renderSubscriptionJson()}
 async function loadRouting(){const d=await api('/api/routing');state.routing=d.routing||{};renderRouting()}
@@ -360,7 +413,23 @@ async function loadClientHistory(){const d=await api('/api/clients/history?limit
 async function clearClientHistory(){if(!confirm('Очистить всю историю подключений? Онлайн-статус начнёт собираться заново.'))return;await post('/api/clients/history/clear',{});await loadClientHistory();msg('История подключений очищена')}
 async function loadUsers(){const d=await api('/api/users');state.users=d.users||[];renderUsers()}
 async function loadBlocks(){const d=await api('/api/blocklist');state.blocks=d.blocked||[];renderBlocks()}
-async function loadTraffic(){state.traffic=await api('/api/traffic');state.subscriptionInfo=state.traffic.subscription_info||state.subscriptionInfo;renderTraffic();renderSubscriptionInfo()}
+async function refreshSubscriptionTrafficQuiet(){
+  try{
+    const r=await post('/api/subscription/refresh_traffic',{});
+    state.subscriptionInfo=r.subscription_info||state.subscriptionInfo;
+    return true;
+  }catch(e){
+    state.lastTrafficRefreshError=e.message||String(e);
+    return false;
+  }
+}
+async function loadTraffic(refreshProvider=false){
+  const providerChecked=refreshProvider?await refreshSubscriptionTrafficQuiet():false;
+  state.traffic=await api('/api/traffic');
+  state.traffic.provider_checked_now=providerChecked;
+  state.subscriptionInfo=state.traffic.subscription_info||state.subscriptionInfo;
+  renderTraffic();renderSubscriptionInfo();
+}
 async function loadConnections(force=false){const d=await api('/api/connections'+(force?'?force=1':''));state.connections=d.connections||[];renderConnections()}
 async function loadLogs(){const d=await api('/api/logs?limit=300&category='+encodeURIComponent(state.logCategory||'all'));state.logs=d.events||[];if($('logsMeta'))$('logsMeta').textContent=`Категория: ${d.category||state.logCategory}, показано ${state.logs.length}, хранится до ${d.max_retention||2000}`;renderLogs()}
 async function saveLogLevel(){const level=$('singboxLogLevel')?.value||'warn';await post('/api/options/logging',{log_level:level,apply:true});await loadStatus();await loadLogs();msg('Уровень логирования sing-box сохранён: '+level+'. Применяется в фоне.')}
@@ -586,7 +655,7 @@ function renderConnections(){
 }
 
 function switchControl(id,checked,onchange,labelOn='Включён',labelOff='Выключен'){
-  return `<label class="toggle-wrap" title="${checked?'Выключить':'Включить'}"><input type="checkbox" ${checked?'checked':''} onchange="${onchange}"><span class="toggle-slider"></span><span><span class="toggle-label">${checked?labelOn:labelOff}</span><span class="toggle-sub">переключатель доступа</span></span></label>`;
+  return `<label class="toggle-wrap" title="${checked?'Выключить':'Включить'}"><input type="checkbox" ${checked?'checked':''} onchange="${onchange}"><span class="toggle-slider"></span><span class="toggle-label">${checked?labelOn:labelOff}</span></label>`;
 }
 function userToggleButton(u){
   return switchControl('user-'+u.id, !!u.enabled, `toggleUser('${esc(u.id)}',this.checked)`, 'Включён', 'Выключен');
@@ -677,7 +746,7 @@ function renderManualTraffic(items){
 }
 function renderTraffic(){
   const t=state.traffic||{},limit=Number(t.limit_bytes||0),used=Number(t.used_bytes||0),left=Math.max(0,limit-used),pct=limit?Math.min(100,used/limit*100):0;
-  $('trafficSource').textContent=t.source==='subscription'?'VPN-подписка':'локальный счётчик';$('trafficLimit').textContent=limit?fmtBytes(limit):'не задан';$('trafficUsed').textContent=fmtBytes(used);$('trafficLeft').textContent=limit?fmtBytes(left):'—';if($('trafficLeftShort'))$('trafficLeftShort').textContent=limit?fmtBytes(left):'—';$('trafficPercent').textContent=limit?pct.toFixed(1)+'%':'—';$('trafficBar').style.width=pct+'%';if($('trafficLimitGb'))$('trafficLimitGb').value=limit?bytesToGb(limit).toFixed(2):'';if($('trafficUsedGb'))$('trafficUsedGb').value=used?bytesToGb(used).toFixed(2):'';const extra=t.source==='subscription'&&t.provider_updated_at?` · данные провайдера: ${fmtTime(t.provider_updated_at)}`:'';$('trafficNote').textContent='Обновлено: '+fmtTime(t.updated_at)+extra+' · автообновление раз в 60 секунд';
+  $('trafficSource').textContent=t.source==='subscription'?'VPN-подписка':'локальный счётчик';$('trafficLimit').textContent=limit?fmtBytes(limit):'не задан';$('trafficUsed').textContent=fmtBytes(used);$('trafficLeft').textContent=limit?fmtBytes(left):'—';if($('trafficLeftShort'))$('trafficLeftShort').textContent=limit?fmtBytes(left):'—';$('trafficPercent').textContent=limit?pct.toFixed(1)+'%':'—';$('trafficBar').style.width=pct+'%';if($('trafficLimitGb'))$('trafficLimitGb').value=limit?bytesToGb(limit).toFixed(2):'';if($('trafficUsedGb'))$('trafficUsedGb').value=used?bytesToGb(used).toFixed(2):'';const extra=t.source==='subscription'&&t.provider_updated_at?` · данные провайдера: ${fmtTime(t.provider_updated_at)}`:'';const checked=t.provider_checked_now?' · сейчас запрошено у провайдера':'';const err=state.lastTrafficRefreshError?` · последняя ошибка автообновления: ${state.lastTrafficRefreshError}`:'';$('trafficNote').textContent='Отображено: '+fmtTime(t.updated_at)+extra+checked+err+' · на этой вкладке автообновление раз в 60 секунд';
   renderManualTraffic(t.manual_sources||[]);
 }
 async function saveTraffic(){await post('/api/traffic',{limit_bytes:gbToBytes($('trafficLimitGb').value),used_bytes:gbToBytes($('trafficUsedGb').value)});await loadTraffic();await loadLogs()}
@@ -799,7 +868,7 @@ $('btnRefreshConnections').onclick=()=>runUiAction('Обновляю соеди�
 $('btnRefreshClientHistory').onclick=()=>runUiAction('Обновляю историю клиентов',async()=>{await loadClients(true);await loadClientHistory();},'История клиентов обновлена');
 $('btnClearClientHistory').onclick=()=>runUiAction('Очищаю историю клиентов',clearClientHistory,'История клиентов очищена');
 $('btnCloseAll').onclick=()=>runUiAction('Закрываю все соединения',async()=>{await post('/api/connections/close_all');await refreshAll()},'Все соединения закрыты');
-$('btnRefreshSubTraffic').onclick=()=>runUiAction('Обновляю трафик подписки',async()=>{const r=await post('/api/subscription/refresh_traffic',{});state.subscriptionInfo=r.subscription_info||state.subscriptionInfo;await loadTraffic();renderSubscriptionInfo();},'Трафик подписки обновлён');
+$('btnRefreshSubTraffic').onclick=()=>runUiAction('Обновляю трафик подписки',async()=>{state.lastTrafficRefreshError='';await loadTraffic(true);renderSubscriptionInfo();},'Трафик подписки обновлён');
 $('btnSaveTraffic').onclick=()=>runUiAction('Сохраняю локальный лимит трафика',saveTraffic,'Локальный лимит трафика сохранён');
 $('btnResetTraffic').onclick=()=>runUiAction('Сбрасываю трафик',async()=>{await post('/api/traffic/reset');await loadTraffic();await loadLogs()},'Счётчик трафика сброшен');
 $('btnAddManualTraffic').onclick=()=>runUiAction('Сохраняю ручной источник трафика',saveManualTraffic,'Ручной источник трафика сохранён');
@@ -819,7 +888,7 @@ $('btnShowRuList').onclick=()=>runUiAction('Загружаю полный RU IP-
 $('btnUpdateRuList').onclick=()=>runUiAction('Обновляю RU IP-список',async()=>{msg('Скачиваю RU IP-список... Это может занять 10–60 секунд.');const r=await post('/api/security/update_country',{country:'RU'});state.ru=r.details||null;renderRuList(state.ru);msg(r.message||`RU IP-список обновлён: ${r.count||0} CIDR`);await loadSecurity();await loadLogs();},'RU IP-список обновлён');
 $('btnSaveRouting').onclick=()=>runUiAction('Сохраняю маршрутизацию',()=>saveRouting(false),'Маршрутизация сохранена');
 $('btnUpdateRoutingSources').onclick=()=>runUiAction('Обновляю списки маршрутизации',async()=>{ $('routingStatusText').textContent='Обновляю источники списков...'; await saveRouting(true); $('routingStatusText').textContent='Списки обновлены: '+new Date().toLocaleString('ru-RU');},'Списки маршрутизации обновлены');
-api('/api/health',{retries:5}).then(h=>{setHeaderNote('Backend готов. sing-box: '+(h.singbox_running?'работает':'запускается/проверяется'));return refreshAll();}).catch(e=>{msg('Backend пока недоступен: '+(e.message||e),true);setHeaderNote('Backend временно недоступен. Обнови страницу через несколько секунд.');});setInterval(refreshLight,30000);setInterval(()=>{if(state.activeTab==='traffic')loadTraffic();},60000);setInterval(()=>{if(state.activeTab==='connections')loadConnections(false);if(state.activeTab==='clients')loadClients(false);if(state.activeTab==='history'){loadClients(false);loadClientHistory();}},15000);
+api('/api/health',{retries:5}).then(h=>{setHeaderNote('Backend готов. sing-box: '+(h.singbox_running?'работает':'запускается/проверяется'));return refreshAll();}).catch(e=>{msg('Backend пока недоступен: '+(e.message||e),true);setHeaderNote('Backend временно недоступен. Обнови страницу через несколько секунд.');});setInterval(refreshLight,30000);setInterval(()=>{if(state.activeTab==='traffic')loadTraffic(true);},60000);setInterval(()=>{if(state.activeTab==='connections')loadConnections(false);if(state.activeTab==='clients')loadClients(false);if(state.activeTab==='history'){loadClients(false);loadClientHistory();}},15000);
 </script>
 </body>
 </html>

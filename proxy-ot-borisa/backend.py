@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.12"
+APP_VERSION = "1.19.13"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -329,7 +329,7 @@ def _default_options():
         "proxy_password": "ChangeThisProxyPassword",
         "urltest_interval": "2m",
         "urltest_tolerance": 5,
-        "log_level": "info",
+        "log_level": "warn",
         "servers_json": "[]",
         "telegram_proxy_enabled": False,
         "telegram_proxy_port": 2083,
@@ -369,11 +369,45 @@ def save_runtime_ports(ports):
     write_json(RUNTIME_PORTS_FILE, clean)
     return clean
 
+
+VALID_SINGBOX_LOG_LEVELS = {"trace", "debug", "info", "warn", "error", "fatal", "panic"}
+
+def normalize_log_level(value, fallback="warn"):
+    value = str(value or "").strip().lower()
+    aliases = {"warning": "warn", "err": "error", "quiet": "error", "normal": "warn"}
+    value = aliases.get(value, value)
+    return value if value in VALID_SINGBOX_LOG_LEVELS else fallback
+
+def load_runtime_options():
+    raw = read_json(RUNTIME_OPTIONS_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    result = {}
+    if "log_level" in raw:
+        result["log_level"] = normalize_log_level(raw.get("log_level"))
+    return result
+
+def save_runtime_options(options):
+    current = load_runtime_options()
+    if "log_level" in options:
+        current["log_level"] = normalize_log_level(options.get("log_level"))
+    write_json(RUNTIME_OPTIONS_FILE, current)
+    return current
+
 def load_options():
     merged = load_addon_options()
     runtime_ports = load_runtime_ports()
     for key, value in runtime_ports.items():
         merged[key] = value
+    runtime_options = load_runtime_options()
+    if "log_level" in runtime_options:
+        merged["log_level"] = normalize_log_level(runtime_options.get("log_level"))
+    else:
+        # v1.19.13: previous builds defaulted to info, which flooded the add-on log
+        # with every single connection. Quiet operational default is warn.
+        merged["log_level"] = normalize_log_level(merged.get("log_level"), "warn")
+        if merged.get("log_level") == "info":
+            merged["log_level"] = "warn"
     return merged
 
 def _port_is_free(port, current_ports=None, host="0.0.0.0"):
@@ -3336,7 +3370,7 @@ def make_singbox_config():
     if route_rule_sets:
         route["rule_set"] = route_rule_sets
     return {
-        "log": {"level": options.get("log_level", "info"), "timestamp": True},
+        "log": {"level": options.get("log_level", "warn"), "timestamp": True},
         "experimental": {"clash_api": {"external_controller": "127.0.0.1:9090", "secret": options.get("secret", "")}, "cache_file": {"enabled": True, "path": "/data/sing-box-cache.db"}},
         "inbounds": inbounds,
         "outbounds": outbounds,
@@ -4418,7 +4452,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.19.12"
+    server_version = "ProxyOtBorisa/1.19.13"
 
     def log_message(self, fmt, *args):
         return
@@ -4477,9 +4511,25 @@ class Handler(BaseHTTPRequestHandler):
             path = normalize_request_path(self.path)
             if not path.startswith("/api"):
                 return self.serve_file(path)
+            if path == "/api/health":
+                options = load_options()
+                singbox_ok = bool(singbox_process and singbox_process.poll() is None)
+                mtg = mtg_status()
+                return self.send_json({
+                    "ok": True,
+                    "app": APP_NAME,
+                    "version": APP_VERSION,
+                    "backend_ready": True,
+                    "singbox_running": singbox_ok,
+                    "singbox_ready": singbox_ok,
+                    "telegram_running": bool(mtg.get("running")),
+                    "log_level": options.get("log_level", "warn"),
+                    "last_error": last_error,
+                    "updated_at": time.time(),
+                })
             if path == "/api/status":
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_monitored_connections(force=False, run_autoban=True); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/system/check":
                 return self.send_json(system_check_report())
             if path == "/api/backup":
@@ -4574,6 +4624,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = normalize_request_path(self.path)
             body = self.read_body()
+            if path == "/api/options/logging":
+                level = normalize_log_level(body.get("log_level"))
+                runtime = save_runtime_options({"log_level": level})
+                applied = False
+                if bool(body.get("apply", True)):
+                    validate_singbox_config()
+                    restart_singbox_background("log_level_change")
+                    applied = True
+                log("SETTINGS", "LOG_LEVEL", f"sing-box log level set to {level}", actor="ui", action="log_level", target=level, extra={"applied": applied})
+                return self.send_json({"ok": True, "runtime_options": runtime, "log_level": level, "apply_background": applied})
             if path == "/api/power":
                 settings = load_settings()
                 if "http_enabled" in body:

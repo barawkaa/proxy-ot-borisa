@@ -1,5 +1,5 @@
 name: "Proxy от Бориса"
-version: "1.19.12"
+version: "1.19.13"
 slug: "proxy_ot_borisa"
 description: "Управляемый HTTP/SOCKS/Telegram MTProto прокси на базе sing-box"
 arch:
@@ -29,8 +29,8 @@ options:
   proxy_username: "user"
   proxy_password: "ChangeThisProxyPassword"
   urltest_interval: "2m"
-  urltest_tolerance: 50
-  log_level: "info"
+  urltest_tolerance: 5
+  log_level: "warn"
   servers_json: "[]"
 
 schema:

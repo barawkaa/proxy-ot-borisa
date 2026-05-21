@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.20.0"
+APP_VERSION = "1.20.1"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -996,7 +996,7 @@ def maintenance_status():
         "client_sessions": data_path("client_sessions.json"),
         "traffic": data_path("traffic.json"),
         "servers": data_path("servers.json"),
-        "users": data_path("users.json"),
+        "users": users_path(),
         "runtime_options": data_path("runtime_options.json"),
         "last_good_singbox_config": LAST_GOOD_SINGBOX_CONFIG,
     }
@@ -4716,7 +4716,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.20.0"
+    server_version = "ProxyOtBorisa/1.20.1"
 
     def log_message(self, fmt, *args):
         return
@@ -4881,6 +4881,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/logs":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 limit = (qs.get("limit") or [200])[-1]
+                category = (qs.get("category") or ["all"])[-1]
+                return self.send_json({"events": get_events(limit, category), "category": category, "limit": limit, "max_retention": EVENT_LOG_LIMIT})
+            if path == "/api/audit":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                limit = (qs.get("limit") or [500])[-1]
                 category = (qs.get("category") or ["all"])[-1]
                 return self.send_json({"events": get_events(limit, category), "category": category, "limit": limit, "max_retention": EVENT_LOG_LIMIT})
             if path.startswith("/api/geo/"):
@@ -5055,6 +5060,8 @@ class Handler(BaseHTTPRequestHandler):
                     restart_singbox_background('user_'+action)
                     return self.send_json({'ok': True, 'users': users_safe(), 'apply_background': True})
                 raise ValueError('Неизвестное действие users')
+            if path == "/api/routing/test":
+                return self.send_json(route_test_domain(body.get("q") or body.get("domain") or body.get("value") or ""))
             if path == "/api/proxy/select":
                 name = body.get("name")
                 clash_request("PUT", "/proxies/Proxy", {"name": name}, timeout=5)

@@ -1,5 +1,5 @@
 name: "Proxy от Бориса"
-version: "1.20.1"
+version: "1.21.0"
 slug: "proxy_ot_borisa"
 description: "Управляемый HTTP/SOCKS/Telegram MTProto прокси на базе sing-box"
 arch:
@@ -15,7 +15,7 @@ ingress: true
 ingress_port: 8099
 panel_icon: "mdi:shield-link-variant"
 panel_title: "Proxy от Бориса"
-panel_admin: false
+panel_admin: true
 
 options:
   secret: "ChangeThisSecret_2026"
@@ -25,12 +25,13 @@ options:
   telegram_proxy_port: 2083
   telegram_front_domain: "www.google.com"
   socks_auth_enabled: true
-  http_auth_enabled: false
+  http_auth_enabled: true
   proxy_username: "user"
   proxy_password: "ChangeThisProxyPassword"
   urltest_interval: "2m"
   urltest_tolerance: 5
   log_level: "warn"
+  production_mode: "normal"
   servers_json: "[]"
 
 schema:
@@ -47,6 +48,7 @@ schema:
   urltest_interval: "str"
   urltest_tolerance: "int(0,1000)"
   log_level: "list(trace|debug|info|warn|error|fatal|panic)"
+  production_mode: "list(normal|diagnostic|debug|safe)"
   servers_json: "str"
 
 ports:

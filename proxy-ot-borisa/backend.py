@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.20.1"
+APP_VERSION = "1.21.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -33,6 +33,8 @@ PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port"]
 BACKUP_VERSION = 2
 DATA_SCHEMA_VERSION = 3
 MIGRATIONS_FILE = Path("/data/migrations.json")
+AUDIT_LOG_FILE = Path("/data/audit.json")
+AUDIT_LOG_LIMIT = 5000
 LAST_GOOD_SINGBOX_CONFIG = DATA_DIR / "sing-box.last-good.json"
 BACKUP_FILES = {
     "settings": "settings.json",
@@ -49,6 +51,7 @@ BACKUP_FILES = {
     "subscription_servers": "subscription_servers.json",
     "telegram": "telegram.json",
     "events": "events.json",
+    "audit": "audit.json",
     "client_sessions": "client_sessions.json",
     "client_limits": "client_limits.json",
     "runtime_options": "runtime_options.json",
@@ -280,9 +283,44 @@ def append_event(stage, result, message, actor="system", action="", target="", e
         pass
 
 
+def append_audit(stage, result, message, actor="system", action="", target="", extra=None):
+    try:
+        events = read_json(AUDIT_LOG_FILE, [])
+        if not isinstance(events, list):
+            events = []
+        events.append({
+            "ts": time.time(),
+            "time": iso_time(),
+            "category": event_category(stage, result),
+            "stage": str(stage),
+            "result": str(result),
+            "actor": str(actor or "system"),
+            "action": str(action or stage),
+            "target": str(target or ""),
+            "message": str(message),
+            "extra": extra or {},
+        })
+        write_json(AUDIT_LOG_FILE, events[-AUDIT_LOG_LIMIT:])
+    except Exception:
+        pass
+
+
+def is_audit_event(stage, action="", result=""):
+    st = str(stage or "").upper()
+    ac = str(action or "").lower()
+    rs = str(result or "").upper()
+    if "ERROR" in rs or "FATAL" in rs:
+        return True
+    if st in {"USERS", "USER", "MTG", "TELEGRAM", "SECURITY", "BLOCK", "TRUSTED", "COUNTRY", "AUTOBAN", "BACKUP", "WIZARD", "SERVERS", "ROUTING", "PORTS", "MAINTENANCE"}:
+        return True
+    return ac.startswith(("user_", "server_", "security_", "backup_", "routing_", "port_", "audit_"))
+
+
 def log(stage, result, message, actor="system", action="", target="", extra=None):
     print(f"[{time.strftime('%H:%M:%S')}] INFO: [STAGE={stage}] [RESULT={result}] {message}", flush=True)
     append_event(stage, result, message, actor=actor, action=action or stage, target=target, extra=extra)
+    if is_audit_event(stage, action or stage, result):
+        append_audit(stage, result, message, actor=actor, action=action or stage, target=target, extra=extra)
 
 
 def log_exception(stage, action, error, actor="system", target="", extra=None):
@@ -338,6 +376,7 @@ def _default_options():
         "urltest_interval": "2m",
         "urltest_tolerance": 5,
         "log_level": "warn",
+        "production_mode": "normal",
         "servers_json": "[]",
         "telegram_proxy_enabled": False,
         "telegram_proxy_port": 2083,
@@ -893,11 +932,13 @@ def app_activity():
 def export_backup(include_events=False, include_secrets=True):
     files = {}
     for key, fname in BACKUP_FILES.items():
-        if key == "events" and not include_events:
+        if key in {"events", "audit"} and not include_events:
             continue
         path = data_path(fname)
         if path.exists():
             files[key] = read_json(path, None)
+        elif key in {"events", "audit"}:
+            files[key] = []
     if not include_secrets:
         files = sanitize_sensitive(files)
     options = load_options()
@@ -920,6 +961,7 @@ def export_backup(include_events=False, include_secrets=True):
             "socks_auth_enabled": options.get("socks_auth_enabled"),
             "telegram_proxy_enabled": options.get("telegram_proxy_enabled"),
             "log_level": options.get("log_level"),
+            "production_mode": options.get("production_mode"),
         }) if not include_secrets else {
             "http_proxy_port": options.get("http_proxy_port"),
             "socks_proxy_port": options.get("socks_proxy_port"),
@@ -928,6 +970,7 @@ def export_backup(include_events=False, include_secrets=True):
             "socks_auth_enabled": options.get("socks_auth_enabled"),
             "telegram_proxy_enabled": options.get("telegram_proxy_enabled"),
             "log_level": options.get("log_level"),
+            "production_mode": options.get("production_mode"),
         },
         "active_ports_snapshot": ports,
         "files": files,
@@ -945,7 +988,7 @@ def import_backup(payload, mode="replace"):
     for key, fname in BACKUP_FILES.items():
         if key not in files:
             continue
-        if key == "events" and mode != "replace_with_logs":
+        if key in {"events", "audit"} and mode != "replace_with_logs":
             continue
         write_json(data_path(fname), files[key])
         restored.append(key)
@@ -993,6 +1036,7 @@ def file_size(path):
 def maintenance_status():
     files = {
         "events": data_path("events.json"),
+        "audit": AUDIT_LOG_FILE,
         "client_sessions": data_path("client_sessions.json"),
         "traffic": data_path("traffic.json"),
         "servers": data_path("servers.json"),
@@ -1010,7 +1054,7 @@ def maintenance_status():
         "target_schema_version": DATA_SCHEMA_VERSION,
         "disk": disk,
         "files": {k: {"path": str(v), "exists": Path(v).exists(), "size_bytes": file_size(v)} for k, v in files.items()},
-        "retention": {"events_limit": EVENT_LOG_LIMIT, "client_history_days": int(CLIENT_HISTORY_RETENTION_SECONDS/86400), "client_history_max_sessions": CLIENT_HISTORY_MAX_SESSIONS},
+        "retention": {"events_limit": EVENT_LOG_LIMIT, "audit_limit": AUDIT_LOG_LIMIT, "client_history_days": int(CLIENT_HISTORY_RETENTION_SECONDS/86400), "client_history_max_sessions": CLIENT_HISTORY_MAX_SESSIONS},
         "updated_at": time.time(),
     }
 
@@ -1018,6 +1062,66 @@ def maintenance_status():
 def clear_events():
     write_json(data_path("events.json"), [])
     return {"ok": True, "events": []}
+
+
+def get_audit_events(limit=300, category="all"):
+    events = read_json(AUDIT_LOG_FILE, [])
+    if not isinstance(events, list):
+        return []
+    try:
+        limit = max(1, min(int(limit), AUDIT_LOG_LIMIT))
+    except Exception:
+        limit = 300
+    if category and category != "all":
+        events = [e for e in events if str(e.get("category") or event_category(e.get("stage"), e.get("result"))) == category]
+    return events[-limit:][::-1]
+
+
+def clear_audit_events():
+    write_json(AUDIT_LOG_FILE, [])
+    return {"ok": True, "events": []}
+
+
+def production_mode_from_options(options=None):
+    options = options or load_options()
+    mode = str(options.get("production_mode") or "normal").lower().strip()
+    return mode if mode in {"normal", "diagnostic", "debug", "safe"} else "normal"
+
+
+def apply_production_mode(mode):
+    mode = str(mode or "normal").lower().strip()
+    if mode not in {"normal", "diagnostic", "debug", "safe"}:
+        raise ValueError("Некорректный режим работы")
+    opts = load_runtime_options()
+    opts["production_mode"] = mode
+    if mode == "normal":
+        opts["log_level"] = "warn"
+    elif mode == "diagnostic":
+        opts["log_level"] = "info"
+    elif mode == "debug":
+        opts["log_level"] = "debug"
+    elif mode == "safe":
+        opts["log_level"] = "warn"
+    save_runtime_options(opts)
+    return load_options()
+
+
+def mutating_path_allowed_in_safe_mode(path):
+    # Safe mode is for recovery: viewing/exporting is allowed, destructive/apply
+    # actions are blocked. Changing mode back is intentionally allowed.
+    allowed = {
+        "/api/options/mode",
+        "/api/options/logging",
+        "/api/wizard/complete",
+        "/api/audit/clear",
+        "/api/maintenance/prune",
+    }
+    return path in allowed
+
+
+def ensure_not_safe_mode_for_mutation(path):
+    if production_mode_from_options(load_options()) == "safe" and not mutating_path_allowed_in_safe_mode(path):
+        raise PermissionError("Безопасный режим: изменения заблокированы. Переключи режим работы на обычный/диагностику, если нужно применить настройки.")
 
 
 def migrate_data():
@@ -1241,6 +1345,17 @@ def system_check_report():
     bad = sum(1 for i in items if i["status"] == "bad")
     warn = sum(1 for i in items if i["status"] == "warn")
     ok = sum(1 for i in items if i["status"] == "ok")
+    overall = "bad" if bad else ("warn" if warn else "ok")
+    # First-launch and production-hardening checks.
+    if str(options.get("secret") or "").startswith("ChangeThis"):
+        items.append(_check_item("warn", "Clash/API secret оставлен по умолчанию", "Смени secret в конфигурации add-on или runtime-настройках.", "Открыть конфигурацию add-on", "security")); warn += 1
+    if str(options.get("proxy_password") or "").startswith("ChangeThis"):
+        items.append(_check_item("warn", "Пароль прокси по умолчанию", "Смени стандартный proxy_password перед внешним доступом.", "Открыть пользователей/конфигурацию", "security")); warn += 1
+    if not bool(options.get("http_auth_enabled")) or not bool(options.get("socks_auth_enabled")):
+        items.append(_check_item("warn", "Авторизация прокси включена не полностью", "Для публичных портов HTTP и SOCKS5 должны быть с авторизацией.", "Включить авторизацию", "security")); warn += 1
+    users = load_proxy_users()
+    if not users:
+        items.append(_check_item("warn", "Нет зарегистрированных пользователей", "Создай отдельных пользователей для устройств/людей, иначе не будет нормальной идентификации.", "Открыть пользователей", "users")); warn += 1
     overall = "bad" if bad else ("warn" if warn else "ok")
     return {"overall": overall, "ok": ok, "warn": warn, "bad": bad, "items": items, "generated_at": time.time(), "wizard_completed": bool(settings.get("wizard_completed"))}
 
@@ -1484,70 +1599,8 @@ def next_telegram_port(users, preferred=None):
     return port
 
 
-def create_default_user():
-    options = load_options()
-    tg = read_json(data_path('telegram_proxy.json'), {})
-    front = tg.get('front_domain') or options.get('telegram_front_domain') or 'www.google.com'
-    secret_value = tg.get('secret') or make_mtproto_secret(front)
-    return {
-        'id': 'default',
-        'name': 'Основной клиент',
-        'enabled': True,
-        'trusted': True,
-        'username': str(options.get('proxy_username') or 'user'),
-        'password': str(options.get('proxy_password') or 'ChangeThisProxyPassword'),
-        'socks_enabled': True,
-        'http_enabled': True,
-        'telegram_enabled': bool(options.get('telegram_proxy_enabled', False)),
-        'telegram_port': int(tg.get('port') or options.get('telegram_proxy_port', 2083) or 2083),
-        'telegram_secret': secret_value,
-        'telegram_front_domain': front,
-        'public_host': tg.get('public_host') or '',
-        'notes': 'Создан автоматически из настроек add-on',
-        'created_at': time.time(),
-        'updated_at': time.time(),
-        'blocked_until': None,
-        'blocked_comment': '',
-    }
 
 
-def normalize_user(user, existing_users=None):
-    existing_users = existing_users or []
-    now = time.time()
-    user = dict(user or {})
-    user.setdefault('id', secrets.token_hex(6))
-    user['id'] = safe_tag(user.get('id'), 'client')
-    user['name'] = str(user.get('name') or user.get('username') or 'Клиент').strip()
-    user['username'] = slugify_username(user.get('username') or user.get('name') or user['id'], 'client')
-    user.setdefault('password', random_token(20))
-    user['enabled'] = bool(user.get('enabled', True))
-    try:
-        exp = user.get('expires_at')
-        if exp not in [None, '', 0] and float(exp) <= time.time():
-            user['enabled'] = False
-    except Exception:
-        pass
-    user['trusted'] = bool(user.get('trusted', True))
-    user['socks_enabled'] = bool(user.get('socks_enabled', True))
-    user['http_enabled'] = bool(user.get('http_enabled', True))
-    user['telegram_enabled'] = bool(user.get('telegram_enabled', True))
-    user['telegram_front_domain'] = str(user.get('telegram_front_domain') or load_options().get('telegram_front_domain') or 'www.google.com').strip()
-    if not user.get('telegram_secret'):
-        user['telegram_secret'] = make_mtproto_secret(user['telegram_front_domain'])
-    try:
-        user['telegram_port'] = int(user.get('telegram_port') or next_telegram_port(existing_users))
-    except Exception:
-        user['telegram_port'] = next_telegram_port(existing_users)
-    user.setdefault('public_host', '')
-    user.setdefault('notes', '')
-    user.setdefault('group', 'Без группы')
-    user.setdefault('expires_at', None)
-    user.setdefault('traffic_policy', {'enabled': False, 'monthly_limit_gb': 0})
-    user.setdefault('created_at', now)
-    user['updated_at'] = now
-    user.setdefault('blocked_until', None)
-    user.setdefault('blocked_comment', '')
-    return user
 
 
 def load_proxy_users():
@@ -1575,24 +1628,6 @@ def load_proxy_users():
     return normalized
 
 
-def save_proxy_users(users):
-    normalized = []
-    seen_usernames = set()
-    seen_ports = set()
-    for u in users:
-        nu = normalize_user(u, normalized)
-        base_username = nu['username']
-        n = 2
-        while nu['username'] in seen_usernames:
-            nu['username'] = f'{base_username}_{n}'
-            n += 1
-        seen_usernames.add(nu['username'])
-        while int(nu['telegram_port']) in seen_ports:
-            nu['telegram_port'] = int(nu['telegram_port']) + 1
-        seen_ports.add(int(nu['telegram_port']))
-        normalized.append(nu)
-    write_json(users_path(), normalized)
-    return normalized
 
 
 def find_proxy_user(user_id):
@@ -1617,14 +1652,6 @@ def active_proxy_users_for(protocol):
     return result
 
 
-def user_public_urls(user, public_host=None):
-    host = (public_host or user.get('public_host') or '').strip()
-    port = int(user.get('telegram_port') or 0)
-    secret_value = user.get('telegram_secret') or ''
-    if not host or not port or not secret_value:
-        return {'tg_url': '', 'tme_url': ''}
-    q = urllib.parse.urlencode({'server': host, 'port': str(port), 'secret': secret_value})
-    return {'tg_url': 'tg://proxy?' + q, 'tme_url': 'https://t.me/proxy?' + q}
 
 
 def users_safe(public_host=None):
@@ -1681,98 +1708,14 @@ def mtproxy_urls(public_host=None):
     return {"tg_url": "tg://proxy?" + q, "tme_url": "https://t.me/proxy?" + q}
 
 
-def write_mtg_config():
-    tg = load_telegram_settings()
-    secret_value = tg.get("secret") or make_mtproto_secret(tg.get("front_domain"))
-    if not tg.get("secret"):
-        tg["secret"] = secret_value
-        save_telegram_settings(tg)
-    port = int(tg.get("port") or load_options().get("telegram_proxy_port", 2083))
-    upstream = f"socks5://127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}"
-    lines = [
-        f"secret = {toml_quote(secret_value)}",
-        f"bind-to = {toml_quote('0.0.0.0:' + str(port))}",
-        'prefer-ip = "prefer-ipv4"',
-        'auto-update = false',
-        '',
-        '[network]',
-        'dns = "https://1.1.1.1/dns-query"',
-        f"proxies = [{toml_quote(upstream)}]",
-        '',
-        '[network.timeout]',
-        'tcp = "10s"',
-        'http = "10s"',
-        'idle = "10m"',
-        'handshake = "10s"',
-        '',
-        '[defense.blocklist]',
-        'enabled = false',
-        '',
-        '[stats.prometheus]',
-        'enabled = false',
-        '',
-    ]
-    MTG_CONFIG.write_text("\n".join(lines), encoding="utf-8")
-    return MTG_CONFIG
 
 
-def stop_mtg():
-    global mtg_process
-    if mtg_process and mtg_process.poll() is None:
-        log("MTG", "STOP", "Stopping Telegram MTProto proxy")
-        mtg_process.terminate()
-        try:
-            mtg_process.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            mtg_process.kill()
-            mtg_process.wait(timeout=5)
-    mtg_process = None
 
 
-def start_mtg():
-    global mtg_process, last_mtg_error
-    tg = load_telegram_settings()
-    if not tg.get("enabled", False):
-        stop_mtg()
-        last_mtg_error = ""
-        return False
-    if not os.path.exists(MTG_BIN):
-        last_mtg_error = "mtg binary not found"
-        log("MTG", "ERROR", last_mtg_error)
-        return False
-    write_mtg_config()
-    stop_mtg()
-    log("MTG", "START", f"Starting MTProto proxy on 0.0.0.0:{tg.get('port')} via SOCKS5 127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}")
-    mtg_process = subprocess.Popen([MTG_BIN, "run", str(MTG_CONFIG)], stdout=sys.stdout, stderr=sys.stderr)
-    time.sleep(0.8)
-    if mtg_process.poll() is not None:
-        last_mtg_error = f"mtg exited with code {mtg_process.returncode}"
-        log("MTG", "ERROR", last_mtg_error)
-        return False
-    last_mtg_error = ""
-    return True
 
 
-def restart_mtg():
-    with lock:
-        stop_mtg()
-        return start_mtg()
 
 
-def mtg_status():
-    tg = load_telegram_settings()
-    running = bool(mtg_process and mtg_process.poll() is None)
-    return {
-        "enabled": bool(tg.get("enabled", False)),
-        "running": running,
-        "port": int(tg.get("port") or load_options().get("telegram_proxy_port", 2083)),
-        "front_domain": tg.get("front_domain") or "www.google.com",
-        "public_host": tg.get("public_host") or "",
-        "secret": tg.get("secret") or "",
-        "last_error": last_mtg_error,
-        "upstream": f"socks5://127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}",
-        **mtproxy_urls(),
-    }
 
 
 
@@ -1853,53 +1796,12 @@ def start_mtg_user(user):
     return True
 
 
-def stop_mtg():
-    for uid in list(mtg_processes.keys()):
-        stop_mtg_user(uid)
 
 
-def start_mtg():
-    users = load_proxy_users()
-    desired = {str(u.get('id')) for u in users if u.get('enabled', True) and u.get('telegram_enabled', True) and not is_user_block_active(u)}
-    for uid in list(mtg_processes.keys()):
-        if uid not in desired:
-            stop_mtg_user(uid)
-    ok = False
-    for user in users:
-        if str(user.get('id')) in desired:
-            ok = start_mtg_user(user) or ok
-    return ok
 
 
-def restart_mtg():
-    with lock:
-        stop_mtg()
-        return start_mtg()
 
 
-def mtg_status():
-    users = users_safe()
-    running = []
-    for u in users:
-        proc = mtg_processes.get(str(u.get('id')))
-        u['telegram_running'] = bool(proc and proc.poll() is None)
-        if u['telegram_running']:
-            running.append(u.get('id'))
-    primary = users[0] if users else {}
-    return {
-        'enabled': any(u.get('telegram_enabled') and u.get('enabled') for u in users),
-        'running': bool(running),
-        'running_count': len(running),
-        'port': primary.get('telegram_port') or load_options().get('telegram_proxy_port', 2083),
-        'front_domain': primary.get('telegram_front_domain') or 'www.google.com',
-        'public_host': primary.get('public_host') or '',
-        'secret': primary.get('telegram_secret') or '',
-        'last_error': last_mtg_error,
-        'upstream': f'socks5://127.0.0.1:{MTG_UPSTREAM_SOCKS_PORT}',
-        'users': users,
-        **user_public_urls(primary),
-        'urls': user_public_urls(primary),
-    }
 
 
 # --- Single-port multi-secret MTProto backend overrides (v1.8.1) ---
@@ -3734,6 +3636,31 @@ def restart_singbox_background(reason="background apply"):
             log_exception("BACKEND", "APPLY", e, actor="ui", action="singbox_background_apply", target=reason)
     threading.Thread(target=worker, name="singbox-background-apply", daemon=True).start()
 
+
+def restart_mtg_background(reason="background mtproto apply"):
+    def worker():
+        try:
+            log("BACKEND", "APPLY", f"Applying MTProto in background: {reason}", actor="ui", action="mtg_background_apply")
+            restart_mtg()
+            log("BACKEND", "APPLY", f"Background MTProto apply completed: {reason}", actor="ui", action="mtg_background_apply")
+        except Exception as e:
+            log_exception("BACKEND", "APPLY", e, actor="ui", action="mtg_background_apply", target=reason)
+    threading.Thread(target=worker, name="mtg-background-apply", daemon=True).start()
+
+
+def apply_services_background(reason="background apply", singbox=True, mtproto=False):
+    def worker():
+        try:
+            log("BACKEND", "APPLY", f"Applying services in background: {reason}", actor="ui", action="services_background_apply", extra={"singbox": singbox, "mtproto": mtproto})
+            if singbox:
+                restart_singbox()
+            elif mtproto:
+                restart_mtg()
+            log("BACKEND", "APPLY", f"Background services apply completed: {reason}", actor="ui", action="services_background_apply")
+        except Exception as e:
+            log_exception("BACKEND", "APPLY", e, actor="ui", action="services_background_apply", target=reason)
+    threading.Thread(target=worker, name="services-background-apply", daemon=True).start()
+
 def apply_power_selectors():
     settings = load_settings()
     time.sleep(0.2)
@@ -4716,7 +4643,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.20.1"
+    server_version = "ProxyOtBorisa/1.21.0"
 
     def log_message(self, fmt, *args):
         return
@@ -4788,12 +4715,13 @@ class Handler(BaseHTTPRequestHandler):
                     "singbox_ready": singbox_ok,
                     "telegram_running": bool(mtg.get("running")),
                     "log_level": options.get("log_level", "warn"),
+                    "production_mode": options.get("production_mode", "normal"),
                     "last_error": last_error,
                     "updated_at": time.time(),
                 })
             if path == "/api/status":
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_monitored_connections(force=False, run_autoban=True); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/system/check":
                 return self.send_json(system_check_report())
             if path == "/api/maintenance":
@@ -4899,6 +4827,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = normalize_request_path(self.path)
             body = self.read_body()
+            ensure_not_safe_mode_for_mutation(path)
             if path == "/api/options/logging":
                 level = normalize_log_level(body.get("log_level"))
                 runtime = save_runtime_options({"log_level": level})
@@ -4925,7 +4854,7 @@ class Handler(BaseHTTPRequestHandler):
                     tg = load_telegram_settings()
                     tg["enabled"] = telegram_enabled
                     save_telegram_settings(tg)
-                    restart_mtg()
+                    restart_mtg_background('power_telegram')
                 settings = update_proxy_lifecycle(settings, telegram_enabled)
                 save_settings(settings)
                 apply_power_selectors()
@@ -4946,8 +4875,7 @@ class Handler(BaseHTTPRequestHandler):
                 applied = False
                 if bool(body.get("apply", True)) and changed:
                     validate_singbox_config()
-                    restart_singbox()
-                    restart_mtg()
+                    apply_services_background('ports_save', singbox=True, mtproto=True)
                     applied = True
                 log("PORTS", "SAVE", "Runtime ports saved", actor="ui", action="ports_save", extra={"ports": ports, "applied": applied, "changed": changed})
                 return self.send_json({"ok": True, "changed": changed, "applied": applied, "checks": checks, "ports": ports_summary(), "message": "Порты сохранены" + (" и применены." if applied else ".")})
@@ -4971,9 +4899,9 @@ class Handler(BaseHTTPRequestHandler):
                 save_telegram_settings(tg)
                 settings = load_settings(); settings = update_proxy_lifecycle(settings, tg.get("enabled", False)); save_settings(settings)
                 if action in ["restart", "regenerate_secret", "enable", "disable", "update"] or "enabled" in body:
-                    restart_mtg()
+                    restart_mtg_background('telegram_' + str(action))
                 log("TELEGRAM", "CHANGE", f"Telegram proxy action={action}", actor="ui", action="telegram_" + str(action), extra={"enabled": tg.get("enabled"), "port": tg.get("port")})
-                return self.send_json({"ok": True, "telegram": mtg_status(), "power": power_summary(settings, mtg_status())})
+                return self.send_json({"ok": True, "telegram": mtg_status(), "power": power_summary(settings, mtg_status()), "apply_background": True})
             if path == "/api/users":
                 users = load_proxy_users()
                 action = body.get('action') or 'create'
@@ -5099,9 +5027,9 @@ class Handler(BaseHTTPRequestHandler):
                 log("CLIENT", "HISTORY_CLEAR", "Client connection history cleared", actor="ui", action="client_history_clear")
                 return self.send_json({"ok": True, "history": data, "message": "История подключений очищена."})
             if path == "/api/audit/clear":
-                result = clear_events()
-                log("AUDIT", "CLEAR", "Audit/events journal cleared", actor="ui", action="audit_clear")
-                return self.send_json({"ok": True, "message": "Журнал событий очищен.", **result})
+                result = clear_audit_events()
+                log("AUDIT", "CLEAR", "Audit journal cleared", actor="ui", action="audit_clear")
+                return self.send_json({"ok": True, "message": "Аудит-журнал очищен.", **result})
             if path == "/api/maintenance/prune":
                 sessions = prune_client_sessions(load_client_sessions())
                 save_client_sessions(sessions)
@@ -5119,7 +5047,7 @@ class Handler(BaseHTTPRequestHandler):
                 mtg_restarted = False
                 try:
                     if ip and any((p.get('ip') == ip) for p in get_mtg_client_connections()):
-                        restart_mtg(); mtg_restarted = True
+                        restart_mtg_background('client_delete_mtproto'); mtg_restarted = True
                 except Exception:
                     pass
                 history = load_clients()
@@ -5183,9 +5111,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "security": load_security(), "summary": security_summary(), "removed_autobans": removed_autobans, "needs_apply": True, "message": "Настройки безопасности сохранены. Нажми «Применить правила», чтобы обновить sing-box."})
             if path == "/api/security/apply":
                 validate_singbox_config()
-                restart_singbox()
-                log("SECURITY", "APPLY", "Security rules applied", actor="ui", action="security_apply")
-                return self.send_json({"ok": True, "summary": security_summary(), "message": "Правила безопасности проверены и применены."})
+                restart_singbox_background('security_apply')
+                log("SECURITY", "APPLY", "Security rules apply scheduled", actor="ui", action="security_apply")
+                return self.send_json({"ok": True, "summary": security_summary(), "apply_background": True, "message": "Правила безопасности проверены и применяются в фоне."})
             if path == "/api/security/update_country":
                 country = str(body.get("country") or "RU").upper()
                 payload = fetch_country_cidrs(country)
@@ -5366,14 +5294,19 @@ class Handler(BaseHTTPRequestHandler):
                 mode = body.get("mode", "replace") if isinstance(body, dict) else "replace"
                 restored = import_backup(payload, mode=mode)
                 validate_singbox_config()
-                restart_singbox()
-                return self.send_json({"ok": True, "restored": restored, "message": "Резервная копия восстановлена. sing-box проверен и перезапущен."})
+                restart_singbox_background('backup_import')
+                return self.send_json({"ok": True, "restored": restored, "apply_background": True, "message": "Резервная копия восстановлена. sing-box проверен и применяется в фоне."})
+            if path == "/api/options/mode":
+                options = apply_production_mode(body.get("mode"))
+                log("SETTINGS", "MODE", "Production mode changed", actor="ui", action="settings_mode", target=options.get("production_mode"), extra={"log_level": options.get("log_level")})
+                restart_singbox_background('production_mode')
+                return self.send_json({"ok": True, "options": {"production_mode": options.get("production_mode"), "log_level": options.get("log_level")}, "apply_background": True})
             if path == "/api/wizard/complete":
                 settings = mark_wizard_completed(bool(body.get("completed", True)))
                 log("WIZARD", "SAVE", "Wizard state changed", actor="ui", action="wizard_complete", extra={"completed": settings.get("wizard_completed")})
                 return self.send_json({"ok": True, "settings": settings, "check": system_check_report()})
             if path == "/api/restart":
-                restart_singbox(); return self.send_json({"ok": True})
+                restart_singbox_background('manual_restart'); return self.send_json({"ok": True, "apply_background": True})
             self.send_json({"error": "not found"}, 404)
         except Exception as e:
             log_exception("API", "POST", e, actor="ui", target=getattr(self, "path", ""), extra={"method": "POST", "body_keys": list(body.keys()) if isinstance(locals().get("body"), dict) else []})
@@ -5382,6 +5315,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         try:
             path = normalize_request_path(self.path)
+            ensure_not_safe_mode_for_mutation(path)
             if path.startswith("/api/blocklist/"):
                 cidr_or_ip = urllib.parse.unquote(path.split("/api/blocklist/", 1)[1])
                 items = [x for x in load_blocked(include_expired=True) if x.get("cidr") != cidr_or_ip and x.get("ip") != cidr_or_ip]

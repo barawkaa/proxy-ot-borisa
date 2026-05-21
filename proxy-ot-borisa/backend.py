@@ -19,13 +19,14 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.13"
+APP_VERSION = "1.19.14"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
 DEFAULT_SERVERS_FILE = Path("/defaults/servers.example.json")
 OPTIONS_FILE = Path("/data/options.json")
 RUNTIME_PORTS_FILE = Path("/data/runtime_ports.json")
+RUNTIME_OPTIONS_FILE = Path("/data/runtime_options.json")
 SUBSCRIPTION_INFO_FILE = Path("/data/subscription_info.json")
 SUBSCRIPTION_SERVERS_FILE = Path("/data/subscription_servers.json")
 PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port"]
@@ -4452,7 +4453,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.19.13"
+    server_version = "ProxyOtBorisa/1.19.14"
 
     def log_message(self, fmt, *args):
         return

@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.10"
+APP_VERSION = "1.19.11"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -2248,6 +2248,69 @@ def save_traffic(items):
     write_json(data_path("traffic.json"), items)
 
 
+def normalize_manual_traffic_sources(traffic):
+    sources = traffic.get("manual_sources") if isinstance(traffic, dict) else []
+    if not isinstance(sources, list):
+        sources = []
+    clean = []
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        clean.append({
+            "id": str(item.get("id") or secrets.token_hex(6)),
+            "name": name,
+            "limit_bytes": max(0, int(item.get("limit_bytes") or 0)),
+            "used_bytes": max(0, int(item.get("used_bytes") or 0)),
+            "note": str(item.get("note") or ""),
+            "created_at": float(item.get("created_at") or time.time()),
+            "updated_at": float(item.get("updated_at") or time.time()),
+        })
+    return clean
+
+
+def save_manual_traffic_source(payload):
+    traffic = load_traffic()
+    sources = normalize_manual_traffic_sources(traffic)
+    source_id = str(payload.get("id") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise ValueError("Название источника трафика не указано")
+    now = time.time()
+    item = {
+        "id": source_id or secrets.token_hex(6),
+        "name": name,
+        "limit_bytes": max(0, int(payload.get("limit_bytes") or 0)),
+        "used_bytes": max(0, int(payload.get("used_bytes") or 0)),
+        "note": str(payload.get("note") or ""),
+        "created_at": now,
+        "updated_at": now,
+    }
+    replaced = False
+    for i, old in enumerate(sources):
+        if source_id and str(old.get("id")) == source_id:
+            item["created_at"] = float(old.get("created_at") or now)
+            sources[i] = item
+            replaced = True
+            break
+    if not replaced:
+        sources.append(item)
+    traffic["manual_sources"] = sources
+    save_traffic(traffic)
+    return sources
+
+
+def delete_manual_traffic_source(source_id):
+    source_id = str(source_id or "").strip()
+    traffic = load_traffic()
+    sources = [x for x in normalize_manual_traffic_sources(traffic) if str(x.get("id")) != source_id]
+    traffic["manual_sources"] = sources
+    save_traffic(traffic)
+    return sources
+
+
 def load_client_limits():
     return read_json(data_path("client_limits.json"), {})
 
@@ -3784,6 +3847,32 @@ def _history_connection_count(item):
     return int(item.get('connections_count') or len(item.get('connections') or []) or item.get('mtproto_connections') or 0)
 
 
+def _history_destinations(item):
+    out = []
+    for h in item.get('hosts') or []:
+        if h and h != '—':
+            out.append(str(h))
+    for mh in (item.get('main_hosts') or {}):
+        if mh and mh != '—':
+            out.append(str(mh))
+    return sorted(set(out))[:20]
+
+
+def _history_routes(item):
+    routes = []
+    for conn in item.get('connections') or []:
+        chain = conn.get('chains') or conn.get('chain') or conn.get('rule') or ''
+        if isinstance(chain, list):
+            val = ' → '.join([str(x) for x in chain if x])
+        else:
+            val = str(chain or '')
+        if val and val != '—':
+            routes.append(val)
+    if 'Telegram MTProto' in (item.get('services') or set()):
+        routes.append('Telegram MTProto')
+    return sorted(set(routes))[:12]
+
+
 def _history_new_session(key, item, now):
     conns = _history_connection_count(item)
     return {
@@ -3804,6 +3893,8 @@ def _history_new_session(key, item, now):
         'upload_last': int(item.get('upload') or 0),
         'download_last': int(item.get('download') or 0),
         'status': 'online',
+        'destinations': _history_destinations(item),
+        'routes': _history_routes(item),
     }
 
 
@@ -3851,6 +3942,8 @@ def update_client_session_history(active_grouped, existing_history, now):
             'upload_last': int(item.get('upload') or 0),
             'download_last': int(item.get('download') or 0),
             'status': 'online',
+            'destinations': sorted(set((active_session.get('destinations') or []) + _history_destinations(item)))[:20],
+            'routes': sorted(set((active_session.get('routes') or []) + _history_routes(item)))[:12],
         })
 
         sm.update({
@@ -4450,6 +4543,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(ports_summary())
             if path == "/api/traffic":
                 tr = load_traffic()
+                tr["manual_sources"] = normalize_manual_traffic_sources(tr)
                 sub = load_subscription_info()
                 tr["subscription_info"] = sub
                 traffic = sub.get("traffic") or {}
@@ -4914,7 +5008,16 @@ class Handler(BaseHTTPRequestHandler):
                     traffic["limit_bytes"] = int(body.get("limit_bytes") or 0)
                 if "used_bytes" in body:
                     traffic["used_bytes"] = int(body.get("used_bytes") or 0)
+                traffic["manual_sources"] = normalize_manual_traffic_sources(traffic)
                 save_traffic(traffic); log("TRAFFIC", "SAVE", "Traffic settings saved", actor="ui", action="traffic_save", extra={"limit_bytes": traffic.get("limit_bytes"), "used_bytes": traffic.get("used_bytes")}); return self.send_json({"ok": True, "traffic": traffic})
+            if path == "/api/traffic/manual":
+                sources = save_manual_traffic_source(body)
+                log("TRAFFIC", "MANUAL", "Manual traffic source saved", actor="ui", action="traffic_manual_save", target=body.get("name") or body.get("id"))
+                return self.send_json({"ok": True, "manual_sources": sources})
+            if path == "/api/traffic/manual/delete":
+                sources = delete_manual_traffic_source(body.get("id"))
+                log("TRAFFIC", "MANUAL", "Manual traffic source deleted", actor="ui", action="traffic_manual_delete", target=body.get("id"))
+                return self.send_json({"ok": True, "manual_sources": sources})
             if path == "/api/traffic/reset":
                 traffic = load_traffic(); traffic["used_bytes"] = 0; traffic["connection_bytes"] = {}; traffic["started_at"] = time.time(); save_traffic(traffic); log("TRAFFIC", "RESET", "Traffic counter reset", actor="ui", action="traffic_reset"); return self.send_json({"ok": True, "traffic": traffic})
             if path == "/api/backup/import":

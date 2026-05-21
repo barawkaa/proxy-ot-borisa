@@ -127,7 +127,7 @@
     </div>
   </div></section>
 
-  <section id="tab-clients" class="tab"><div class="grid"><div class="card full"><h2>Клиенты онлайн</h2><div id="clientsOnlineBox">Загрузка...</div></div><div class="card full"><h2>Незарегистрированные клиенты</h2><div id="clientsUnknownBox">Загрузка...</div></div><div class="card full"><h2>Зарегистрированные / доверенные клиенты</h2><div id="clientsTrustedBox">Загрузка...</div></div><div class="card full"><h2>Оффлайн клиенты</h2><div id="clientsOfflineBox">Загрузка...</div></div></div></section>
+  <section id="tab-clients" class="tab"><div class="grid"><div class="card full"><h2>Клиенты онлайн</h2><div id="clientsOnlineBox">Загрузка...</div></div><div class="card full"><h2>История подключений</h2><div class="row"><button id="btnRefreshClientHistory">Обновить историю</button><button class="danger" id="btnClearClientHistory">Очистить историю</button></div><div class="muted" id="clientsHistoryRetention">Фиксируются сессии: кто подключался, когда начал, когда отключился, длительность, сервис и количество соединений. Журнал автоочищается: хранится последний месяц или 2000 последних сессий. Для Telegram-клиентов идентификатором является зарегистрированный пользователь/secret, а не IP.</div><div id="clientsHistoryBox" style="margin-top:10px">Загрузка...</div></div><div class="card full"><h2>Незарегистрированные клиенты</h2><div id="clientsUnknownBox">Загрузка...</div></div><div class="card full"><h2>Зарегистрированные / доверенные клиенты</h2><div id="clientsTrustedBox">Загрузка...</div></div><div class="card full"><h2>Оффлайн клиенты</h2><div id="clientsOfflineBox">Загрузка...</div></div></div></section>
 
   <section id="tab-users" class="tab"><div class="grid">
     <div class="card full"><h2>Зарегистрированные пользователи прокси</h2>
@@ -280,7 +280,7 @@
   </div></section>
 </div>
 <script>
-const state={status:null,servers:[],serverPings:{},autoTags:[],clients:[],users:[],connections:[],blocks:[],traffic:null,logs:[],logCategory:"all",activeTab:"overview",routing:null,security:null,ru:null,ports:null,subscriptionUrl:"",subscriptionInfo:null,subscriptionJson:null};
+const state={status:null,servers:[],serverPings:{},autoTags:[],clients:[],clientHistory:null,users:[],connections:[],blocks:[],traffic:null,logs:[],logCategory:"all",activeTab:"overview",routing:null,security:null,ru:null,ports:null,subscriptionUrl:"",subscriptionInfo:null,subscriptionJson:null};
 function ingressBase(){const p=location.pathname;const m=p.match(/^(.*\/api\/hassio_ingress\/[^/]+)(?:\/.*)?$/);if(m)return m[1];if(p.endsWith('/'))return p.slice(0,-1);return p.substring(0,p.lastIndexOf('/'))||''}
 const BASE=ingressBase();
 async function api(path,opt={}){const r=await fetch(BASE+path,{...opt,cache:'no-store',headers:{'Content-Type':'application/json',...(opt.headers||{})}});const t=await r.text();if(!r.ok)throw new Error(`HTTP ${r.status}: ${t||r.statusText}`);return t?JSON.parse(t):null}
@@ -307,7 +307,7 @@ function groupConnections(conns){const m={};for(const c of conns){const meta=c.m
 function setHeaderNote(t){if($('headerSummaryNote'))$('headerSummaryNote').textContent=t||'—'}
 function renderHeaderSummary(){const s=state.status||{},cur=s.current||{},vpn=s.vpn||{};if($('headerServerName'))$('headerServerName').textContent=cur.server||'—';if($('headerServerPing'))$('headerServerPing').textContent=cur.delay?cur.delay+' мс':'—';if($('headerServerMode'))$('headerServerMode').textContent=cur.mode||'—';if($('headerVpnState'))$('headerVpnState').textContent=vpn.connected?'подключён':'не подтверждён';if(!($('headerSummaryNote')||{}).dataset?.busy){const checked=cur.checked_at?(' · проверено '+new Date(cur.checked_at*1000).toLocaleString('ru-RU')):'';setHeaderNote((vpn.connected?'VPN активен':'VPN ещё не подтверждён')+checked)}}
 
-async function refreshAll(){try{await Promise.all([loadStatus(),loadServers(),loadRouting(),loadSecurity(),loadPorts(),loadClients(false),loadUsers(),loadBlocks(),loadTraffic(),loadConnections(false),loadLogs(),loadSystemCheck(false)]);msg('Данные обновлены')}catch(e){msg(e.message,true)}}
+async function refreshAll(){try{await Promise.all([loadStatus(),loadServers(),loadRouting(),loadSecurity(),loadPorts(),loadClients(false),loadClientHistory(),loadUsers(),loadBlocks(),loadTraffic(),loadConnections(false),loadLogs(),loadSystemCheck(false)]);msg('Данные обновлены')}catch(e){msg(e.message,true)}}
 async function refreshLight(){try{await Promise.all([loadStatus(),loadTraffic()]);if(['clients','connections'].includes(state.activeTab)){await loadClients(false);await loadConnections(false)}if(state.activeTab==='diag')await loadLogs()}catch(e){msg(e.message,true)}}
 async function refreshCurrentTab(force=false){try{if(state.activeTab==='overview')await loadStatus();if(state.activeTab==='wizard')await loadSystemCheck(true);if(state.activeTab==='system')await loadSystemCheck(true);if(state.activeTab==='backup'){}if(state.activeTab==='servers')await loadServers();if(state.activeTab==='routing')await loadRouting();if(state.activeTab==='security')await loadSecurity();if(state.activeTab==='ports')await loadPorts();if(state.activeTab==='clients')await loadClients(force);if(state.activeTab==='users')await loadUsers();if(state.activeTab==='connections')await loadConnections(force);if(state.activeTab==='traffic')await loadTraffic();if(state.activeTab==='diag')await loadLogs()}catch(e){msg(e.message,true)}}
 async function loadStatus(){state.status=await api('/api/status');state.subscriptionInfo=state.status.subscription_info||state.subscriptionInfo;renderOverview();renderTelegram();renderSubscriptionInfo()}
@@ -316,6 +316,8 @@ async function loadRouting(){const d=await api('/api/routing');state.routing=d.r
 async function loadSecurity(){const d=await api('/api/security');state.security=d.security||{};state.ru=d.ru||null;renderSecurity(d.summary||{});renderRuList(state.ru)}
 async function loadPorts(){state.ports=await api('/api/ports');renderPorts()}
 async function loadClients(force=false){const d=await api('/api/clients'+(force?'?force=1':''));state.clients=d.clients||[];renderClients()}
+async function loadClientHistory(){const d=await api('/api/clients/history?limit=300');state.clientHistory=d;renderClientHistory();renderTelegram()}
+async function clearClientHistory(){if(!confirm('Очистить всю историю подключений? Онлайн-статус начнёт собираться заново.'))return;await post('/api/clients/history/clear',{});await loadClientHistory();msg('История подключений очищена')}
 async function loadUsers(){const d=await api('/api/users');state.users=d.users||[];renderUsers()}
 async function loadBlocks(){const d=await api('/api/blocklist');state.blocks=d.blocked||[];renderBlocks()}
 async function loadTraffic(){state.traffic=await api('/api/traffic');state.subscriptionInfo=state.traffic.subscription_info||state.subscriptionInfo;renderTraffic();renderSubscriptionInfo()}
@@ -471,6 +473,26 @@ async function saveSecurity(){
 
 function renderClients(){const online=state.clients.filter(c=>c.status==='online'),offline=state.clients.filter(c=>c.status!=='online'),trusted=state.clients.filter(c=>c.trusted),unknown=state.clients.filter(c=>!c.trusted);$('clientsOnlineBox').innerHTML=online.map(clientCard).join('')||'<div class="muted">Онлайн клиентов нет.</div>';$('clientsUnknownBox').innerHTML=unknown.map(clientCard).join('')||'<div class="muted">Незарегистрированных клиентов нет.</div>';$('clientsTrustedBox').innerHTML=trusted.map(clientCard).join('')||'<div class="muted">Доверенных клиентов нет.</div>';$('clientsOfflineBox').innerHTML=offline.map(clientCard).join('')||'<div class="muted">Оффлайн клиентов нет.</div>'}
 
+function historyName(x){return x?.registered_name||x?.username||x?.display_ip||x?.ip||x?.key||'—'}
+function renderClientHistory(){
+  const box=$('clientsHistoryBox'); if(!box)return;
+  const h=state.clientHistory||{}, summary=Array.isArray(h.summary)?h.summary:[], sessions=Array.isArray(h.sessions)?h.sessions:[], retention=h.retention||{};
+  const ret=$('clientsHistoryRetention');
+  if(ret)ret.textContent=`Фиксируются сессии: кто подключался, когда начал, когда отключился, длительность, сервис и количество соединений. Журнал автоочищается: хранится ${retention.days||30} дней или ${retention.max_sessions||2000} последних сессий. Сейчас в журнале: ${retention.sessions_count??sessions.length}. Для Telegram-клиентов идентификатором является зарегистрированный пользователь/secret, а не IP.`;
+  if(!summary.length&&!sessions.length){box.innerHTML='<div class="muted">История пока пустая. Она начнёт заполняться после следующих подключений/обновлений вкладки клиентов.</div>';return;}
+  const summaryRows=summary.slice(0,80).map(c=>`<tr><td><b>${esc(historyName(c))}</b><br><span class="tag">${esc(c.key||'')}</span></td><td>${c.online?pill('онлайн','green'):pill('оффлайн','gray')}</td><td>${fmtTime(c.first_seen)}</td><td>${fmtTime(c.last_seen)}</td><td>${esc(c.sessions_count||0)}</td><td>${fmtDur(c.total_online_seconds_live||c.total_online_seconds||0)}</td><td>${(c.last_services||[]).map(x=>pill(x,'blue')).join('')||'—'}</td></tr>`).join('');
+  const sessionRows=sessions.slice(0,120).map(s=>{const online=!s.ended_at;return `<tr><td><b>${esc(historyName(s))}</b><br><span class="tag">${esc(s.key||'')}</span></td><td>${online?pill('онлайн','green'):pill('завершена','gray')}</td><td>${fmtTime(s.started_at)}</td><td>${online?'—':fmtTime(s.ended_at)}</td><td>${fmtDur(online?((Date.now()/1000)-(s.started_at||Date.now()/1000)):(s.duration_seconds||0))}</td><td>${(s.services||[]).map(x=>pill(x,'purple')).join('')||'—'}</td><td>${esc(s.connections_max||0)}</td></tr>`}).join('');
+  box.innerHTML=`<div class="small muted">Политика хранения: ${esc(retention.days||30)} дней / ${esc(retention.max_sessions||2000)} сессий. Старые записи обрезаются автоматически при обновлении истории.</div><details open><summary><b>Сводка по клиентам</b> ${pill(summary.length+' клиентов','gray')}</summary><table><thead><tr><th>Клиент</th><th>Статус</th><th>Первый вход</th><th>Последний вход</th><th>Сессий</th><th>Всего онлайн</th><th>Сервисы</th></tr></thead><tbody>${summaryRows}</tbody></table></details><details open style="margin-top:12px"><summary><b>Последние сессии</b> ${pill(sessions.length+' записей','gray')}</summary><table><thead><tr><th>Клиент</th><th>Статус</th><th>Начало</th><th>Конец</th><th>Длительность</th><th>Сервис</th><th>Макс. соединений</th></tr></thead><tbody>${sessionRows}</tbody></table></details>`;
+}
+
+function telegramUserStatus(u){
+  const key='telegram:'+String(u.id||'');
+  const summary=((state.clientHistory||{}).summary||[]).find(x=>x.key===key||x.registered_user_id===u.id);
+  if(summary&&summary.online)return {html:pill('онлайн','green'), text:'онлайн', last:summary.last_seen, sessions:summary.sessions_count||0};
+  if(summary)return {html:pill('оффлайн','gray'), text:'оффлайн', last:summary.last_seen, sessions:summary.sessions_count||0};
+  return {html:pill('не подключался','gray'), text:'не подключался', last:0, sessions:0};
+}
+
 
 function connectionIp(c){return c?.metadata?.sourceIP||c?.metadata?.source_ip||c?.sourceIP||c?.source_ip||c?.ip||'—'}
 function connectionHost(c){return c?.metadata?.host||c?.metadata?.destinationIP||c?.metadata?.destination_ip||c?.metadata?.destination||c?.host||c?.destination||'—'}
@@ -568,8 +590,13 @@ function renderTraffic(){const t=state.traffic||{},limit=Number(t.limit_bytes||0
 function renderLogs(){$('logsBox').innerHTML=state.logs.map(e=>`<div class="log-row"><span class="muted">${esc(e.time||fmtTime(e.ts))}</span> <span class="pill gray">${esc(e.category||'app')}</span> [${esc(e.stage)}] [${esc(e.result)}] actor=${esc(e.actor)} action=${esc(e.action)} target=${esc(e.target)} — ${esc(e.message)}</div>`).join('')||'Лог пуст.'}
 function renderTelegram(){
   const users=(state.users||[]).filter(u=>u.telegram_enabled);
-  const rows=users.map(u=>{const urls=u.urls||{};return `<tr><td><b>${esc(u.name)}</b><br><span class="tag">${esc(u.username)}</span></td><td>${esc(u.telegram_port)}</td><td class="tag">${esc(u.telegram_secret)}</td><td><input style="width:100%" value="${esc(urls.tme_url||'')}" readonly onclick="this.select()"></td><td>${u.telegram_running?'<span class="ok">работает</span>':'<span class="bad">остановлен</span>'}</td></tr>`}).join('');
-  $('telegramBox').innerHTML=rows?`<table><thead><tr><th>Клиент</th><th>Общий порт</th><th>Secret</th><th>Ссылка</th><th>Статус</th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="muted">Telegram-пользователей нет. Создай их во вкладке «Пользователи».</div>';
+  const serviceRunning=!!(state.status?.telegram?.running);
+  const rows=users.map(u=>{
+    const urls=u.urls||{}, st=telegramUserStatus(u);
+    const serviceNote=serviceRunning?pill('MTProto сервис работает','blue'):pill('MTProto сервис остановлен','red');
+    return `<tr><td><b>${esc(u.name)}</b><br><span class="tag">${esc(u.username)}</span></td><td>${esc(u.telegram_port)}</td><td class="tag">${esc(u.telegram_secret)}</td><td><input style="width:100%" value="${esc(urls.tme_url||'')}" readonly onclick="this.select()"></td><td>${st.html}<br><span class="small muted">Последний вход: ${fmtTime(st.last)}<br>Сессий: ${esc(st.sessions)}</span></td></tr>`
+  }).join('');
+  $('telegramBox').innerHTML=rows?`<div class="muted">${serviceRunning?'Сервис MTProto запущен.':'Сервис MTProto остановлен.'} Статус ниже относится к пользователям по их secret: онлайн/оффлайн/не подключался.</div><table><thead><tr><th>Клиент</th><th>Общий порт</th><th>Secret</th><th>Ссылка</th><th>Статус пользователя</th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="muted">Telegram-пользователей нет. Создай их во вкладке «Пользователи».</div>';
   const tg=state.status?.telegram||{};$('tgPublicHost').value=tg.public_host||'';
 }
 async function setPower(part,value){const body={};if(part==='all'){body.http_enabled=value;body.socks_enabled=value;body.telegram_enabled=value}else body[part+'_enabled']=value;await post('/api/power',body);await refreshAll()}
@@ -660,6 +687,8 @@ $('btnSaveAllPriorities').onclick=()=>runUiAction('Сохраняю все пр�
 $('btnSaveAllPrioritiesTop').onclick=()=>runUiAction('Сохраняю все приоритеты',saveAllPriorities,'Все приоритеты сохранены');
 $('btnAddBlock').onclick=()=>runUiAction('Добавляю блокировку',async()=>{await post('/api/blocklist',{ip:$('blockIp').value,comment:$('blockComment').value,duration_seconds:$('blockDuration').value});await refreshAll()},'IP добавлен в блокировки');
 $('btnRefreshConnections').onclick=()=>runUiAction('Обновляю соединения',()=>loadConnections(true),'Соединения обновлены');
+$('btnRefreshClientHistory').onclick=()=>runUiAction('Обновляю историю клиентов',async()=>{await loadClients(true);await loadClientHistory();},'История клиентов обновлена');
+$('btnClearClientHistory').onclick=()=>runUiAction('Очищаю историю клиентов',clearClientHistory,'История клиентов очищена');
 $('btnCloseAll').onclick=()=>runUiAction('Закрываю все соединения',async()=>{await post('/api/connections/close_all');await refreshAll()},'Все соединения закрыты');
 $('btnRefreshSubTraffic').onclick=()=>runUiAction('Обновляю трафик подписки',async()=>{const r=await post('/api/subscription/refresh_traffic',{});state.subscriptionInfo=r.subscription_info||state.subscriptionInfo;await loadTraffic();renderSubscriptionInfo();},'Трафик подписки обновлён');
 $('btnSaveTraffic').onclick=()=>runUiAction('Сохраняю локальный лимит трафика',saveTraffic,'Локальный лимит трафика сохранён');
@@ -680,7 +709,7 @@ $('btnShowRuList').onclick=()=>runUiAction('Загружаю полный RU IP-
 $('btnUpdateRuList').onclick=()=>runUiAction('Обновляю RU IP-список',async()=>{msg('Скачиваю RU IP-список... Это может занять 10–60 секунд.');const r=await post('/api/security/update_country',{country:'RU'});state.ru=r.details||null;renderRuList(state.ru);msg(r.message||`RU IP-список обновлён: ${r.count||0} CIDR`);await loadSecurity();await loadLogs();},'RU IP-список обновлён');
 $('btnSaveRouting').onclick=()=>runUiAction('Сохраняю маршрутизацию',()=>saveRouting(false),'Маршрутизация сохранена');
 $('btnUpdateRoutingSources').onclick=()=>runUiAction('Обновляю списки маршрутизации',async()=>{ $('routingStatusText').textContent='Обновляю источники списков...'; await saveRouting(true); $('routingStatusText').textContent='Списки обновлены: '+new Date().toLocaleString('ru-RU');},'Списки маршрутизации обновлены');
-refreshAll();setInterval(refreshLight,30000);setInterval(()=>{if(state.activeTab==='connections')loadConnections(false);if(state.activeTab==='clients')loadClients(false);},15000);
+refreshAll();setInterval(refreshLight,30000);setInterval(()=>{if(state.activeTab==='connections')loadConnections(false);if(state.activeTab==='clients'){loadClients(false);loadClientHistory();}},15000);
 </script>
 </body>
 </html>

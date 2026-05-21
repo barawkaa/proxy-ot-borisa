@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.19.8"
+APP_VERSION = "1.19.10"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -57,6 +57,8 @@ SESSION_BREAK_SECONDS = 60
 RECENT_CLIENT_SECONDS = 300
 OFFLINE_CLIENT_KEEP_SECONDS = 30 * 24 * 3600
 EVENT_LOG_LIMIT = 2000
+CLIENT_HISTORY_MAX_SESSIONS = 2000
+CLIENT_HISTORY_RETENTION_SECONDS = 30 * 24 * 3600
 SINGBOX_STARTED_AT = 0
 MONITOR_INTERVAL_SECONDS = 15
 AUTOBAN_CHECK_INTERVAL_SECONDS = 30
@@ -2124,6 +2126,113 @@ def save_clients(items):
     write_json(data_path("clients.json"), items)
 
 
+def load_client_sessions():
+    return read_json(data_path("client_sessions.json"), {"summary": {}, "sessions": []})
+
+
+def normalize_client_sessions(items):
+    if not isinstance(items, dict):
+        items = {"summary": {}, "sessions": []}
+    if not isinstance(items.get("summary"), dict):
+        items["summary"] = {}
+    if not isinstance(items.get("sessions"), list):
+        items["sessions"] = []
+    return items
+
+
+def prune_client_sessions(items, now=None):
+    """Keep client history bounded like logs: last 30 days or 2000 latest session rows.
+
+    Active sessions are always preserved. Summary is rebuilt from the retained
+    sessions so stale clients do not live forever in client_sessions.json.
+    """
+    now = float(now or time.time())
+    items = normalize_client_sessions(items)
+    sessions = [s for s in items.get("sessions", []) if isinstance(s, dict)]
+    cutoff = now - CLIENT_HISTORY_RETENTION_SECONDS
+
+    kept = []
+    for s in sessions:
+        started = float(s.get("started_at") or s.get("last_seen") or 0)
+        ended = s.get("ended_at")
+        is_active = not ended
+        if is_active or started >= cutoff:
+            kept.append(s)
+
+    active_kept = [s for s in kept if not s.get("ended_at")]
+    closed_kept = [s for s in kept if s.get("ended_at")]
+    active_kept.sort(key=lambda x: float(x.get("last_seen") or x.get("started_at") or 0), reverse=True)
+    closed_kept.sort(key=lambda x: float(x.get("started_at") or 0), reverse=True)
+    remaining = max(0, CLIENT_HISTORY_MAX_SESSIONS - len(active_kept))
+    kept = active_kept + closed_kept[:remaining]
+    kept.sort(key=lambda x: float(x.get("started_at") or 0), reverse=True)
+
+    rebuilt = {}
+    for s in sorted(kept, key=lambda x: float(x.get("started_at") or 0)):
+        key = str(s.get("key") or "")
+        if not key:
+            continue
+        started = float(s.get("started_at") or 0)
+        last_seen = float(s.get("last_seen") or s.get("ended_at") or started or 0)
+        ended = s.get("ended_at")
+        duration = int(s.get("duration_seconds") or max(0, last_seen - started))
+        sm = rebuilt.setdefault(key, {
+            "key": key,
+            "first_seen": started or last_seen or now,
+            "last_seen": last_seen or started or now,
+            "sessions_count": 0,
+            "total_online_seconds": 0,
+            "last_services": [],
+            "last_status": "offline",
+        })
+        sm["sessions_count"] = int(sm.get("sessions_count") or 0) + 1
+        sm["first_seen"] = min(float(sm.get("first_seen") or started or now), started or now)
+        sm["last_seen"] = max(float(sm.get("last_seen") or 0), last_seen or started or 0)
+        if ended:
+            sm["total_online_seconds"] = int(sm.get("total_online_seconds") or 0) + max(0, duration)
+        else:
+            sm["active_session_id"] = s.get("id")
+            sm["last_status"] = "online"
+            sm["last_session_started_at"] = started
+        for field in ["ip", "display_ip", "username", "registered_user_id", "registered_name"]:
+            if s.get(field):
+                sm[field] = s.get(field)
+        services = sorted(set((sm.get("last_services") or []) + [str(x) for x in (s.get("services") or []) if x]))
+        sm["last_services"] = services
+        sm["last_connections"] = max(int(sm.get("last_connections") or 0), int(s.get("connections_max") or s.get("last_connections") or 0))
+        if not ended and sm.get("last_status") != "online":
+            sm["last_status"] = "offline"
+
+    items["sessions"] = kept
+    items["summary"] = rebuilt
+    items["retention"] = {
+        "days": int(CLIENT_HISTORY_RETENTION_SECONDS // 86400),
+        "max_sessions": CLIENT_HISTORY_MAX_SESSIONS,
+        "pruned_at": now,
+        "sessions_count": len(kept),
+    }
+    return items
+
+
+def save_client_sessions(items):
+    write_json(data_path("client_sessions.json"), prune_client_sessions(items))
+
+
+def clear_client_sessions():
+    data = {
+        "summary": {},
+        "sessions": [],
+        "retention": {
+            "days": int(CLIENT_HISTORY_RETENTION_SECONDS // 86400),
+            "max_sessions": CLIENT_HISTORY_MAX_SESSIONS,
+            "cleared_at": time.time(),
+            "sessions_count": 0,
+        },
+    }
+    write_json(data_path("client_sessions.json"), data)
+    return data
+
+
 def load_traffic():
     return read_json(data_path("traffic.json"), {
         "limit_bytes": 0,
@@ -3659,6 +3768,164 @@ def ensure_client_group(grouped, history, trusted, ip, now, source_label=None, u
     return grouped[key]
 
 
+
+def _history_service_list(item):
+    return sorted([str(x) for x in (item.get('services') or []) if x])
+
+
+def _history_find_session(sessions, session_id):
+    for sess in sessions:
+        if isinstance(sess, dict) and sess.get('id') == session_id:
+            return sess
+    return None
+
+
+def _history_connection_count(item):
+    return int(item.get('connections_count') or len(item.get('connections') or []) or item.get('mtproto_connections') or 0)
+
+
+def _history_new_session(key, item, now):
+    conns = _history_connection_count(item)
+    return {
+        'id': f"{key}:{int(now)}:{secrets.token_hex(4)}",
+        'key': key,
+        'started_at': now,
+        'last_seen': now,
+        'ended_at': None,
+        'duration_seconds': 0,
+        'ip': item.get('ip') or '',
+        'display_ip': item.get('display_ip') or '',
+        'username': item.get('username') or '',
+        'registered_user_id': item.get('registered_user_id') or '',
+        'registered_name': item.get('registered_name') or '',
+        'services': _history_service_list(item),
+        'connections_max': conns,
+        'last_connections': conns,
+        'upload_last': int(item.get('upload') or 0),
+        'download_last': int(item.get('download') or 0),
+        'status': 'online',
+    }
+
+
+def update_client_session_history(active_grouped, existing_history, now):
+    """Persist client online/offline sessions for the audit/history page."""
+    data = load_client_sessions()
+    summary = data.setdefault('summary', {})
+    sessions = data.setdefault('sessions', [])
+    if not isinstance(summary, dict):
+        summary = {}; data['summary'] = summary
+    if not isinstance(sessions, list):
+        sessions = []; data['sessions'] = sessions
+    active_keys = set(active_grouped.keys())
+
+    for key, item in active_grouped.items():
+        old_client = existing_history.get(key, {}) if isinstance(existing_history, dict) else {}
+        sm = summary.setdefault(key, {})
+        last_seen_before = float(sm.get('last_seen') or old_client.get('last_seen') or 0)
+        active_id = sm.get('active_session_id') or ''
+        active_session = _history_find_session(sessions, active_id) if active_id else None
+        need_new = not active_session or active_session.get('ended_at') or (last_seen_before and now - last_seen_before > SESSION_BREAK_SECONDS)
+
+        if need_new:
+            active_session = _history_new_session(key, item, now)
+            sessions.append(active_session)
+            sm['active_session_id'] = active_session['id']
+            sm['sessions_count'] = int(sm.get('sessions_count') or 0) + 1
+            sm.setdefault('first_seen', now)
+            sm['last_session_started_at'] = now
+
+        services = sorted(set((active_session.get('services') or []) + _history_service_list(item)))
+        last_connections = _history_connection_count(item)
+        active_session.update({
+            'last_seen': now,
+            'ended_at': None,
+            'duration_seconds': max(0, int(now - float(active_session.get('started_at') or now))),
+            'ip': item.get('ip') or active_session.get('ip') or '',
+            'display_ip': item.get('display_ip') or active_session.get('display_ip') or '',
+            'username': item.get('username') or active_session.get('username') or '',
+            'registered_user_id': item.get('registered_user_id') or active_session.get('registered_user_id') or '',
+            'registered_name': item.get('registered_name') or active_session.get('registered_name') or '',
+            'services': services,
+            'last_connections': last_connections,
+            'connections_max': max(int(active_session.get('connections_max') or 0), last_connections),
+            'upload_last': int(item.get('upload') or 0),
+            'download_last': int(item.get('download') or 0),
+            'status': 'online',
+        })
+
+        sm.update({
+            'key': key,
+            'ip': item.get('ip') or sm.get('ip') or '',
+            'display_ip': item.get('display_ip') or sm.get('display_ip') or '',
+            'username': item.get('username') or sm.get('username') or '',
+            'registered_user_id': item.get('registered_user_id') or sm.get('registered_user_id') or '',
+            'registered_name': item.get('registered_name') or sm.get('registered_name') or '',
+            'last_seen': now,
+            'last_services': services,
+            'last_status': 'online',
+            'total_online_seconds': int(sm.get('total_online_seconds') or 0),
+            'last_connections': last_connections,
+        })
+
+    for key, sm in list(summary.items()):
+        if key in active_keys:
+            continue
+        active_id = sm.get('active_session_id') or ''
+        if not active_id:
+            continue
+        sess = _history_find_session(sessions, active_id)
+        if not sess or sess.get('ended_at'):
+            sm.pop('active_session_id', None)
+            continue
+        old = existing_history.get(key, {}) if isinstance(existing_history, dict) else {}
+        end_ts = float(old.get('last_seen') or sess.get('last_seen') or now)
+        if end_ts > now:
+            end_ts = now
+        duration = max(0, int(end_ts - float(sess.get('started_at') or end_ts)))
+        sess['last_seen'] = end_ts
+        sess['ended_at'] = end_ts
+        sess['duration_seconds'] = duration
+        sess['status'] = 'offline'
+        sm['last_seen'] = end_ts
+        sm['last_status'] = 'offline'
+        sm['total_online_seconds'] = int(sm.get('total_online_seconds') or 0) + duration
+        sm.pop('active_session_id', None)
+
+    sessions.sort(key=lambda x: float(x.get('started_at') or 0), reverse=True)
+    data['sessions'] = sessions
+    save_client_sessions(data)
+
+
+def client_history_payload(limit=300):
+    data = prune_client_sessions(load_client_sessions())
+    save_client_sessions(data)
+    summary = data.get('summary') if isinstance(data, dict) else {}
+    sessions = data.get('sessions') if isinstance(data, dict) else []
+    if not isinstance(summary, dict):
+        summary = {}
+    if not isinstance(sessions, list):
+        sessions = []
+    now = time.time()
+    session_by_id = {s.get('id'): s for s in sessions if isinstance(s, dict)}
+    summaries = []
+    for key, sm in summary.items():
+        if not isinstance(sm, dict):
+            continue
+        item = dict(sm)
+        active_id = item.get('active_session_id') or ''
+        live_extra = 0
+        if active_id and active_id in session_by_id and not session_by_id[active_id].get('ended_at'):
+            live_extra = max(0, int(now - float(session_by_id[active_id].get('started_at') or now)))
+        item['key'] = key
+        item['total_online_seconds_live'] = int(item.get('total_online_seconds') or 0) + live_extra
+        item['online'] = bool(active_id)
+        summaries.append(item)
+    safe_sessions = [s for s in sessions if isinstance(s, dict)]
+    safe_sessions.sort(key=lambda x: float(x.get('started_at') or 0), reverse=True)
+    summaries.sort(key=lambda x: (0 if x.get('online') else 1, -(float(x.get('last_seen') or 0))))
+    return {'summary': summaries, 'sessions': safe_sessions[:max(1, min(int(limit or 300), CLIENT_HISTORY_MAX_SESSIONS))], 'updated_at': now, 'retention': data.get('retention') or {'days': int(CLIENT_HISTORY_RETENTION_SECONDS // 86400), 'max_sessions': CLIENT_HISTORY_MAX_SESSIONS}}
+
+
 def simplify_host(host):
     host = str(host or '').strip().lower().strip('.')
     if not host or host == '—':
@@ -3735,6 +4002,11 @@ def build_clients(connections):
         item['tcp_states'][state] = item['tcp_states'].get(state, 0) + 1
 
     active_keys = set(grouped.keys())
+    try:
+        update_client_session_history(grouped, history, now)
+    except Exception as e:
+        log_exception("CLIENT", "history_update", e, actor="backend", target="client_sessions")
+
     for key, item in grouped.items():
         old = history.get(key, {})
         became_online = not old.get('last_seen') or (now - old.get('last_seen', 0) > SESSION_BREAK_SECONDS)
@@ -4129,6 +4401,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/clients":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 conns = get_monitored_connections(force=(qs.get("force", ["0"])[0] == "1"), run_autoban=True); return self.send_json({"clients": build_clients(conns), "updated_at": connections_cache.get("updated_at", 0)})
+            if path == "/api/clients/history":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                try:
+                    limit = int((qs.get("limit") or ["300"])[0])
+                except Exception:
+                    limit = 300
+                return self.send_json(client_history_payload(limit=limit))
             if path == "/api/servers":
                 settings = load_settings(); servers = load_servers()
                 enriched = []
@@ -4389,6 +4668,10 @@ class Handler(BaseHTTPRequestHandler):
                     if get_source_ip(c) == ip and close_connection(get_conn_id(c)):
                         closed += 1
                 return self.send_json({"ok": True, "closed": closed})
+            if path == "/api/clients/history/clear":
+                data = clear_client_sessions()
+                log("CLIENT", "HISTORY_CLEAR", "Client connection history cleared", actor="ui", action="client_history_clear")
+                return self.send_json({"ok": True, "history": data, "message": "История подключений очищена."})
             if path == "/api/clients/delete":
                 ip = str(body.get("ip") or "")
                 key = str(body.get("key") or "")

@@ -125,6 +125,37 @@ assert mode_resp["data"]["options"]["production_mode"] == "normal"
 assert backend.sanitize_sensitive({"url":"https://example.com/secret-token/path?token=abc", "password":"mypassword"})["url"].endswith("/****")
 assert "mypassword" not in json.dumps(backend.sanitize_sensitive({"password":"mypassword"}), ensure_ascii=False)
 
+# Regression: application-only server metadata must never leak into sing-box outbounds.
+_meta_server = {
+    "tag": "meta-test-vless",
+    "type": "vless",
+    "server": "example.test",
+    "server_port": 443,
+    "uuid": "00000000-0000-0000-0000-000000000000",
+    "flow": "xtls-rprx-vision",
+    "enabled": True,
+    "use_in_auto": False,
+    "source_id": "sub_test",
+    "source_name": "Test Source",
+    "source_type": "subscription",
+    "source_url": "https://example.test/sub",
+    "priority": 10,
+    "manual": False,
+    "traffic": {"used": 1},
+    "ui": {"expanded": True},
+    "description": "metadata only",
+    "created_at": 1,
+    "updated_at": 2,
+    "imported_at": 3,
+}
+_clean = backend.server_to_singbox_outbound(_meta_server)
+_forbidden_meta = set(getattr(backend, "APP_SERVER_META_KEYS", set()))
+assert _forbidden_meta, "APP_SERVER_META_KEYS must not be empty"
+_leaked = sorted(k for k in _clean if k in _forbidden_meta)
+assert not _leaked, "App metadata leaked into sing-box outbound: " + repr(_leaked)
+assert _clean.get("tag") == "meta-test-vless" and _clean.get("type") == "vless"
+
+
 html = UI.read_text(encoding="utf-8")
 script = html.split("<script>", 1)[1].split("</script>", 1)[0]
 tmp = ROOT / ".ui-smoke-check.js"
@@ -200,6 +231,12 @@ try:
     _summary = backend.server_sources_summary(_loaded)
     assert any(s.get("id") == "sub_test" and s.get("servers_count") == 1 for s in _summary.get("sources", [])), _summary
     assert "DE1-vless" in backend.auto_server_tags(_loaded)
+    _config = backend.make_singbox_config()
+    _runtime_leaks = []
+    for _outbound in _config.get("outbounds", []):
+        if isinstance(_outbound, dict):
+            _runtime_leaks.extend([_k for _k in _outbound.keys() if _k in backend.APP_SERVER_META_KEYS])
+    assert not _runtime_leaks, "App metadata leaked into generated sing-box config: " + repr(sorted(set(_runtime_leaks)))
     _loaded[0]["enabled"] = False
     backend.save_servers(_loaded)
     assert "DE1-vless" not in backend.auto_server_tags(backend.load_servers())

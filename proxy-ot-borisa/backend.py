@@ -20,7 +20,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.24.0"
+APP_VERSION = "1.24.1"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -2824,6 +2824,42 @@ def preserve_server_metadata(existing_servers, new_servers):
         merged.append(item)
     return merged
 
+APP_SERVER_META_KEYS = {
+    "priority",
+    "last_ping",
+    "last_ping_at",
+    "note",
+    "enabled",
+    "use_in_auto",
+    "source_id",
+    "source_name",
+    "source_type",
+    "source_url",
+    "source_created_at",
+    "source_updated_at",
+    "source_enabled",
+    "source_use_in_auto",
+    "source_servers_count",
+    "imported_at",
+    "updated_at",
+    "created_at",
+    "internal_tag",
+    "manual",
+    "traffic",
+    "ui",
+    "description",
+    "origin",
+    "group",
+    "provider",
+    "subscription",
+    "disabled",
+    "first_seen",
+    "last_seen",
+    "last_error",
+    "last_status",
+    "servers_count",
+}
+
 def server_to_singbox_outbound(server):
     """Return a clean sing-box outbound object.
 
@@ -2832,22 +2868,11 @@ def server_to_singbox_outbound(server):
     written into /tmp/boris-proxy/sing-box.json.
     """
     item = dict(server)
-    for key in [
-        "priority",
-        "last_ping",
-        "last_ping_at",
-        "note",
-        "enabled",
-        "source_id",
-        "source_name",
-        "source_type",
-        "source_url",
-        "source_created_at",
-        "source_updated_at",
-        "imported_at",
-        "updated_at",
-        "internal_tag",
-    ]:
+    # Keep this list deliberately broad: these are application metadata keys,
+    # not sing-box outbound schema fields. If any of them reaches
+    # /tmp/boris-proxy/sing-box.json, sing-box can refuse to start with
+    # "json: unknown field ...".
+    for key in APP_SERVER_META_KEYS:
         item.pop(key, None)
     return item
 

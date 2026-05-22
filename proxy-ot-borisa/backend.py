@@ -2,6 +2,7 @@
 import base64
 import ipaddress
 import json
+import hashlib
 import os
 import re
 import signal
@@ -19,7 +20,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.21.2"
+APP_VERSION = "1.22.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -34,29 +35,43 @@ BACKUP_VERSION = 2
 DATA_SCHEMA_VERSION = 3
 MIGRATIONS_FILE = Path("/data/migrations.json")
 AUDIT_LOG_FILE = Path("/data/audit.json")
+MTG_ACTIVITY_FILE = Path("/data/mtproto_activity.json")
+NETWORK_QUALITY_FILE = Path("/data/network_quality.json")
 AUDIT_LOG_LIMIT = 5000
 LAST_GOOD_SINGBOX_CONFIG = DATA_DIR / "sing-box.last-good.json"
-BACKUP_FILES = {
-    "settings": "settings.json",
-    "runtime_ports": "runtime_ports.json",
-    "servers": "servers.json",
-    "server_pings": "server_pings.json",
-    "routing": "routing.json",
-    "users": "users.json",
-    "trusted": "trusted.json",
-    "blocklist": "blocked_ips.json",
-    "security": "security.json",
-    "traffic": "traffic.json",
-    "subscription_info": "subscription_info.json",
-    "subscription_servers": "subscription_servers.json",
-    "telegram": "telegram.json",
-    "events": "events.json",
-    "audit": "audit.json",
-    "client_sessions": "client_sessions.json",
-    "client_limits": "client_limits.json",
-    "runtime_options": "runtime_options.json",
-    "migrations": "migrations.json",
+EVENT_LOG_LIMIT = 2000
+CLIENT_HISTORY_MAX_SESSIONS = 2000
+CLIENT_HISTORY_RETENTION_SECONDS = 30 * 24 * 3600
+MTG_ONLINE_GRACE_SECONDS = 90
+MTG_RECENT_GRACE_SECONDS = 10 * 60
+MTG_ACTIVITY_RETENTION_SECONDS = 30 * 24 * 3600
+MTG_ACTIVITY_MAX_RECORDS = 1000
+DATA_REGISTRY = {
+    "settings": {"path": DATA_DIR / "settings.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Основные настройки"},
+    "runtime_ports": {"path": RUNTIME_PORTS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Рабочие порты"},
+    "runtime_options": {"path": RUNTIME_OPTIONS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Runtime-настройки"},
+    "servers": {"path": DATA_DIR / "servers.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "VPN-серверы"},
+    "server_pings": {"path": DATA_DIR / "server_pings.json", "backup": True, "maintenance": True, "cleanup": "prune_server_pings", "contains_secrets": False, "description": "Результаты ping"},
+    "routing": {"path": DATA_DIR / "routing.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Маршрутизация"},
+    "users": {"path": DATA_DIR / "proxy_users.json", "backup": True, "maintenance": True, "cleanup": "prune_user_related_data", "contains_secrets": True, "description": "Пользователи"},
+    "trusted": {"path": DATA_DIR / "trusted.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Доверенные IP"},
+    "blocklist": {"path": DATA_DIR / "blocked_ips.json", "backup": True, "maintenance": True, "cleanup": "prune_blocked_ips", "contains_secrets": False, "description": "Блокировки"},
+    "security": {"path": DATA_DIR / "security.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Безопасность"},
+    "traffic": {"path": DATA_DIR / "traffic.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Трафик"},
+    "manual_traffic": {"path": DATA_DIR / "manual_traffic.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Ручной трафик"},
+    "subscription_info": {"path": SUBSCRIPTION_INFO_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Информация подписки"},
+    "subscription_servers": {"path": SUBSCRIPTION_SERVERS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "JSON подписки"},
+    "telegram": {"path": DATA_DIR / "telegram.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Telegram MTProto настройки"},
+    "events": {"path": DATA_DIR / "events.json", "backup": True, "maintenance": True, "cleanup": "prune_events", "contains_secrets": False, "description": "Технические события", "limit": EVENT_LOG_LIMIT},
+    "audit": {"path": AUDIT_LOG_FILE, "backup": True, "maintenance": True, "cleanup": "prune_audit_events", "contains_secrets": False, "description": "Аудит", "limit": AUDIT_LOG_LIMIT},
+    "client_sessions": {"path": DATA_DIR / "client_sessions.json", "backup": True, "maintenance": True, "cleanup": "prune_client_sessions_file", "contains_secrets": False, "description": "История клиентов", "retention_days": 30, "max_records": CLIENT_HISTORY_MAX_SESSIONS},
+    "client_limits": {"path": DATA_DIR / "client_limits.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Лимиты клиентов"},
+    "mtproto_activity": {"path": MTG_ACTIVITY_FILE, "backup": True, "maintenance": True, "cleanup": "prune_mtg_activity_file", "contains_secrets": False, "description": "Активность MTProto", "retention_days": 30, "max_records": MTG_ACTIVITY_MAX_RECORDS},
+    "network_quality": {"path": NETWORK_QUALITY_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Диагностика задержек"},
+    "migrations": {"path": MIGRATIONS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Миграции"},
+    "last_good_singbox_config": {"path": LAST_GOOD_SINGBOX_CONFIG, "backup": False, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Последний рабочий конфиг sing-box"},
 }
+BACKUP_FILES = {key: Path(meta["path"]).name for key, meta in DATA_REGISTRY.items() if meta.get("backup")}
 SINGBOX_BIN = "/usr/local/bin/sing-box"
 SINGBOX_CONFIG = TMP_DIR / "sing-box.json"
 BACKEND_PORT = 8099
@@ -67,9 +82,6 @@ CLASH_API = "http://127.0.0.1:9090"
 SESSION_BREAK_SECONDS = 60
 RECENT_CLIENT_SECONDS = 300
 OFFLINE_CLIENT_KEEP_SECONDS = 30 * 24 * 3600
-EVENT_LOG_LIMIT = 2000
-CLIENT_HISTORY_MAX_SESSIONS = 2000
-CLIENT_HISTORY_RETENTION_SECONDS = 30 * 24 * 3600
 SINGBOX_STARTED_AT = 0
 MONITOR_INTERVAL_SECONDS = 15
 AUTOBAN_CHECK_INTERVAL_SECONDS = 30
@@ -929,12 +941,185 @@ def app_activity():
     return {"state": "ok", "message": f"Прокси работает через {cur.get('server')}, пинг {cur.get('delay')} мс", "updated_at": time.time()}
 
 
+
+def registry_path(key):
+    meta = DATA_REGISTRY.get(key) or {}
+    return Path(meta.get("path") or data_path(f"{key}.json"))
+
+
+def registry_backup_items():
+    return {k: v for k, v in DATA_REGISTRY.items() if v.get("backup")}
+
+
+def registry_maintenance_items():
+    return {k: v for k, v in DATA_REGISTRY.items() if v.get("maintenance")}
+
+
+def json_record_count(path):
+    data = read_json(path, None)
+    if isinstance(data, list):
+        return len(data)
+    if isinstance(data, dict):
+        if isinstance(data.get("users"), dict):
+            return len(data.get("users") or {})
+        if isinstance(data.get("sessions"), list):
+            return len(data.get("sessions") or [])
+        if isinstance(data.get("items"), list):
+            return len(data.get("items") or [])
+        return len(data)
+    return 0
+
+
+def data_registry_status():
+    result = {}
+    for key, meta in registry_maintenance_items().items():
+        path = Path(meta["path"])
+        result[key] = {
+            "path": str(path),
+            "exists": path.exists(),
+            "size_bytes": file_size(path),
+            "records": json_record_count(path) if path.exists() else 0,
+            "backup": bool(meta.get("backup")),
+            "cleanup": bool(meta.get("cleanup")),
+            "contains_secrets": bool(meta.get("contains_secrets")),
+            "description": meta.get("description") or key,
+            "retention_days": meta.get("retention_days"),
+            "max_records": meta.get("max_records") or meta.get("limit"),
+        }
+    return result
+
+
+def prune_list_file(path, limit):
+    data = read_json(path, [])
+    if not isinstance(data, list):
+        data = []
+    pruned = data[-int(limit):]
+    if len(pruned) != len(data):
+        write_json(path, pruned)
+    return {"before": len(data), "after": len(pruned)}
+
+
+def prune_events():
+    return prune_list_file(data_path("events.json"), EVENT_LOG_LIMIT)
+
+
+def prune_audit_events():
+    return prune_list_file(AUDIT_LOG_FILE, AUDIT_LOG_LIMIT)
+
+
+def prune_client_sessions_file():
+    data = load_client_sessions()
+    before = len((normalize_client_sessions(data)).get("sessions") or [])
+    pruned = prune_client_sessions(data)
+    save_client_sessions(pruned)
+    after = len((pruned.get("sessions") or []))
+    return {"before": before, "after": after}
+
+
+def prune_mtg_activity(data=None, now=None):
+    now = float(now or time.time())
+    data = data if isinstance(data, dict) else load_mtg_activity()
+    records = data.setdefault("users", {})
+    if not isinstance(records, dict):
+        records = {}; data["users"] = records
+    active_user_ids = {str(u.get("id") or "") for u in load_proxy_users() if u.get("id")}
+    cutoff = now - MTG_ACTIVITY_RETENTION_SECONDS
+    before = len(records)
+    kept = {}
+    current = []
+    stale = []
+    for uid, rec in records.items():
+        if not isinstance(rec, dict):
+            continue
+        last_seen = float(rec.get("last_seen") or rec.get("updated_at") or rec.get("first_seen") or 0)
+        item = (uid, rec, last_seen)
+        if uid in active_user_ids or last_seen >= cutoff or float(rec.get("online_until") or 0) >= now:
+            current.append(item)
+        else:
+            stale.append(item)
+    current.sort(key=lambda x: x[2], reverse=True)
+    stale.sort(key=lambda x: x[2], reverse=True)
+    for uid, rec, _ in current[:MTG_ACTIVITY_MAX_RECORDS]:
+        kept[uid] = rec
+    if len(kept) < MTG_ACTIVITY_MAX_RECORDS:
+        for uid, rec, _ in stale[:MTG_ACTIVITY_MAX_RECORDS - len(kept)]:
+            kept[uid] = rec
+    data["users"] = kept
+    data["retention"] = {
+        "days": int(MTG_ACTIVITY_RETENTION_SECONDS // 86400),
+        "max_records": MTG_ACTIVITY_MAX_RECORDS,
+        "pruned_at": now,
+        "before": before,
+        "after": len(kept),
+    }
+    return data
+
+
+def prune_mtg_activity_file():
+    data = load_mtg_activity()
+    before = len(data.get("users") or {})
+    pruned = prune_mtg_activity(data)
+    save_mtg_activity(pruned)
+    return {"before": before, "after": len(pruned.get("users") or {})}
+
+
+def prune_server_pings():
+    pings = load_server_pings()
+    if not isinstance(pings, dict):
+        pings = {}
+    servers = {str(s.get("tag") or s.get("name") or "") for s in load_servers()}
+    before = len(pings)
+    pings = {k: v for k, v in pings.items() if k in servers}
+    write_json(data_path("server_pings.json"), pings)
+    return {"before": before, "after": len(pings)}
+
+
+def prune_blocked_ips():
+    now = time.time()
+    items = load_blocked()
+    before = len(items)
+    kept = []
+    for b in items:
+        until = b.get("until") or b.get("blocked_until")
+        try:
+            expired = until not in [None, "", "permanent"] and float(until) <= now
+        except Exception:
+            expired = False
+        if not expired:
+            kept.append(b)
+    if len(kept) != before:
+        write_json(data_path("blocked_ips.json"), kept)
+    return {"before": before, "after": len(kept)}
+
+
+def prune_user_related_data():
+    # Placeholder hook: user-related cleanup is handled by specific files
+    # such as mtproto_activity and client_sessions, not by deleting users.
+    return {"before": len(load_proxy_users()), "after": len(load_proxy_users())}
+
+
+def prune_all_data_files():
+    results = {}
+    for key, meta in DATA_REGISTRY.items():
+        cleanup_name = meta.get("cleanup")
+        if not cleanup_name:
+            continue
+        fn = globals().get(cleanup_name)
+        if not callable(fn):
+            results[key] = {"error": f"cleanup function {cleanup_name} not found"}
+            continue
+        try:
+            results[key] = fn()
+        except Exception as e:
+            results[key] = {"error": str(e)}
+    return results
+
 def export_backup(include_events=False, include_secrets=True):
     files = {}
-    for key, fname in BACKUP_FILES.items():
+    for key, meta in registry_backup_items().items():
         if key in {"events", "audit"} and not include_events:
             continue
-        path = data_path(fname)
+        path = Path(meta["path"])
         if path.exists():
             files[key] = read_json(path, None)
         elif key in {"events", "audit"}:
@@ -985,12 +1170,12 @@ def import_backup(payload, mode="replace"):
     if not isinstance(files, dict):
         raise ValueError("В резервной копии нет блока files")
     restored = []
-    for key, fname in BACKUP_FILES.items():
+    for key, meta in registry_backup_items().items():
         if key not in files:
             continue
         if key in {"events", "audit"} and mode != "replace_with_logs":
             continue
-        write_json(data_path(fname), files[key])
+        write_json(Path(meta["path"]), files[key])
         restored.append(key)
     log("BACKUP", "IMPORT", f"Backup imported: {', '.join(restored)}", actor="ui", action="backup_import", extra={"restored": restored, "mode": mode})
     return restored
@@ -1034,30 +1219,28 @@ def file_size(path):
 
 
 def maintenance_status():
-    files = {
-        "events": data_path("events.json"),
-        "audit": AUDIT_LOG_FILE,
-        "client_sessions": data_path("client_sessions.json"),
-        "traffic": data_path("traffic.json"),
-        "servers": data_path("servers.json"),
-        "users": users_path(),
-        "runtime_options": data_path("runtime_options.json"),
-        "last_good_singbox_config": LAST_GOOD_SINGBOX_CONFIG,
-    }
     try:
         du = shutil.disk_usage(str(DATA_DIR))
         disk = {"total": du.total, "used": du.used, "free": du.free, "free_pct": round(du.free / du.total * 100, 2) if du.total else 0}
     except Exception:
         disk = {"total": 0, "used": 0, "free": 0, "free_pct": 0}
+    files = data_registry_status()
     return {
         "schema_version": read_json(MIGRATIONS_FILE, {}).get("schema_version", 0),
         "target_schema_version": DATA_SCHEMA_VERSION,
         "disk": disk,
-        "files": {k: {"path": str(v), "exists": Path(v).exists(), "size_bytes": file_size(v)} for k, v in files.items()},
-        "retention": {"events_limit": EVENT_LOG_LIMIT, "audit_limit": AUDIT_LOG_LIMIT, "client_history_days": int(CLIENT_HISTORY_RETENTION_SECONDS/86400), "client_history_max_sessions": CLIENT_HISTORY_MAX_SESSIONS},
+        "files": files,
+        "retention": {
+            "events_limit": EVENT_LOG_LIMIT,
+            "audit_limit": AUDIT_LOG_LIMIT,
+            "client_history_days": int(CLIENT_HISTORY_RETENTION_SECONDS/86400),
+            "client_history_max_sessions": CLIENT_HISTORY_MAX_SESSIONS,
+            "mtproto_activity_days": int(MTG_ACTIVITY_RETENTION_SECONDS/86400),
+            "mtproto_activity_max_records": MTG_ACTIVITY_MAX_RECORDS,
+        },
+        "registry": {k: {kk: vv for kk, vv in meta.items() if kk != "path"} for k, meta in DATA_REGISTRY.items()},
         "updated_at": time.time(),
     }
-
 
 def clear_events():
     write_json(data_path("events.json"), [])
@@ -2013,22 +2196,215 @@ def mtg_multi_stats():
         return {'error': str(e), 'users': {}}
 
 
+def secret_fingerprint(value):
+    raw = str(value or '').encode('utf-8', errors='ignore')
+    if not raw:
+        return ''
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def load_mtg_activity():
+    data = read_json(MTG_ACTIVITY_FILE, {})
+    if not isinstance(data, dict):
+        data = {}
+    users = data.get('users')
+    if not isinstance(users, dict):
+        data['users'] = {}
+    data.setdefault('updated_at', 0)
+    data.setdefault('version', 1)
+    return data
+
+
+def save_mtg_activity(data):
+    if not isinstance(data, dict):
+        data = {'users': {}}
+    data = prune_mtg_activity(data)
+    data['updated_at'] = time.time()
+    data.setdefault('version', 1)
+    write_json(MTG_ACTIVITY_FILE, data)
+    return data
+
+
+def mtg_stat_number(item, *keys):
+    return _mtg_stat_int(item, *keys)
+
+
+def mtg_stat_seen_ts(value):
+    if value in [None, '', 0]:
+        return 0.0
+    try:
+        val = float(value)
+        if val > 1000000000000:
+            val = val / 1000.0
+        if val > 1000000000:
+            return val
+    except Exception:
+        pass
+    return 0.0
+
+
+def mtg_user_presence_from_record(record, now=None):
+    now = now or time.time()
+    if not isinstance(record, dict) or not record.get('first_seen'):
+        return {'status': 'never', 'online': False, 'recent': False, 'last_seen': 0, 'status_text': 'не подключался'}
+    last_seen = float(record.get('last_seen') or 0)
+    online_until = float(record.get('online_until') or 0)
+    if online_until >= now:
+        return {'status': 'online', 'online': True, 'recent': True, 'last_seen': last_seen, 'status_text': 'онлайн'}
+    if last_seen and now - last_seen <= MTG_RECENT_GRACE_SECONDS:
+        return {'status': 'recent', 'online': False, 'recent': True, 'last_seen': last_seen, 'status_text': 'недавно был'}
+    return {'status': 'offline', 'online': False, 'recent': False, 'last_seen': last_seen, 'status_text': 'оффлайн'}
+
+
+def update_mtg_activity_from_stats(stats=None, users=None, real_peers=None):
+    """Refresh per-secret MTProto activity.
+
+    mtg-multi builds differ: some expose active connection count, others only
+    expose counters/last_seen. We therefore treat a counter delta or a fresh
+    last_seen as confirmed activity and keep the user online for a short grace
+    window. This avoids showing "offline" while Telegram works through the
+    issued secret.
+    """
+    now = time.time()
+    users = users if users is not None else load_proxy_users()
+    stats = stats if stats is not None else mtg_multi_stats()
+    real_peers = real_peers if real_peers is not None else []
+    stats_users = stats.get('users') if isinstance(stats, dict) else {}
+    if not isinstance(stats_users, dict):
+        stats_users = {}
+    activity = load_mtg_activity()
+    records = activity.setdefault('users', {})
+    enabled_users = [u for u in users if u.get('enabled', True) and u.get('telegram_enabled', True) and not is_user_block_active(u)]
+    enabled_ids = {str(u.get('id')) for u in enabled_users}
+
+    for user in users:
+        uid = str(user.get('id') or '')
+        if not uid:
+            continue
+        rec = records.setdefault(uid, {})
+        rec.update({
+            'user_id': uid,
+            'username': user.get('username') or '',
+            'name': user.get('name') or user.get('username') or uid,
+            'secret_hash': secret_fingerprint(user.get('telegram_secret') or ''),
+            'enabled': bool(user.get('enabled', True)),
+            'telegram_enabled': bool(user.get('telegram_enabled', True)),
+        })
+
+    saw_any_stats = False
+    for user in enabled_users:
+        uid = str(user.get('id') or '')
+        username = str(user.get('username') or '')
+        su = stats_users.get(username) or stats_users.get(uid)
+        if not isinstance(su, dict):
+            continue
+        saw_any_stats = True
+        rec = records.setdefault(uid, {})
+        connections = mtg_stat_number(su, 'connections', 'active_connections', 'connection_count', 'conn', 'conns', 'clients', 'active')
+        bytes_in = mtg_stat_number(su, 'bytes_in', 'bytesIn', 'in', 'rx', 'download', 'recv', 'received')
+        bytes_out = mtg_stat_number(su, 'bytes_out', 'bytesOut', 'out', 'tx', 'upload', 'sent')
+        requests = mtg_stat_number(su, 'requests', 'request_count', 'hits', 'accepted', 'total')
+        stat_last_seen = mtg_stat_seen_ts(su.get('last_seen') or su.get('lastSeen') or su.get('updated_at') or su.get('updatedAt'))
+        counter_total = connections + bytes_in + bytes_out + requests
+        prev_total = int(rec.get('counter_total') or 0)
+        prev_stat_seen = float(rec.get('stat_last_seen') or 0)
+        counter_changed = counter_total > prev_total
+        stat_seen_changed = stat_last_seen > prev_stat_seen
+        explicit_active = connections > 0 or bool(su.get('online') or su.get('active') or su.get('connected'))
+        confirmed_activity = explicit_active or counter_changed or stat_seen_changed
+        if confirmed_activity:
+            rec.setdefault('first_seen', now)
+            rec['last_seen'] = now
+            rec['online_until'] = now + MTG_ONLINE_GRACE_SECONDS
+            rec['activity_events'] = int(rec.get('activity_events') or 0) + (1 if counter_changed or stat_seen_changed or explicit_active else 0)
+        rec.update({
+            'counter_total': max(prev_total, counter_total),
+            'stat_last_seen': max(prev_stat_seen, stat_last_seen),
+            'active_connections': max(0, connections),
+            'bytes_in': max(int(rec.get('bytes_in') or 0), bytes_in),
+            'bytes_out': max(int(rec.get('bytes_out') or 0), bytes_out),
+            'requests': max(int(rec.get('requests') or 0), requests),
+            'raw_keys': sorted(list(su.keys()))[:40],
+            'last_stats_at': now,
+            'identity_source': 'mtg_multi_stats',
+        })
+
+    # Fallback: if mtg-multi stats are empty but exactly one Telegram user is enabled
+    # and there are TCP peers on the MTProto port, mark that user as active. We still
+    # do not guess among multiple users, because IP/NAT/mobile networks make this unsafe.
+    if not saw_any_stats and len(enabled_users) == 1 and real_peers:
+        user = enabled_users[0]
+        uid = str(user.get('id') or '')
+        rec = records.setdefault(uid, {})
+        rec.setdefault('first_seen', now)
+        rec.update({
+            'last_seen': now,
+            'online_until': now + MTG_ONLINE_GRACE_SECONDS,
+            'active_connections': len(real_peers),
+            'identity_source': 'single_user_tcp_fallback',
+            'activity_events': int(rec.get('activity_events') or 0) + 1,
+        })
+
+    # Mark disabled users as not online, but keep their historical last_seen.
+    for uid, rec in records.items():
+        if uid not in enabled_ids:
+            rec['online_until'] = 0
+            rec['active_connections'] = 0
+
+    save_mtg_activity(activity)
+    return activity
+
+
+def telegram_presence_for_user(user, activity=None):
+    activity = activity or load_mtg_activity()
+    records = activity.get('users') if isinstance(activity, dict) else {}
+    rec = records.get(str(user.get('id') or '')) if isinstance(records, dict) else None
+    presence = mtg_user_presence_from_record(rec)
+    presence.update({
+        'activity_events': int((rec or {}).get('activity_events') or 0),
+        'active_connections': int((rec or {}).get('active_connections') or 0),
+        'identity_source': (rec or {}).get('identity_source') or '',
+        'bytes_in': int((rec or {}).get('bytes_in') or 0),
+        'bytes_out': int((rec or {}).get('bytes_out') or 0),
+    })
+    return presence
+
+
 def mtg_status():
     users = users_safe()
     running = bool(mtg_process and mtg_process.poll() is None)
     stats = mtg_multi_stats() if running else {'users': {}}
+    real_peers = list_tcp_peers_for_local_port(telegram_shared_port()) if running else []
+    activity = update_mtg_activity_from_stats(stats=stats, users=load_proxy_users(), real_peers=real_peers) if running else load_mtg_activity()
     stats_users = stats.get('users') if isinstance(stats, dict) else {}
+    online_count = 0
+    recent_count = 0
     for u in users:
         u['telegram_port'] = telegram_shared_port()
         u['telegram_running'] = running and u.get('enabled', True) and u.get('telegram_enabled', True) and not is_user_block_active(u)
         su = stats_users.get(u.get('username')) if isinstance(stats_users, dict) else None
         if isinstance(su, dict):
             u['telegram_stats'] = su
+        presence = telegram_presence_for_user(u, activity)
+        # If service is stopped, never show users as online, but keep last_seen/history.
+        if not running or not u.get('telegram_running'):
+            if presence.get('status') == 'online':
+                presence['status'] = 'offline'
+                presence['online'] = False
+                presence['status_text'] = 'оффлайн'
+        if presence.get('status') == 'online':
+            online_count += 1
+        if presence.get('recent'):
+            recent_count += 1
+        u['telegram_presence'] = presence
     primary = users[0] if users else {}
     return {
         'enabled': bool(load_telegram_settings().get('enabled', False)),
         'running': running,
         'running_count': 1 if running else 0,
+        'online_users': online_count,
+        'recent_users': recent_count,
+        'activity_updated_at': activity.get('updated_at') if isinstance(activity, dict) else 0,
         'port': telegram_shared_port(),
         'front_domain': load_telegram_settings().get('front_domain') or 'www.google.com',
         'public_host': load_telegram_settings().get('public_host') or primary.get('public_host') or '',
@@ -2057,48 +2433,35 @@ def _mtg_stat_int(item, *keys):
 
 
 def active_mtg_users_from_stats():
-    """Return Telegram users that mtg-multi reports as active by their secret name.
+    """Return MTProto users considered online by secret activity.
 
-    This is the correct identity source for Telegram MTProto clients on one
-    shared port: TCP tables can show only remote IP:port, while mtg-multi knows
-    which configured secret/user accepted the connection.
+    We do not rely solely on the instant connection counter because Telegram
+    may reconnect/sleep and mtg-multi builds expose different stats. Activity
+    is updated from stats and kept online for MTG_ONLINE_GRACE_SECONDS.
     """
+    real_peers = list_tcp_peers_for_local_port(telegram_shared_port())
     stats = mtg_multi_stats()
-    stats_users = stats.get('users') if isinstance(stats, dict) else {}
-    if not isinstance(stats_users, dict):
-        return []
-
-    users_by_name = user_by_username_map()
+    users = load_proxy_users()
+    activity = update_mtg_activity_from_stats(stats=stats, users=users, real_peers=real_peers)
+    records = activity.get('users') if isinstance(activity, dict) else {}
     result = []
-    for username, su in stats_users.items():
-        if not isinstance(su, dict):
+    for user in users:
+        if not user.get('enabled', True) or not user.get('telegram_enabled', True) or is_user_block_active(user):
             continue
-        user = users_by_name.get(str(username))
-        if not user:
+        rec = records.get(str(user.get('id') or '')) if isinstance(records, dict) else None
+        presence = mtg_user_presence_from_record(rec)
+        if presence.get('status') != 'online':
             continue
-
-        connections = _mtg_stat_int(su, 'connections', 'active_connections', 'connection_count', 'conn', 'conns')
-        bytes_in = _mtg_stat_int(su, 'bytes_in', 'bytesIn', 'in', 'rx', 'download')
-        bytes_out = _mtg_stat_int(su, 'bytes_out', 'bytesOut', 'out', 'tx', 'upload')
-        last_seen = su.get('last_seen') or su.get('lastSeen') or su.get('updated_at') or su.get('updatedAt') or ''
-
-        # Не считаем пользователя онлайн только из-за накопленных байтов или
-        # last_seen: некоторые сборки mtg-multi возвращают сохранённые счётчики
-        # даже после отключения клиента. Онлайн = есть активные соединения.
-        if connections <= 0:
-            continue
-
         result.append({
             'user': user,
-            'username': str(username),
-            'connections': max(1, connections),
-            'bytes_in': bytes_in,
-            'bytes_out': bytes_out,
-            'last_seen': last_seen,
-            'raw': su,
+            'username': user.get('username') or user.get('id') or 'unknown',
+            'connections': max(1, int((rec or {}).get('active_connections') or 1)),
+            'bytes_in': int((rec or {}).get('bytes_in') or 0),
+            'bytes_out': int((rec or {}).get('bytes_out') or 0),
+            'last_seen': presence.get('last_seen') or 0,
+            'raw': {'identity_source': (rec or {}).get('identity_source') or 'mtproto_activity'},
         })
     return result
-
 
 def infer_server_priority(server):
     tag = str(server.get("tag") or "").upper()
@@ -4517,6 +4880,104 @@ def current_server_info(proxies):
     return {"mode": mode, "server": actual, "delay": delay}
 
 
+def tcp_connect_latency(host, port=443, timeout=3.0):
+    start = time.time()
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return {"ok": True, "ms": int((time.time() - start) * 1000)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "ms": None}
+
+
+def direct_http_latency(url="https://www.gstatic.com/generate_204", timeout=5.0):
+    start = time.time()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": server_version})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(1024)
+            return {"ok": True, "status": getattr(resp, "status", 0), "ms": int((time.time() - start) * 1000), "url": url}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "ms": None, "url": url}
+
+
+def classify_latency(ms):
+    try:
+        ms = int(ms)
+    except Exception:
+        return "unknown"
+    if ms <= 180:
+        return "good"
+    if ms <= 350:
+        return "ok"
+    if ms <= 700:
+        return "slow"
+    return "bad"
+
+
+def network_quality_report(names=None, limit=12):
+    """Measure real proxy path quality, not only ICMP-like ping.
+
+    Uses sing-box Clash delay endpoint for individual outbounds. This tests the
+    HTTP/TCP path through each VLESS/VMess/etc. server to a small 204 URL and is
+    closer to what Nintendo/Telegram/browser traffic feel than a raw ping.
+    """
+    started = time.time()
+    servers = load_servers()
+    tags = [s.get("tag") for s in sort_servers_for_display(servers) if s.get("tag")]
+    if names:
+        requested = [str(x) for x in names if str(x) in tags]
+    else:
+        current = current_server_info(get_proxies())
+        requested = []
+        if current.get("server") and current.get("server") in tags:
+            requested.append(current.get("server"))
+        for t in auto_server_tags(servers):
+            if t not in requested:
+                requested.append(t)
+            if len(requested) >= int(limit or 12):
+                break
+    requested = requested[:max(1, min(int(limit or 12), 30))]
+
+    tests = {
+        "direct_tcp_1_1_1_1_443": tcp_connect_latency("1.1.1.1", 443, 3.0),
+        "direct_tcp_google_443": tcp_connect_latency("www.gstatic.com", 443, 3.0),
+        "direct_http_204": direct_http_latency("https://www.gstatic.com/generate_204", 5.0),
+    }
+    proxy_tests = []
+    for tag in requested:
+        item = {"tag": tag, "ok": False, "ms": None, "quality": "unknown", "error": ""}
+        try:
+            res = clash_request("GET", f"/proxies/{urllib.parse.quote(tag)}/delay?timeout=7000&url={urllib.parse.quote('https://www.gstatic.com/generate_204')}", timeout=9)
+            delay = numeric_delay(res)
+            item.update({"ok": delay is not None, "ms": delay, "quality": classify_latency(delay), "raw": res})
+        except Exception as e:
+            item["error"] = str(e)
+        proxy_tests.append(item)
+
+    best = None
+    for item in proxy_tests:
+        if item.get("ok") and item.get("ms") is not None:
+            if best is None or int(item["ms"]) < int(best["ms"]):
+                best = item
+    report = {
+        "ok": True,
+        "updated_at": time.time(),
+        "duration_ms": int((time.time() - started) * 1000),
+        "current": current_server_info(get_proxies()),
+        "direct": tests,
+        "proxy_tests": proxy_tests,
+        "best": best or {},
+        "note": "Это проверка TCP/HTTP задержки через outbounds sing-box. Она может отличаться от ICMP ping и лучше показывает реальную задержку браузера/Nintendo/Telegram.",
+    }
+    write_json(NETWORK_QUALITY_FILE, report)
+    return report
+
+
+def load_network_quality_report():
+    data = read_json(NETWORK_QUALITY_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
 def close_connection(cid):
     if not cid:
         return False
@@ -4643,7 +5104,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.21.2"
+    server_version = "ProxyOtBorisa/1.22.0"
 
     def log_message(self, fmt, *args):
         return
@@ -4720,12 +5181,18 @@ class Handler(BaseHTTPRequestHandler):
                     "updated_at": time.time(),
                 })
             if path == "/api/status":
-                options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = get_monitored_connections(force=False, run_autoban=True); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": mtg_status(), "settings": settings, "power": power_summary(settings, mtg_status()), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = list(connections_cache.get("items") or []); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
+                tg_status = mtg_status()
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": tg_status, "settings": settings, "power": power_summary(settings, tg_status), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/system/check":
                 return self.send_json(system_check_report())
             if path == "/api/maintenance":
                 return self.send_json(maintenance_status())
+            if path == "/api/network/quality":
+                cached = load_network_quality_report()
+                if not cached:
+                    cached = {"ok": True, "updated_at": 0, "proxy_tests": [], "direct": {}, "note": "Проверка ещё не запускалась."}
+                return self.send_json(cached)
             if path == "/api/routing/test":
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 return self.send_json(route_test_domain((q.get("q") or [""])[0]))
@@ -4990,6 +5457,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('Неизвестное действие users')
             if path == "/api/routing/test":
                 return self.send_json(route_test_domain(body.get("q") or body.get("domain") or body.get("value") or ""))
+            if path == "/api/network/quality":
+                return self.send_json(network_quality_report(names=body.get("names") or None, limit=body.get("limit") or 12))
             if path == "/api/proxy/select":
                 name = body.get("name")
                 clash_request("PUT", "/proxies/Proxy", {"name": name}, timeout=5)
@@ -5031,10 +5500,27 @@ class Handler(BaseHTTPRequestHandler):
                 log("AUDIT", "CLEAR", "Audit journal cleared", actor="ui", action="audit_clear")
                 return self.send_json({"ok": True, "message": "Аудит-журнал очищен.", **result})
             if path == "/api/maintenance/prune":
-                sessions = prune_client_sessions(load_client_sessions())
-                save_client_sessions(sessions)
-                log("MAINTENANCE", "PRUNE", "Maintenance pruning completed", actor="ui", action="maintenance_prune")
-                return self.send_json({"ok": True, "maintenance": maintenance_status(), "message": "Очистка по правилам хранения выполнена."})
+                cleanup_results = prune_all_data_files()
+                log("MAINTENANCE", "PRUNE", "Maintenance pruning completed", actor="ui", action="maintenance_prune", extra={"results": cleanup_results})
+                return self.send_json({"ok": True, "cleanup": cleanup_results, "maintenance": maintenance_status(), "message": "Очистка по правилам хранения выполнена."})
+            if path == "/api/maintenance/clear_file":
+                key = str(body.get("key") or "")
+                meta = DATA_REGISTRY.get(key)
+                if not meta or not meta.get("maintenance"):
+                    raise ValueError("Неизвестный файл обслуживания")
+                if key in {"users", "settings", "runtime_options", "runtime_ports", "servers", "routing", "security", "telegram", "migrations"}:
+                    raise ValueError("Этот файл нельзя очищать вручную из обслуживания")
+                path_to_clear = Path(meta["path"])
+                default = {} if key in {"mtproto_activity", "client_sessions", "network_quality"} else []
+                if key == "mtproto_activity":
+                    default = {"version": 1, "updated_at": time.time(), "users": {}, "retention": {"cleared_at": time.time()}}
+                elif key == "client_sessions":
+                    default = clear_client_sessions()
+                    log("MAINTENANCE", "CLEAR_FILE", f"Maintenance file cleared: {key}", actor="ui", action="maintenance_clear_file", target=key)
+                    return self.send_json({"ok": True, "maintenance": maintenance_status(), "message": "Файл очищен."})
+                write_json(path_to_clear, default)
+                log("MAINTENANCE", "CLEAR_FILE", f"Maintenance file cleared: {key}", actor="ui", action="maintenance_clear_file", target=key)
+                return self.send_json({"ok": True, "maintenance": maintenance_status(), "message": "Файл очищен."})
             if path == "/api/clients/delete":
                 ip = str(body.get("ip") or "")
                 key = str(body.get("key") or "")

@@ -38,14 +38,31 @@ assert opts
 assert opts.get("production_mode") in {"normal", "diagnostic", "debug", "safe"}
 assert backend.load_telegram_settings()
 assert isinstance(backend.system_check_report(), dict)
+# Data registry consistency: every persistent file must declare how it participates
+# in backup/maintenance/cleanup, so new files cannot be silently forgotten.
+assert isinstance(backend.DATA_REGISTRY, dict) and backend.DATA_REGISTRY
+for key, meta in backend.DATA_REGISTRY.items():
+    assert "path" in meta, key
+    assert "backup" in meta, key
+    assert "maintenance" in meta, key
+    assert "contains_secrets" in meta, key
+    if meta.get("maintenance"):
+        assert "description" in meta, key
+    if meta.get("cleanup"):
+        assert callable(getattr(backend, meta["cleanup"], None)), (key, meta.get("cleanup"))
 maint = backend.maintenance_status()
 assert isinstance(maint, dict)
 assert "proxy_users.json" in maint["files"]["users"]["path"], maint["files"]["users"]
 assert "audit" in maint["files"], maint["files"]
+assert "mtproto_activity" in maint["files"], maint["files"]
+assert maint["files"]["mtproto_activity"]["cleanup"] is True
+assert "manual_traffic" in maint["files"], maint["files"]
 assert backend.route_test_domain("chatgpt.com")["normalized"] == "chatgpt.com"
 backup = backend.export_backup(include_events=True, include_secrets=False)
 assert backup["include_secrets"] is False
 assert "audit" in backup["files"]
+assert "users" in backup["files"] or backend.registry_path("users").exists() is False
+assert "mtproto_activity" in backend.DATA_REGISTRY
 assert backend.normalize_request_path('/api/routing/test?x=1') == '/api/routing/test'
 assert callable(getattr(backend, "get_audit_events"))
 assert callable(getattr(backend, "apply_production_mode"))
@@ -75,7 +92,10 @@ assert call_handler("GET", "/api/logs?limit=2&category=all")["code"] == 200
 route_resp = call_handler("POST", "/api/routing/test", {"q": "chatgpt.com"})
 assert route_resp["code"] == 200, route_resp
 assert route_resp["data"]["normalized"] == "chatgpt.com"
-assert call_handler("GET", "/api/maintenance")["data"]["files"]["users"]["path"].endswith("proxy_users.json")
+maintenance_resp = call_handler("GET", "/api/maintenance")
+assert maintenance_resp["data"]["files"]["users"]["path"].endswith("proxy_users.json")
+assert "mtproto_activity" in maintenance_resp["data"]["files"]
+assert maintenance_resp["data"]["files"]["mtproto_activity"]["cleanup"] is True
 mode_resp = call_handler("POST", "/api/options/mode", {"mode": "normal"})
 assert mode_resp["code"] == 200, mode_resp
 assert mode_resp["data"]["options"]["production_mode"] == "normal"
@@ -127,6 +147,8 @@ assert "post('/api/routing/test'" in html
 assert "api('/api/audit" in html
 assert "function secretText" in html and "function toggleSecretValue" in html
 assert "productionMode" in html and "saveProductionMode" in html
+assert "headerSystemStatus" in html and "system-status" in html and "systemStatusInfo" in html
+assert "MTProto activity" in html
 
 # Dockerfile build sanity. For Home Assistant local builds we intentionally
 # use the upstream prebuilt :latest images for sing-box and mtg-multi.

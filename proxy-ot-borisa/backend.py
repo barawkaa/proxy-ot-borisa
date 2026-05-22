@@ -20,7 +20,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.23.2"
+APP_VERSION = "1.24.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -52,8 +52,13 @@ CLIENTS_CACHE_RETENTION_SECONDS = 30 * 24 * 3600
 GEO_CACHE_RETENTION_SECONDS = 7 * 24 * 3600
 GEO_CACHE_MAX_RECORDS = 5000
 AUTOBAN_EVENTS_MAX_IPS = 2000
+CLIENT_ACTIVITY_RETENTION_SECONDS = 30 * 24 * 3600
+CLIENT_ACTIVITY_MAX_RECORDS = 10000
+RULES_CACHE_MAX_FILES = 200
 DATA_REGISTRY = {
     "settings": {"path": DATA_DIR / "settings.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Основные настройки"},
+    "addon_options_file": {"path": OPTIONS_FILE, "backup": False, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Системный options.json Home Assistant"},
+    "rules_cache": {"path": DATA_DIR / "rules", "backup": False, "maintenance": True, "cleanup": "prune_rules_cache", "contains_secrets": False, "description": "Кэш rule-set маршрутизации", "max_records": RULES_CACHE_MAX_FILES},
     "runtime_ports": {"path": RUNTIME_PORTS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Рабочие порты"},
     "runtime_options": {"path": RUNTIME_OPTIONS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Runtime-настройки"},
     "servers": {"path": DATA_DIR / "servers.json", "backup": True, "maintenance": True, "cleanup": "prune_server_sources", "contains_secrets": True, "description": "VPN-серверы"},
@@ -76,6 +81,7 @@ DATA_REGISTRY = {
     "server_backups": {"path": DATA_DIR, "glob": "servers.backup.*.json", "backup": False, "maintenance": True, "cleanup": "prune_server_backup_files", "contains_secrets": True, "description": "Автобэкапы servers.json", "max_records": SERVER_BACKUP_KEEP},
     "audit": {"path": AUDIT_LOG_FILE, "backup": True, "maintenance": True, "cleanup": "prune_audit_events", "contains_secrets": False, "description": "Аудит", "limit": AUDIT_LOG_LIMIT},
     "client_sessions": {"path": DATA_DIR / "client_sessions.json", "backup": True, "maintenance": True, "cleanup": "prune_client_sessions_file", "contains_secrets": False, "description": "История клиентов", "retention_days": 30, "max_records": CLIENT_HISTORY_MAX_SESSIONS},
+    "client_activity": {"path": DATA_DIR / "client_activity.json", "backup": True, "maintenance": True, "cleanup": "prune_client_activity_file", "contains_secrets": False, "description": "Агрегированная активность клиентов", "retention_days": 30, "max_records": CLIENT_ACTIVITY_MAX_RECORDS},
     "client_limits": {"path": DATA_DIR / "client_limits.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Лимиты клиентов"},
     "mtproto_activity": {"path": MTG_ACTIVITY_FILE, "backup": True, "maintenance": True, "cleanup": "prune_mtg_activity_file", "contains_secrets": False, "description": "Активность MTProto", "retention_days": 30, "max_records": MTG_ACTIVITY_MAX_RECORDS},
     "network_quality": {"path": NETWORK_QUALITY_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Диагностика задержек"},
@@ -292,6 +298,10 @@ def event_category(stage, result=""):
         return "proxy"
     return "app"
 
+def sanitize_log_value(value):
+    return sanitize_sensitive(value)
+
+
 def append_event(stage, result, message, actor="system", action="", target="", extra=None):
     try:
         path = data_path("events.json")
@@ -306,9 +316,9 @@ def append_event(stage, result, message, actor="system", action="", target="", e
             "result": str(result),
             "actor": str(actor or "system"),
             "action": str(action or stage),
-            "target": str(target or ""),
-            "message": str(message),
-            "extra": extra or {},
+            "target": str(sanitize_log_value(target or "")),
+            "message": str(sanitize_log_value(message)),
+            "extra": sanitize_log_value(extra or {}),
         })
         events = events[-EVENT_LOG_LIMIT:]
         write_json(path, events)
@@ -329,9 +339,9 @@ def append_audit(stage, result, message, actor="system", action="", target="", e
             "result": str(result),
             "actor": str(actor or "system"),
             "action": str(action or stage),
-            "target": str(target or ""),
-            "message": str(message),
-            "extra": extra or {},
+            "target": str(sanitize_log_value(target or "")),
+            "message": str(sanitize_log_value(message)),
+            "extra": sanitize_log_value(extra or {}),
         })
         write_json(AUDIT_LOG_FILE, events[-AUDIT_LOG_LIMIT:])
     except Exception:
@@ -350,7 +360,8 @@ def is_audit_event(stage, action="", result=""):
 
 
 def log(stage, result, message, actor="system", action="", target="", extra=None):
-    print(f"[{time.strftime('%H:%M:%S')}] INFO: [STAGE={stage}] [RESULT={result}] {message}", flush=True)
+    safe_message = sanitize_log_value(message)
+    print(f"[{time.strftime('%H:%M:%S')}] INFO: [STAGE={stage}] [RESULT={result}] {safe_message}", flush=True)
     append_event(stage, result, message, actor=actor, action=action or stage, target=target, extra=extra)
     if is_audit_event(stage, action or stage, result):
         append_audit(stage, result, message, actor=actor, action=action or stage, target=target, extra=extra)
@@ -358,7 +369,8 @@ def log(stage, result, message, actor="system", action="", target="", extra=None
 
 def log_exception(stage, action, error, actor="system", target="", extra=None):
     tb = traceback.format_exc()
-    print(f"[{time.strftime('%H:%M:%S')}] ERROR: [STAGE={stage}] [ACTION={action}] {error}", flush=True)
+    safe_error = sanitize_log_value(str(error))
+    print(f"[{time.strftime('%H:%M:%S')}] ERROR: [STAGE={stage}] [ACTION={action}] {safe_error}", flush=True)
     append_event(stage, "ERROR", str(error), actor=actor, action=action or stage, target=target, extra={**(extra or {}), "traceback": tb[-4000:]})
 
 
@@ -1029,6 +1041,8 @@ def registry_product_info(key, meta):
         "runtime_ports": "Порты, которые пользователь изменил уже после установки add-on.",
         "runtime_options": "Рабочие настройки режима, авторизации, логирования и диагностики.",
         "servers": "Единый рабочий пул VPN/VLESS-серверов, из которого строится конфиг sing-box.",
+        "addon_options_file": "Системный файл options.json, который Home Assistant передаёт add-on при запуске.",
+        "rules_cache": "Кэш rule-set файлов маршрутизации: скачанные списки доменов/IP для маршрутов через VPN.",
         "server_sources": "Карточки источников серверов: подписки, JSON-импорт, ручные и ранее добавленные серверы.",
         "server_pings": "Кэш последних проверок ping по серверам, чтобы интерфейс и auto не проверяли всё заново каждую секунду.",
         "routing": "Правила split-routing: какие домены/IP идут через VPN, а какие напрямую.",
@@ -1048,6 +1062,7 @@ def registry_product_info(key, meta):
         "server_backups": "Автоматические локальные копии servers.json перед изменениями списка серверов.",
         "audit": "Аудит действий администратора и событий безопасности: создание, удаление, включение, очистка.",
         "client_sessions": "История сессий клиентов: кто, когда, сколько был онлайн, через какой сервис и маршрут.",
+        "client_activity": "Агрегированная активность клиентов по доменам/IP без перехвата содержимого HTTPS.",
         "client_limits": "Лимиты клиентов и будущие ограничения/предупреждения по использованию.",
         "mtproto_activity": "Активность MTProto-пользователей по безопасному fingerprint secret без хранения полного secret.",
         "network_quality": "Последний отчёт диагностики задержек: прямые проверки и проверки через proxy/VPN.",
@@ -1083,7 +1098,7 @@ def registry_product_info(key, meta):
         "security_autoban_events": "Временные счётчики; можно очищать при диагностике автобана.",
     }
     user_action = user_action_map.get(key, "Обычно изменяется через соответствующий раздел интерфейса, вручную файл трогать не нужно.")
-    growth_control = "контролируется" if cleanup or not (key in {"events", "audit", "client_sessions", "mtproto_activity", "geo_cache", "security_autoban_events", "server_backups"}) else "проверить"
+    growth_control = "контролируется" if cleanup or not (key in {"events", "audit", "client_sessions", "client_activity", "mtproto_activity", "geo_cache", "security_autoban_events", "server_backups", "rules_cache"}) else "проверить"
     return {
         "purpose": purpose,
         "backup_policy": backup_policy,
@@ -1103,6 +1118,12 @@ def data_registry_status():
             exists = bool(files)
             records = len(files)
             shown_path = str(path / str(glob_pattern))
+        elif path.exists() and path.is_dir():
+            files = [x for x in path.rglob("*") if x.is_file()]
+            size = sum(file_size(x) for x in files)
+            exists = True
+            records = len(files)
+            shown_path = str(path)
         else:
             exists = path.exists()
             size = file_size(path)
@@ -1200,6 +1221,34 @@ def prune_server_backup_files():
         except Exception:
             pass
     return {"before": before, "after": min(before, SERVER_BACKUP_KEEP)}
+
+
+def prune_rules_cache():
+    RULES_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted([p for p in RULES_DIR.rglob("*") if p.is_file()], key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    before = len(files)
+    for path in files[RULES_CACHE_MAX_FILES:]:
+        try:
+            path.unlink()
+        except Exception:
+            pass
+    return {"before": before, "after": min(before, RULES_CACHE_MAX_FILES)}
+
+
+def prune_client_activity_file():
+    data = read_json(data_path("client_activity.json"), {"items": []})
+    items = data.get("items") if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        items = []
+    before = len(items)
+    cutoff = time.time() - CLIENT_ACTIVITY_RETENTION_SECONDS
+    items = [x for x in items if isinstance(x, dict) and float(x.get("last_seen") or x.get("ts") or 0) >= cutoff]
+    items.sort(key=lambda x: float(x.get("last_seen") or x.get("ts") or 0), reverse=True)
+    items = items[:CLIENT_ACTIVITY_MAX_RECORDS]
+    out = {"version": 1, "updated_at": time.time(), "items": items, "retention": {"days": CLIENT_ACTIVITY_RETENTION_SECONDS // 86400, "max_records": CLIENT_ACTIVITY_MAX_RECORDS, "records_count": len(items)}}
+    if len(items) != before or not isinstance(data, dict):
+        write_json(data_path("client_activity.json"), out)
+    return {"before": before, "after": len(items)}
 
 
 def prune_clients_file():
@@ -1421,13 +1470,19 @@ def sanitize_sensitive(obj):
         out = {}
         for k, v in obj.items():
             lk = str(k).lower()
-            if lk in SENSITIVE_KEYS or any(x in lk for x in ["password", "secret", "token", "uuid"]):
+            if lk in {"url", "subscription_url"}:
+                out[k] = mask_url_for_ui(v)
+            elif lk in SENSITIVE_KEYS or any(x in lk for x in ["password", "secret", "token", "uuid"]):
                 out[k] = mask_secret_value(v)
             else:
                 out[k] = sanitize_sensitive(v)
         return out
     if isinstance(obj, list):
         return [sanitize_sensitive(x) for x in obj]
+    if isinstance(obj, str):
+        # URLs can contain subscription tokens in the path/query. Keep only scheme+host.
+        if re.match(r"^https?://", obj, re.I):
+            return mask_url_for_ui(obj)
     return obj
 
 
@@ -2706,12 +2761,20 @@ def sort_servers_for_display(servers):
     return sorted([normalize_server_priority(s) for s in servers if isinstance(s, dict)], key=lambda x: (int(x.get("priority", 50)), str(x.get("tag") or "")))
 
 
+def server_runtime_allowed(server, sources=None):
+    if not isinstance(server, dict):
+        return False
+    sources = sources if sources is not None else {s.get("id"): s for s in (load_server_sources().get("sources") or []) if isinstance(s, dict)}
+    src = sources.get(server.get("source_id")) or {}
+    return bool(src.get("enabled", True)) and bool(server.get("enabled", True))
+
+
 def auto_server_tags(servers):
     normalized = sort_servers_for_display(servers)
     sources = {s.get("id"): s for s in (load_server_sources().get("sources") or []) if isinstance(s, dict)}
     def allowed(srv):
         src = sources.get(srv.get("source_id")) or {}
-        return bool(src.get("enabled", True)) and bool(src.get("use_in_auto", True)) and bool(srv.get("enabled", True))
+        return server_runtime_allowed(srv, sources) and bool(src.get("use_in_auto", True)) and bool(srv.get("use_in_auto", True))
     primary = [s.get("tag") for s in normalized if s.get("tag") and int(s.get("priority", 50)) < 100 and allowed(s)]
     if primary:
         return primary
@@ -2745,7 +2808,7 @@ def preserve_server_metadata(existing_servers, new_servers):
             continue
         for key in server_identity_keys(srv):
             index.setdefault(key, srv)
-    preserved_keys = ["priority", "enabled", "note", "last_ping", "last_ping_at"]
+    preserved_keys = ["priority", "enabled", "use_in_auto", "note", "last_ping", "last_ping_at"]
     merged = []
     for srv in new_servers or []:
         item = dict(srv)
@@ -2954,6 +3017,12 @@ def normalize_server_source_fields(servers):
                 changed = True
         if src.get("url") and item.get("source_url") != src.get("url"):
             item["source_url"] = src.get("url")
+            changed = True
+        if "enabled" not in item:
+            item["enabled"] = True
+            changed = True
+        if "use_in_auto" not in item:
+            item["use_in_auto"] = True
             changed = True
         normalized.append(item)
     sync_server_sources(normalized, save=True)
@@ -4200,7 +4269,8 @@ def fetch_text(url, timeout=20):
 
 
 def selector_outbounds(servers):
-    tags = [s.get("tag") for s in sort_servers_for_display(servers) if s.get("tag")]
+    sources = {s.get("id"): s for s in (load_server_sources().get("sources") or []) if isinstance(s, dict)}
+    tags = [s.get("tag") for s in sort_servers_for_display(servers) if s.get("tag") and server_runtime_allowed(s, sources)]
     if tags:
         return ["auto"] + tags
     return ["direct"]
@@ -4210,10 +4280,12 @@ def make_singbox_config():
     options = load_options()
     settings = load_settings()
     routing = load_routing()
-    servers = load_servers()
+    servers_all = load_servers()
+    sources_for_runtime = {s.get("id"): s for s in (load_server_sources().get("sources") or []) if isinstance(s, dict)}
+    servers = [s for s in servers_all if server_runtime_allowed(s, sources_for_runtime)]
     blocked = load_blocked()
     server_tags = [s.get("tag") for s in servers if s.get("tag")]
-    auto_tags = auto_server_tags(servers)
+    auto_tags = auto_server_tags(servers_all)
     http_port = int(options["http_proxy_port"])
     socks_port = int(options["socks_proxy_port"])
     socks_tag = f"IN-SOCKS5-{socks_port}"
@@ -4907,6 +4979,49 @@ def _history_find_session(sessions, session_id):
     return None
 
 
+def load_client_activity():
+    return read_json(data_path("client_activity.json"), {"version": 1, "updated_at": 0, "items": [], "retention": {"days": CLIENT_ACTIVITY_RETENTION_SECONDS // 86400, "max_records": CLIENT_ACTIVITY_MAX_RECORDS}})
+
+
+def save_client_activity(data):
+    if not isinstance(data, dict):
+        data = {"items": []}
+    data["updated_at"] = time.time()
+    write_json(data_path("client_activity.json"), data)
+    prune_client_activity_file()
+
+
+def update_client_activity(active_grouped, now):
+    data = load_client_activity()
+    items = data.get("items") if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        items = []
+    by_key = {str(x.get("key")): x for x in items if isinstance(x, dict) and x.get("key")}
+    for client_key, item in (active_grouped or {}).items():
+        destinations = _history_destinations(item)
+        routes = _history_routes(item)
+        services = _history_service_list(item)
+        conns = item.get("connections") or []
+        if not destinations:
+            destinations = ["—"]
+        for dest in destinations[:20]:
+            route_text = routes[0] if routes else "—"
+            svc = services[0] if services else "—"
+            key = f"{client_key}|{dest}|{svc}|{route_text}"
+            rec = by_key.get(key)
+            if not rec:
+                rec = {"key": key, "client_key": client_key, "destination": dest, "service": svc, "route": route_text, "first_seen": now, "connections": 0, "down_bytes": 0, "up_bytes": 0}
+                by_key[key] = rec
+            rec["last_seen"] = now
+            rec["client_name"] = item.get("registered_name") or item.get("username") or item.get("display_ip") or client_key
+            rec["ip"] = item.get("ip") or ""
+            rec["connections"] = int(rec.get("connections") or 0) + max(1, _history_connection_count(item))
+            rec["down_bytes"] = max(int(rec.get("down_bytes") or 0), int(item.get("download") or 0))
+            rec["up_bytes"] = max(int(rec.get("up_bytes") or 0), int(item.get("upload") or 0))
+    out = {"version": 1, "updated_at": now, "items": list(by_key.values()), "retention": {"days": CLIENT_ACTIVITY_RETENTION_SECONDS // 86400, "max_records": CLIENT_ACTIVITY_MAX_RECORDS}}
+    save_client_activity(out)
+
+
 def _history_connection_count(item):
     return int(item.get('connections_count') or len(item.get('connections') or []) or item.get('mtproto_connections') or 0)
 
@@ -5050,6 +5165,7 @@ def update_client_session_history(active_grouped, existing_history, now):
 
     sessions.sort(key=lambda x: float(x.get('started_at') or 0), reverse=True)
     data['sessions'] = sessions
+    update_client_activity(active_grouped, now)
     save_client_sessions(data)
 
 
@@ -5944,7 +6060,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(network_quality_report(names=body.get("names") or None, limit=body.get("limit") or 12))
             if path == "/api/proxy/select":
                 name = body.get("name")
+                if name and name not in {"auto", "direct"}:
+                    servers = load_servers()
+                    srv = next((s for s in servers if str(s.get("tag")) == str(name)), None)
+                    if not srv:
+                        raise ValueError("Сервер не найден")
+                    if not server_runtime_allowed(srv):
+                        raise ValueError("Сервер или его источник выключен")
                 clash_request("PUT", "/proxies/Proxy", {"name": name}, timeout=5)
+                log("SERVERS", "SELECT", f"Selected proxy server: {name}", actor="ui", action="server_select", target=name)
                 return self.send_json({"ok": True})
             if path == "/api/ping":
                 proxies = get_proxies()
@@ -5994,13 +6118,15 @@ class Handler(BaseHTTPRequestHandler):
                 if key in {"users", "settings", "runtime_options", "runtime_ports", "servers", "routing", "security", "telegram", "migrations"}:
                     raise ValueError("Этот файл нельзя очищать вручную из обслуживания")
                 path_to_clear = Path(meta["path"])
-                default = {} if key in {"mtproto_activity", "client_sessions", "network_quality"} else []
+                default = {} if key in {"mtproto_activity", "client_sessions", "client_activity", "network_quality"} else []
                 if key == "mtproto_activity":
                     default = {"version": 1, "updated_at": time.time(), "users": {}, "retention": {"cleared_at": time.time()}}
                 elif key == "client_sessions":
                     default = clear_client_sessions()
                     log("MAINTENANCE", "CLEAR_FILE", f"Maintenance file cleared: {key}", actor="ui", action="maintenance_clear_file", target=key)
                     return self.send_json({"ok": True, "maintenance": maintenance_status(), "message": "Файл очищен."})
+                elif key == "client_activity":
+                    default = {"version": 1, "updated_at": time.time(), "items": [], "retention": {"cleared_at": time.time(), "days": CLIENT_ACTIVITY_RETENTION_SECONDS // 86400, "max_records": CLIENT_ACTIVITY_MAX_RECORDS}}
                 write_json(path_to_clear, default)
                 log("MAINTENANCE", "CLEAR_FILE", f"Maintenance file cleared: {key}", actor="ui", action="maintenance_clear_file", target=key)
                 return self.send_json({"ok": True, "maintenance": maintenance_status(), "message": "Файл очищен."})
@@ -6224,6 +6350,57 @@ class Handler(BaseHTTPRequestHandler):
                     applied = True
                 log("SERVERS", "PRIORITIES", f"Saved server priority profiles: {len(changed)}", actor="ui", action="server_priorities", extra={"count": len(changed), "applied": applied})
                 return self.send_json({"ok": True, "changed": changed, "applied": applied, "apply_background": bool(applied), "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "message": "Профили сохранены" + (" и применяются в фоне." if applied else ".")})
+            if path == "/api/servers/toggle":
+                tag = str(body.get("tag") or "")
+                if not tag:
+                    raise ValueError("Сервер не указан")
+                servers = load_servers(); changed = False
+                for srv in servers:
+                    if str(srv.get("tag")) == tag:
+                        srv["enabled"] = bool(body.get("enabled"))
+                        srv["updated_at"] = time.time()
+                        changed = True
+                        break
+                if not changed:
+                    raise ValueError("Сервер не найден")
+                save_servers(servers)
+                log("SERVERS", "TOGGLE", f"Server enabled changed: {tag}", actor="ui", action="server_toggle", target=tag, extra={"enabled": bool(body.get("enabled"))})
+                restart_singbox_background('server_toggle')
+                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "apply_background": True})
+            if path == "/api/servers/toggle_auto":
+                tag = str(body.get("tag") or "")
+                if not tag:
+                    raise ValueError("Сервер не указан")
+                servers = load_servers(); changed = False
+                for srv in servers:
+                    if str(srv.get("tag")) == tag:
+                        srv["use_in_auto"] = bool(body.get("use_in_auto"))
+                        srv["updated_at"] = time.time()
+                        changed = True
+                        break
+                if not changed:
+                    raise ValueError("Сервер не найден")
+                save_servers(servers)
+                log("SERVERS", "SERVER_AUTO", f"Server auto changed: {tag}", actor="ui", action="server_auto", target=tag, extra={"use_in_auto": bool(body.get("use_in_auto"))})
+                restart_singbox_background('server_auto')
+                return self.send_json({"ok": True, "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "apply_background": True})
+            if path == "/api/server_sources/toggle":
+                sid = str(body.get("source_id") or "")
+                if not sid:
+                    raise ValueError("Источник не указан")
+                data = load_server_sources(); changed = False
+                for src in data.get("sources", []):
+                    if src.get("id") == sid:
+                        src["enabled"] = bool(body.get("enabled"))
+                        src["updated_at"] = time.time()
+                        changed = True
+                        break
+                if not changed:
+                    raise ValueError("Источник не найден")
+                save_server_sources(data)
+                log("SERVERS", "SOURCE_TOGGLE", f"Source enabled changed: {sid}", actor="ui", action="server_source_toggle", target=sid, extra={"enabled": bool(body.get("enabled"))})
+                restart_singbox_background('server_source_toggle')
+                return self.send_json({"ok": True, "sources": server_sources_summary(load_servers()).get("sources", []), "auto_tags": auto_server_tags(load_servers()), "apply_background": True})
             if path == "/api/server_sources/toggle_auto":
                 sid = str(body.get("source_id") or "")
                 if not sid:

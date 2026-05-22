@@ -68,6 +68,9 @@ assert maint["files"]["mtproto_activity"]["cleanup"] is True
 assert "manual_traffic" in maint["files"], maint["files"]
 assert "server_sources" in maint["files"], maint["files"]
 assert maint["files"]["server_sources"]["backup"] is True
+assert "addon_options_file" in maint["files"], maint["files"]
+assert "rules_cache" in maint["files"], maint["files"]
+assert "client_activity" in maint["files"], maint["files"]
 for key, fmeta in maint["files"].items():
     assert fmeta.get("purpose"), key
     assert fmeta.get("backup_policy"), key
@@ -119,6 +122,8 @@ assert maintenance_resp["data"]["files"]["mtproto_activity"]["cleanup"] is True
 mode_resp = call_handler("POST", "/api/options/mode", {"mode": "normal"})
 assert mode_resp["code"] == 200, mode_resp
 assert mode_resp["data"]["options"]["production_mode"] == "normal"
+assert backend.sanitize_sensitive({"url":"https://example.com/secret-token/path?token=abc", "password":"mypassword"})["url"].endswith("/****")
+assert "mypassword" not in json.dumps(backend.sanitize_sensitive({"password":"mypassword"}), ensure_ascii=False)
 
 html = UI.read_text(encoding="utf-8")
 script = html.split("<script>", 1)[1].split("</script>", 1)[0]
@@ -191,8 +196,15 @@ try:
     backend.save_servers(_servers)
     _loaded = backend.load_servers()
     assert _loaded and _loaded[0]["source_id"] == "sub_test", _loaded
+    assert _loaded[0].get("enabled") is True and _loaded[0].get("use_in_auto") is True
     _summary = backend.server_sources_summary(_loaded)
     assert any(s.get("id") == "sub_test" and s.get("servers_count") == 1 for s in _summary.get("sources", [])), _summary
+    assert "DE1-vless" in backend.auto_server_tags(_loaded)
+    _loaded[0]["enabled"] = False
+    backend.save_servers(_loaded)
+    assert "DE1-vless" not in backend.auto_server_tags(backend.load_servers())
+    _loaded = backend.load_servers(); _loaded[0]["enabled"] = True; _loaded[0]["use_in_auto"] = False; backend.save_servers(_loaded)
+    assert "DE1-vless" not in backend.auto_server_tags(backend.load_servers())
     _del = backend.delete_servers_by_tags(["DE1-vless"])
     assert _del.get("removed") == ["DE1-vless"], _del
     assert backend.load_servers() == []
@@ -226,7 +238,13 @@ assert "function deleteServerSource" in html
 assert "function routeDisplay" in html
 assert "post('/api/server_sources/delete'" in html
 assert "post('/api/server_sources/toggle_auto'" in html
+assert "post('/api/server_sources/toggle'" in html
 assert "post('/api/servers/delete'" in html
+assert "post('/api/servers/toggle'" in html
+assert "post('/api/servers/toggle_auto'" in html
+assert "function serverEnabledToggle" in html and "function sourceEnabledToggle" in html
+assert "Активность клиентов по доменам/IP" in html
+assert "Кэш rule-set маршрутизации" in html
 assert "SERVER_SOURCES_FILE" in backend_text
 assert "source_id" in backend_text and "source_name" in backend_text
 print(json.dumps({"server_sources_checks": True}, ensure_ascii=False))

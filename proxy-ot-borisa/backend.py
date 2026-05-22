@@ -20,7 +20,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.22.1"
+APP_VERSION = "1.23.2"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -30,6 +30,7 @@ RUNTIME_PORTS_FILE = Path("/data/runtime_ports.json")
 RUNTIME_OPTIONS_FILE = Path("/data/runtime_options.json")
 SUBSCRIPTION_INFO_FILE = Path("/data/subscription_info.json")
 SUBSCRIPTION_SERVERS_FILE = Path("/data/subscription_servers.json")
+SERVER_SOURCES_FILE = Path("/data/server_sources.json")
 PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port"]
 BACKUP_VERSION = 2
 DATA_SCHEMA_VERSION = 3
@@ -46,23 +47,33 @@ MTG_ONLINE_GRACE_SECONDS = 90
 MTG_RECENT_GRACE_SECONDS = 10 * 60
 MTG_ACTIVITY_RETENTION_SECONDS = 30 * 24 * 3600
 MTG_ACTIVITY_MAX_RECORDS = 1000
+SERVER_BACKUP_KEEP = 5
+CLIENTS_CACHE_RETENTION_SECONDS = 30 * 24 * 3600
+GEO_CACHE_RETENTION_SECONDS = 7 * 24 * 3600
+GEO_CACHE_MAX_RECORDS = 5000
+AUTOBAN_EVENTS_MAX_IPS = 2000
 DATA_REGISTRY = {
     "settings": {"path": DATA_DIR / "settings.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Основные настройки"},
     "runtime_ports": {"path": RUNTIME_PORTS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Рабочие порты"},
     "runtime_options": {"path": RUNTIME_OPTIONS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Runtime-настройки"},
-    "servers": {"path": DATA_DIR / "servers.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "VPN-серверы"},
+    "servers": {"path": DATA_DIR / "servers.json", "backup": True, "maintenance": True, "cleanup": "prune_server_sources", "contains_secrets": True, "description": "VPN-серверы"},
+    "server_sources": {"path": SERVER_SOURCES_FILE, "backup": True, "maintenance": True, "cleanup": "prune_server_sources", "contains_secrets": True, "description": "Источники VPN-серверов"},
     "server_pings": {"path": DATA_DIR / "server_pings.json", "backup": True, "maintenance": True, "cleanup": "prune_server_pings", "contains_secrets": False, "description": "Результаты ping"},
     "routing": {"path": DATA_DIR / "routing.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Маршрутизация"},
     "users": {"path": DATA_DIR / "proxy_users.json", "backup": True, "maintenance": True, "cleanup": "prune_user_related_data", "contains_secrets": True, "description": "Пользователи"},
-    "trusted": {"path": DATA_DIR / "trusted.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Доверенные IP"},
+    "trusted": {"path": DATA_DIR / "trusted_clients.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Доверенные IP"},
+    "clients": {"path": DATA_DIR / "clients.json", "backup": True, "maintenance": True, "cleanup": "prune_clients_file", "contains_secrets": False, "description": "Кэш клиентов", "retention_days": 30},
     "blocklist": {"path": DATA_DIR / "blocked_ips.json", "backup": True, "maintenance": True, "cleanup": "prune_blocked_ips", "contains_secrets": False, "description": "Блокировки"},
     "security": {"path": DATA_DIR / "security.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Безопасность"},
     "traffic": {"path": DATA_DIR / "traffic.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Трафик"},
     "manual_traffic": {"path": DATA_DIR / "manual_traffic.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Ручной трафик"},
     "subscription_info": {"path": SUBSCRIPTION_INFO_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Информация подписки"},
     "subscription_servers": {"path": SUBSCRIPTION_SERVERS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "JSON подписки"},
-    "telegram": {"path": DATA_DIR / "telegram.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Telegram MTProto настройки"},
+    "telegram": {"path": DATA_DIR / "telegram_proxy.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Telegram MTProto настройки"},
     "events": {"path": DATA_DIR / "events.json", "backup": True, "maintenance": True, "cleanup": "prune_events", "contains_secrets": False, "description": "Технические события", "limit": EVENT_LOG_LIMIT},
+    "security_autoban_events": {"path": DATA_DIR / "security_autoban_events.json", "backup": False, "maintenance": True, "cleanup": "prune_security_autoban_events_file", "contains_secrets": False, "description": "Временные счётчики автобана", "retention_days": 1, "max_records": AUTOBAN_EVENTS_MAX_IPS},
+    "geo_cache": {"path": DATA_DIR / "geo_cache.json", "backup": False, "maintenance": True, "cleanup": "prune_geo_cache_file", "contains_secrets": False, "description": "Кэш геолокации IP", "retention_days": 7, "max_records": GEO_CACHE_MAX_RECORDS},
+    "server_backups": {"path": DATA_DIR, "glob": "servers.backup.*.json", "backup": False, "maintenance": True, "cleanup": "prune_server_backup_files", "contains_secrets": True, "description": "Автобэкапы servers.json", "max_records": SERVER_BACKUP_KEEP},
     "audit": {"path": AUDIT_LOG_FILE, "backup": True, "maintenance": True, "cleanup": "prune_audit_events", "contains_secrets": False, "description": "Аудит", "limit": AUDIT_LOG_LIMIT},
     "client_sessions": {"path": DATA_DIR / "client_sessions.json", "backup": True, "maintenance": True, "cleanup": "prune_client_sessions_file", "contains_secrets": False, "description": "История клиентов", "retention_days": 30, "max_records": CLIENT_HISTORY_MAX_SESSIONS},
     "client_limits": {"path": DATA_DIR / "client_limits.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Лимиты клиентов"},
@@ -1005,19 +1016,113 @@ def json_record_count(path):
     return 0
 
 
+
+def registry_product_info(key, meta):
+    description = meta.get("description") or key
+    contains = bool(meta.get("contains_secrets"))
+    backup = bool(meta.get("backup"))
+    cleanup = bool(meta.get("cleanup"))
+    retention = meta.get("retention_days")
+    max_records = meta.get("max_records") or meta.get("limit")
+    purpose_map = {
+        "settings": "Основные настройки включения HTTP/SOCKS, ссылка основной подписки и служебные даты.",
+        "runtime_ports": "Порты, которые пользователь изменил уже после установки add-on.",
+        "runtime_options": "Рабочие настройки режима, авторизации, логирования и диагностики.",
+        "servers": "Единый рабочий пул VPN/VLESS-серверов, из которого строится конфиг sing-box.",
+        "server_sources": "Карточки источников серверов: подписки, JSON-импорт, ручные и ранее добавленные серверы.",
+        "server_pings": "Кэш последних проверок ping по серверам, чтобы интерфейс и auto не проверяли всё заново каждую секунду.",
+        "routing": "Правила split-routing: какие домены/IP идут через VPN, а какие напрямую.",
+        "users": "Пользователи прокси, их доступы, пароли, MTProto secret, группы и сроки действия.",
+        "trusted": "Доверенные IP-клиенты, которые администратор пометил как известные.",
+        "clients": "Кэш видимых клиентов: IP, статус, первое/последнее появление. Это не содержимое трафика.",
+        "blocklist": "Список заблокированных IP/CIDR и сроков временной блокировки.",
+        "security": "Настройки геофильтра, автобана и исключений безопасности.",
+        "traffic": "Состояние автоматического трафика подписки, если провайдер отдаёт лимиты.",
+        "manual_traffic": "Ручной учёт лимитов для сторонних серверов/подписок, где нет автоматических данных.",
+        "subscription_info": "Информация о подписке и лимитах, полученная из заголовков/ответа провайдера.",
+        "subscription_servers": "Нормализованный JSON серверов, полученный из ссылки подписки.",
+        "telegram": "Настройки Telegram MTProto-сервиса и общего MTProto-порта.",
+        "events": "Технические события приложения: запуск, ошибки, применение конфигов, системные операции.",
+        "security_autoban_events": "Временные счётчики новых соединений по IP для алгоритма автобана.",
+        "geo_cache": "Кэш геолокации IP, чтобы не выполнять повторные проверки для одних и тех же адресов.",
+        "server_backups": "Автоматические локальные копии servers.json перед изменениями списка серверов.",
+        "audit": "Аудит действий администратора и событий безопасности: создание, удаление, включение, очистка.",
+        "client_sessions": "История сессий клиентов: кто, когда, сколько был онлайн, через какой сервис и маршрут.",
+        "client_limits": "Лимиты клиентов и будущие ограничения/предупреждения по использованию.",
+        "mtproto_activity": "Активность MTProto-пользователей по безопасному fingerprint secret без хранения полного secret.",
+        "network_quality": "Последний отчёт диагностики задержек: прямые проверки и проверки через proxy/VPN.",
+        "migrations": "Версия схемы данных и отметки о выполненных миграциях.",
+        "last_good_singbox_config": "Последний рабочий конфиг sing-box для отката при неудачном применении.",
+    }
+    purpose = purpose_map.get(key, description)
+    if backup:
+        backup_policy = "Входит в резервную копию add-on."
+        if contains:
+            backup_policy += " Содержит чувствительные данные; при экспорте без секретов значения маскируются или исключаются."
+    else:
+        backup_policy = "Не входит в обычную резервную копию: это кэш, временный файл или аварийный локальный откат."
+    if cleanup:
+        details = []
+        if retention:
+            details.append(f"хранение {retention} дн.")
+        if max_records:
+            details.append(f"лимит {max_records}")
+        cleanup_policy = "Очищается автоматически по правилам хранения"
+        if details:
+            cleanup_policy += ": " + ", ".join(details)
+        cleanup_policy += ". Также участвует в кнопке «Очистить по правилам хранения»."
+    else:
+        cleanup_policy = "Автоочистка не применяется: файл хранит текущие настройки/состояние, а не растущий журнал."
+    user_action_map = {
+        "server_backups": "Обычно трогать не нужно. Старые копии удаляются сами, остаются только последние 5.",
+        "events": "Для повседневной работы можно очищать через обслуживание; важные действия остаются в аудите.",
+        "audit": "Очищать только осознанно: это журнал действий администратора и безопасности.",
+        "client_sessions": "Можно очищать, если нужна новая история подключений. На текущие доступы это не влияет.",
+        "mtproto_activity": "Можно очищать для сброса статусов Telegram; после новых подключений активность соберётся заново.",
+        "geo_cache": "Можно очищать без риска: кэш заполнится заново.",
+        "security_autoban_events": "Временные счётчики; можно очищать при диагностике автобана.",
+    }
+    user_action = user_action_map.get(key, "Обычно изменяется через соответствующий раздел интерфейса, вручную файл трогать не нужно.")
+    growth_control = "контролируется" if cleanup or not (key in {"events", "audit", "client_sessions", "mtproto_activity", "geo_cache", "security_autoban_events", "server_backups"}) else "проверить"
+    return {
+        "purpose": purpose,
+        "backup_policy": backup_policy,
+        "cleanup_policy": cleanup_policy,
+        "user_action": user_action,
+        "growth_control": growth_control,
+    }
+
 def data_registry_status():
     result = {}
     for key, meta in registry_maintenance_items().items():
         path = Path(meta["path"])
+        glob_pattern = meta.get("glob")
+        if glob_pattern:
+            files = list(path.glob(str(glob_pattern))) if path.exists() and path.is_dir() else []
+            size = sum(file_size(x) for x in files)
+            exists = bool(files)
+            records = len(files)
+            shown_path = str(path / str(glob_pattern))
+        else:
+            exists = path.exists()
+            size = file_size(path)
+            records = json_record_count(path) if exists else 0
+            shown_path = str(path)
+        product_info = registry_product_info(key, meta)
         result[key] = {
-            "path": str(path),
-            "exists": path.exists(),
-            "size_bytes": file_size(path),
-            "records": json_record_count(path) if path.exists() else 0,
+            "path": shown_path,
+            "exists": exists,
+            "size_bytes": size,
+            "records": records,
             "backup": bool(meta.get("backup")),
             "cleanup": bool(meta.get("cleanup")),
             "contains_secrets": bool(meta.get("contains_secrets")),
             "description": meta.get("description") or key,
+            "purpose": product_info.get("purpose"),
+            "backup_policy": product_info.get("backup_policy"),
+            "cleanup_policy": product_info.get("cleanup_policy"),
+            "user_action": product_info.get("user_action"),
+            "growth_control": product_info.get("growth_control"),
             "retention_days": meta.get("retention_days"),
             "max_records": meta.get("max_records") or meta.get("limit"),
         }
@@ -1040,6 +1145,86 @@ def prune_events():
 
 def prune_audit_events():
     return prune_list_file(AUDIT_LOG_FILE, AUDIT_LOG_LIMIT)
+
+
+def prune_security_autoban_events_file():
+    sec = load_security()
+    window = max(60, int(sec.get("autoban_window_seconds") or 60))
+    now = time.time()
+    data = read_json(data_path("security_autoban_events.json"), {})
+    if not isinstance(data, dict):
+        data = {}
+    before = len(data)
+    cleaned = {}
+    for ip, ids in data.items():
+        if not isinstance(ids, dict):
+            continue
+        recent = {cid: ts for cid, ts in ids.items() if isinstance(ts, (int, float)) and now - float(ts) <= window}
+        if recent:
+            cleaned[ip] = recent
+    if len(cleaned) > AUTOBAN_EVENTS_MAX_IPS:
+        ranked = sorted(cleaned.items(), key=lambda kv: max(float(x) for x in kv[1].values()), reverse=True)[:AUTOBAN_EVENTS_MAX_IPS]
+        cleaned = dict(ranked)
+    if cleaned != data:
+        write_json(data_path("security_autoban_events.json"), cleaned)
+    return {"before": before, "after": len(cleaned)}
+
+
+def prune_geo_cache_file():
+    now = time.time()
+    data = read_json(data_path("geo_cache.json"), {})
+    if not isinstance(data, dict):
+        data = {}
+    before = len(data)
+    cutoff = now - GEO_CACHE_RETENTION_SECONDS
+    items = []
+    for ip, rec in data.items():
+        if not isinstance(rec, dict):
+            continue
+        ts = float(rec.get("ts") or 0)
+        if ts >= cutoff:
+            items.append((ip, rec, ts))
+    items.sort(key=lambda x: x[2], reverse=True)
+    cleaned = {ip: rec for ip, rec, _ in items[:GEO_CACHE_MAX_RECORDS]}
+    if cleaned != data:
+        write_json(data_path("geo_cache.json"), cleaned)
+    return {"before": before, "after": len(cleaned)}
+
+
+def prune_server_backup_files():
+    files = sorted(DATA_DIR.glob("servers.backup.*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    before = len(files)
+    for path in files[SERVER_BACKUP_KEEP:]:
+        try:
+            path.unlink()
+        except Exception:
+            pass
+    return {"before": before, "after": min(before, SERVER_BACKUP_KEEP)}
+
+
+def prune_clients_file():
+    now = time.time()
+    data = load_clients()
+    if not isinstance(data, dict):
+        data = {}
+    before = len(data)
+    trusted = load_trusted()
+    users = load_proxy_users()
+    active_user_ids = {str(u.get("id") or "") for u in users if u.get("id")}
+    active_usernames = {str(u.get("username") or "") for u in users if u.get("username")}
+    kept = {}
+    for key, item in data.items():
+        if not isinstance(item, dict):
+            continue
+        ip = item.get("ip") or (str(key).split(":", 1)[-1] if str(key).startswith("ip:") else "")
+        last_seen = float(item.get("last_seen") or item.get("updated_at") or item.get("first_seen") or 0)
+        is_registered = str(item.get("registered_user_id") or "") in active_user_ids or str(item.get("username") or "") in active_usernames
+        is_trusted = bool(ip and ip in trusted)
+        if is_registered or is_trusted or last_seen >= now - CLIENTS_CACHE_RETENTION_SECONDS:
+            kept[key] = item
+    if kept != data:
+        save_clients(kept)
+    return {"before": before, "after": len(kept)}
 
 
 def prune_client_sessions_file():
@@ -2523,10 +2708,14 @@ def sort_servers_for_display(servers):
 
 def auto_server_tags(servers):
     normalized = sort_servers_for_display(servers)
-    primary = [s.get("tag") for s in normalized if s.get("tag") and int(s.get("priority", 50)) < 100]
+    sources = {s.get("id"): s for s in (load_server_sources().get("sources") or []) if isinstance(s, dict)}
+    def allowed(srv):
+        src = sources.get(srv.get("source_id")) or {}
+        return bool(src.get("enabled", True)) and bool(src.get("use_in_auto", True)) and bool(srv.get("enabled", True))
+    primary = [s.get("tag") for s in normalized if s.get("tag") and int(s.get("priority", 50)) < 100 and allowed(s)]
     if primary:
         return primary
-    return [s.get("tag") for s in normalized if s.get("tag")]
+    return [s.get("tag") for s in normalized if s.get("tag") and allowed(s)]
 
 
 
@@ -2586,6 +2775,15 @@ def server_to_singbox_outbound(server):
         "last_ping_at",
         "note",
         "enabled",
+        "source_id",
+        "source_name",
+        "source_type",
+        "source_url",
+        "source_created_at",
+        "source_updated_at",
+        "imported_at",
+        "updated_at",
+        "internal_tag",
     ]:
         item.pop(key, None)
     return item
@@ -2610,6 +2808,241 @@ def save_server_pings(data):
     write_json(data_path("server_pings.json"), data if isinstance(data, dict) else {})
 
 
+
+def short_hash(value, prefix="src"):
+    raw = str(value or "")
+    return f"{prefix}_" + hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()[:12]
+
+
+def mask_url_for_ui(url):
+    url = str(url or "")
+    if not url:
+        return ""
+    try:
+        u = urllib.parse.urlparse(url)
+        host = u.netloc or u.path.split('/')[0]
+        return f"{u.scheme}://{host}/****" if u.scheme and host else url[:32] + "..."
+    except Exception:
+        return url[:32] + "..."
+
+
+def source_name_from_url(url):
+    try:
+        host = urllib.parse.urlparse(str(url or "")).netloc
+        return host or "VPN-подписка"
+    except Exception:
+        return "VPN-подписка"
+
+
+def default_server_sources():
+    now = time.time()
+    return {"version": 1, "updated_at": now, "sources": [
+        {"id": "legacy", "name": "Ранее добавленные серверы", "type": "legacy", "enabled": True, "use_in_auto": True, "created_at": now, "updated_at": now, "servers_count": 0},
+        {"id": "manual", "name": "Ручные серверы", "type": "manual", "enabled": True, "use_in_auto": True, "created_at": now, "updated_at": now, "servers_count": 0},
+        {"id": "json_import", "name": "JSON импорт", "type": "json", "enabled": True, "use_in_auto": True, "created_at": now, "updated_at": now, "servers_count": 0},
+    ]}
+
+
+def load_server_sources():
+    data = read_json(SERVER_SOURCES_FILE, None)
+    if not isinstance(data, dict):
+        data = default_server_sources()
+    sources = data.get("sources")
+    if not isinstance(sources, list):
+        sources = []
+    base = {s["id"]: s for s in default_server_sources()["sources"]}
+    for src in sources:
+        if isinstance(src, dict) and src.get("id"):
+            sid = str(src.get("id"))
+            if sid in base:
+                base[sid].update(src)
+            else:
+                base[sid] = dict(src)
+    data["sources"] = list(base.values())
+    data["version"] = int(data.get("version") or 1)
+    data["updated_at"] = float(data.get("updated_at") or time.time())
+    return data
+
+
+def save_server_sources(data):
+    if not isinstance(data, dict):
+        data = default_server_sources()
+    data["updated_at"] = time.time()
+    write_json(SERVER_SOURCES_FILE, data)
+    return data
+
+
+def upsert_server_source(source_id, name=None, source_type=None, url=None, enabled=True, use_in_auto=True, extra=None):
+    data = load_server_sources()
+    now = time.time()
+    src = None
+    for item in data.get("sources", []):
+        if item.get("id") == source_id:
+            src = item
+            break
+    if src is None:
+        src = {"id": source_id, "created_at": now, "servers_count": 0}
+        data.setdefault("sources", []).append(src)
+    src.update({
+        "name": name or src.get("name") or source_id,
+        "type": source_type or src.get("type") or "manual",
+        "enabled": bool(src.get("enabled", enabled)),
+        "use_in_auto": bool(src.get("use_in_auto", use_in_auto)),
+        "updated_at": now,
+    })
+    if url:
+        src["url"] = url
+        src["url_masked"] = mask_url_for_ui(url)
+    if isinstance(extra, dict):
+        src.update(extra)
+    save_server_sources(data)
+    return src
+
+
+def source_for_import(mode, url="", name=""):
+    mode = str(mode or "json")
+    now = time.time()
+    if mode == "url":
+        sid = short_hash(url, "sub")
+        src = upsert_server_source(sid, name or source_name_from_url(url), "subscription", url=url, extra={"last_import_at": now})
+        return src
+    if mode == "json":
+        return upsert_server_source("json_import", name or "JSON импорт", "json", extra={"last_import_at": now})
+    if mode in {"vless", "links"}:
+        return upsert_server_source("manual_links", name or "Импорт ссылок", "links", extra={"last_import_at": now})
+    return upsert_server_source("manual", name or "Ручные серверы", "manual", extra={"last_import_at": now})
+
+
+def annotate_servers_with_source(servers, source):
+    if not isinstance(source, dict):
+        source = upsert_server_source("legacy", "Ранее добавленные серверы", "legacy")
+    now = time.time()
+    result = []
+    for srv in servers or []:
+        if not isinstance(srv, dict):
+            continue
+        item = dict(srv)
+        item["source_id"] = source.get("id") or "legacy"
+        item["source_name"] = source.get("name") or "Ранее добавленные серверы"
+        item["source_type"] = source.get("type") or "legacy"
+        if source.get("url"):
+            item["source_url"] = source.get("url")
+        item.setdefault("imported_at", now)
+        item["updated_at"] = now
+        result.append(item)
+    return result
+
+
+def normalize_server_source_fields(servers):
+    data = load_server_sources()
+    by_id = {str(s.get("id")): s for s in data.get("sources", []) if isinstance(s, dict) and s.get("id")}
+    legacy = by_id.get("legacy") or upsert_server_source("legacy", "Ранее добавленные серверы", "legacy")
+    changed = False
+    normalized = []
+    for srv in servers or []:
+        if not isinstance(srv, dict):
+            continue
+        item = dict(srv)
+        sid = str(item.get("source_id") or "legacy")
+        src = by_id.get(sid)
+        if not src:
+            src = legacy if sid == "legacy" else upsert_server_source(sid, item.get("source_name") or sid, item.get("source_type") or "unknown", url=item.get("source_url"))
+            by_id[sid] = src
+        for key, val in [("source_id", src.get("id")), ("source_name", src.get("name")), ("source_type", src.get("type"))]:
+            if item.get(key) != val:
+                item[key] = val
+                changed = True
+        if src.get("url") and item.get("source_url") != src.get("url"):
+            item["source_url"] = src.get("url")
+            changed = True
+        normalized.append(item)
+    sync_server_sources(normalized, save=True)
+    return normalized, changed
+
+
+def server_sources_summary(servers=None):
+    servers = servers if servers is not None else read_json(data_path("servers.json"), [])
+    data = load_server_sources()
+    counts = {}
+    tags = {}
+    for srv in servers or []:
+        if not isinstance(srv, dict):
+            continue
+        sid = str(srv.get("source_id") or "legacy")
+        counts[sid] = counts.get(sid, 0) + 1
+        tags.setdefault(sid, []).append(srv.get("tag"))
+    out = []
+    for src in data.get("sources", []):
+        if not isinstance(src, dict):
+            continue
+        item = dict(src)
+        item["servers_count"] = counts.get(src.get("id"), 0)
+        item["server_tags"] = [t for t in tags.get(src.get("id"), []) if t]
+        out.append(item)
+    out.sort(key=lambda x: (str(x.get("type") or ""), str(x.get("name") or "")))
+    return {"sources": out, "updated_at": data.get("updated_at"), "count": sum(counts.values())}
+
+
+def sync_server_sources(servers=None, save=False):
+    servers = servers if servers is not None else read_json(data_path("servers.json"), [])
+    data = load_server_sources()
+    counts = {}
+    for srv in servers or []:
+        if isinstance(srv, dict):
+            sid = str(srv.get("source_id") or "legacy")
+            counts[sid] = counts.get(sid, 0) + 1
+    seen = {s.get("id"): s for s in data.get("sources", []) if isinstance(s, dict)}
+    for sid in list(counts):
+        if sid not in seen:
+            data.setdefault("sources", []).append({"id": sid, "name": sid, "type": "unknown", "enabled": True, "use_in_auto": True, "created_at": time.time()})
+    for src in data.get("sources", []):
+        if isinstance(src, dict):
+            src["servers_count"] = counts.get(src.get("id"), 0)
+            src.setdefault("enabled", True)
+            src.setdefault("use_in_auto", True)
+            src.setdefault("updated_at", time.time())
+    if save:
+        save_server_sources(data)
+    return data
+
+
+def prune_server_sources():
+    servers = read_json(data_path("servers.json"), [])
+    sync_server_sources(servers, save=True)
+    return {"ok": True, "sources": server_sources_summary(servers)}
+
+
+def clean_server_related_state(removed_tags):
+    removed = {str(x) for x in removed_tags if x}
+    if not removed:
+        return {"removed": []}
+    pings = load_server_pings()
+    for tag in list(pings.keys()):
+        if tag in removed:
+            pings.pop(tag, None)
+    save_server_pings(pings)
+    sub = load_subscription_servers()
+    if isinstance(sub, dict) and isinstance(sub.get("servers"), list):
+        before = len(sub.get("servers") or [])
+        sub["servers"] = [s for s in sub.get("servers") or [] if not (isinstance(s, dict) and str(s.get("tag")) in removed)]
+        if len(sub["servers"]) != before:
+            sub["count"] = len(sub["servers"])
+            sub["updated_at"] = time.time()
+            write_json(SUBSCRIPTION_SERVERS_FILE, sub)
+    return {"removed": sorted(removed)}
+
+
+def delete_servers_by_tags(tags):
+    remove = {str(t) for t in tags if t}
+    servers = load_servers()
+    kept = [s for s in servers if str(s.get("tag")) not in remove]
+    removed = [s.get("tag") for s in servers if str(s.get("tag")) in remove]
+    if removed:
+        save_servers(kept)
+        clean_server_related_state(removed)
+        sync_server_sources(kept, save=True)
+    return {"servers": kept, "removed": removed, "sources": server_sources_summary(kept)}
+
 def load_servers():
     path = data_path("servers.json")
     if not path.exists():
@@ -2618,30 +3051,35 @@ def load_servers():
         servers = []
         if raw and raw != "[]":
             try:
-                servers = parse_servers_payload(raw)["servers"]
+                src = upsert_server_source("config_servers", "Серверы из конфигурации add-on", "config")
+                servers = annotate_servers_with_source(parse_servers_payload(raw)["servers"], src)
                 log("SERVERS_INIT", "OK", f"Imported {len(servers)} servers from add-on configuration")
             except Exception as e:
                 log("SERVERS_INIT", "ERROR", f"Failed to import servers_json: {e}")
         if not servers and DEFAULT_SERVERS_FILE.exists():
-            servers = read_json(DEFAULT_SERVERS_FILE, [])
+            src = upsert_server_source("defaults", "Серверы по умолчанию", "defaults")
+            servers = annotate_servers_with_source(read_json(DEFAULT_SERVERS_FILE, []), src)
             log("SERVERS_INIT", "OK", f"Loaded {len(servers)} servers from defaults")
         write_json(path, sort_servers_for_display(servers))
     servers = read_json(path, [])
-    # Миграция старых/неудачно импортированных generic-тегов Vless-1, Vless-2 и т.п.
-    # в понятные DE1-vless, NL1-vless и т.д., если страну можно определить по имени/хосту/SNI.
     normalized = sort_servers_for_display(normalize_subscription_tags(servers))
-    if normalized != servers:
+    normalized, source_changed = normalize_server_source_fields(normalized)
+    if normalized != servers or source_changed:
         write_json(path, normalized)
+    sync_server_sources(normalized, save=True)
     return normalized
 
 
 def save_servers(servers):
-    servers = sort_servers_for_display(servers)
+    normalized = sort_servers_for_display(servers)
+    normalized, _ = normalize_server_source_fields(normalized)
     backup_path = data_path(f"servers.backup.{int(time.time())}.json")
     current = read_json(data_path("servers.json"), None)
     if current is not None:
         write_json(backup_path, current)
-    write_json(data_path("servers.json"), servers)
+        prune_server_backup_files()
+    write_json(data_path("servers.json"), normalized)
+    sync_server_sources(normalized, save=True)
 
 
 def load_blocked(include_expired=False):
@@ -4359,6 +4797,9 @@ def geo_lookup(ip):
         except Exception as e:
             info["error"] = str(e)
     cache[ip] = {"ts": time.time(), "data": info}
+    if len(cache) > GEO_CACHE_MAX_RECORDS:
+        items = sorted(cache.items(), key=lambda kv: float((kv[1] or {}).get("ts") or 0), reverse=True)[:GEO_CACHE_MAX_RECORDS]
+        cache = dict(items)
     write_json(data_path("geo_cache.json"), cache)
     return info
 
@@ -4760,6 +5201,7 @@ def build_clients(connections):
             history.pop(key, None)
             continue
         if old.get('last_seen') and now - old['last_seen'] > OFFLINE_CLIENT_KEEP_SECONDS:
+            history.pop(key, None)
             continue
         status = 'recent' if old.get('last_seen') and now - old['last_seen'] <= RECENT_CLIENT_SECONDS else 'offline'
         user = users_by_id.get(str(old.get('registered_user_id') or '')) or users_by_name.get(str(old.get('username') or ''))
@@ -5262,7 +5704,9 @@ class Handler(BaseHTTPRequestHandler):
                     item = dict(srv)
                     item["priority_profile"] = priority_profile_from_value(item.get("priority", 50))
                     enriched.append(item)
-                return self.send_json({"servers": enriched, "subscription_url": settings.get("subscription_url", ""), "subscription_info": load_subscription_info(), "subscription_json": load_subscription_servers(), "pings": load_server_pings(), "auto_tags": auto_server_tags(servers)})
+                return self.send_json({"servers": enriched, "sources": server_sources_summary(servers).get("sources", []), "subscription_url": settings.get("subscription_url", ""), "subscription_info": load_subscription_info(), "subscription_json": load_subscription_servers(), "pings": load_server_pings(), "auto_tags": auto_server_tags(servers)})
+            if path == "/api/server_sources":
+                return self.send_json(server_sources_summary(load_servers()))
             if path == "/api/servers/subscription_json":
                 data = load_subscription_servers()
                 return self.send_json({"ok": True, **data, "json_text": json.dumps(data.get("servers") or [], ensure_ascii=False, indent=2)})
@@ -5674,6 +6118,7 @@ class Handler(BaseHTTPRequestHandler):
                 url = body.get("url", "")
                 settings = load_settings()
                 subscription_info = load_subscription_info()
+                source_name = str(body.get("source_name") or "").strip()
                 if mode == "url":
                     if not url:
                         raise ValueError("URL подписки не указан")
@@ -5683,7 +6128,8 @@ class Handler(BaseHTTPRequestHandler):
                     save_settings(settings)
                 else:
                     parsed = parse_servers_payload(text)
-                new_servers = parsed["servers"]
+                source = source_for_import(mode, url=url, name=source_name)
+                new_servers = annotate_servers_with_source(parsed["servers"], source)
                 if mode == "url" and new_servers:
                     save_subscription_servers(new_servers, url)
                 if not new_servers:
@@ -5713,8 +6159,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not parsed["servers"]:
                     return self.send_json({"ok": False, "errors": parsed.get("errors", []), "subscription_info": subscription_info}, 400)
                 settings["subscription_url"] = url; save_settings(settings)
-                save_subscription_servers(parsed["servers"], url)
-                merged_servers = preserve_server_metadata(load_servers(), parsed["servers"])
+                source = source_for_import("url", url=url, name=body.get("source_name") or source_name_from_url(url))
+                tagged_servers = annotate_servers_with_source(parsed["servers"], source)
+                save_subscription_servers(tagged_servers, url)
+                merged_servers = preserve_server_metadata(load_servers(), tagged_servers)
                 save_servers(merged_servers); log("SERVERS", "REFRESH", f"Subscription refreshed, {len(parsed['servers'])} server(s), priorities preserved", actor="ui", action="servers_refresh", target=url, extra={"subscription": subscription_info}); restart_singbox_background('servers_refresh')
                 return self.send_json({"ok": True, "count": len(merged_servers), "imported": len(parsed["servers"]), "priorities_preserved": True, "errors": parsed.get("errors", []), "subscription_info": subscription_info, "apply_background": True})
             if path == "/api/servers/priority":
@@ -5776,6 +6224,45 @@ class Handler(BaseHTTPRequestHandler):
                     applied = True
                 log("SERVERS", "PRIORITIES", f"Saved server priority profiles: {len(changed)}", actor="ui", action="server_priorities", extra={"count": len(changed), "applied": applied})
                 return self.send_json({"ok": True, "changed": changed, "applied": applied, "apply_background": bool(applied), "servers": load_servers(), "auto_tags": auto_server_tags(load_servers()), "message": "Профили сохранены" + (" и применяются в фоне." if applied else ".")})
+            if path == "/api/server_sources/toggle_auto":
+                sid = str(body.get("source_id") or "")
+                if not sid:
+                    raise ValueError("Источник не указан")
+                data = load_server_sources()
+                changed = False
+                for src in data.get("sources", []):
+                    if src.get("id") == sid:
+                        src["use_in_auto"] = bool(body.get("use_in_auto"))
+                        src["updated_at"] = time.time()
+                        changed = True
+                        break
+                if not changed:
+                    raise ValueError("Источник не найден")
+                save_server_sources(data)
+                log("SERVERS", "SOURCE_AUTO", f"Source auto changed: {sid}", actor="ui", action="server_source_auto", target=sid, extra={"use_in_auto": bool(body.get("use_in_auto"))})
+                restart_singbox_background('server_source_auto')
+                return self.send_json({"ok": True, "sources": server_sources_summary(load_servers()).get("sources", []), "auto_tags": auto_server_tags(load_servers()), "apply_background": True})
+            if path == "/api/server_sources/delete":
+                sid = str(body.get("source_id") or "")
+                if not sid:
+                    raise ValueError("Источник не указан")
+                servers = load_servers()
+                tags = [s.get("tag") for s in servers if s.get("source_id") == sid]
+                result = delete_servers_by_tags(tags)
+                data = load_server_sources()
+                data["sources"] = [s for s in data.get("sources", []) if s.get("id") != sid or sid in {"manual", "legacy", "json_import"}]
+                save_server_sources(data)
+                log("SERVERS", "SOURCE_DELETE", f"Deleted source servers: {sid}", actor="ui", action="server_source_delete", target=sid, extra={"removed": result.get("removed")})
+                restart_singbox_background('server_source_delete')
+                return self.send_json({"ok": True, **result, "auto_tags": auto_server_tags(load_servers()), "apply_background": True})
+            if path == "/api/servers/delete":
+                tag = str(body.get("tag") or "")
+                if not tag:
+                    raise ValueError("Сервер не указан")
+                result = delete_servers_by_tags([tag])
+                log("SERVERS", "DELETE", f"Deleted server {tag}", actor="ui", action="server_delete", target=tag)
+                restart_singbox_background('server_delete')
+                return self.send_json({"ok": True, **result, "auto_tags": auto_server_tags(load_servers()), "apply_background": True})
             if path == "/api/subscription/refresh_traffic":
                 settings = load_settings(); url = body.get("url") or settings.get("subscription_url") or load_subscription_info().get("url")
                 if not url:
@@ -5857,8 +6344,10 @@ class Handler(BaseHTTPRequestHandler):
                 trusted = load_trusted(); trusted.pop(ip, None); save_trusted(trusted); log("TRUSTED", "DELETE", f"Untrusted client {ip}", actor="ui", action="trusted_delete", target=ip); return self.send_json({"ok": True, "trusted": trusted})
             if path.startswith("/api/servers/"):
                 tag = urllib.parse.unquote(path.split("/api/servers/", 1)[1])
-                servers = [s for s in load_servers() if s.get("tag") != tag]
-                save_servers(servers); restart_singbox_background('server_delete'); return self.send_json({"ok": True, "servers": servers, "apply_background": True})
+                result = delete_servers_by_tags([tag])
+                log("SERVERS", "DELETE", f"Deleted server {tag}", actor="ui", action="server_delete", target=tag)
+                restart_singbox_background('server_delete')
+                return self.send_json({"ok": True, **result, "auto_tags": auto_server_tags(load_servers()), "apply_background": True})
             self.send_json({"error": "not found"}, 404)
         except Exception as e:
             log_exception("API", "DELETE", e, actor="ui", target=getattr(self, "path", ""), extra={"method": "DELETE"})

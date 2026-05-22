@@ -20,7 +20,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.22.0"
+APP_VERSION = "1.22.1"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -86,6 +86,16 @@ SINGBOX_STARTED_AT = 0
 MONITOR_INTERVAL_SECONDS = 15
 AUTOBAN_CHECK_INTERVAL_SECONDS = 30
 connections_cache = {"items": [], "updated_at": 0, "last_autoban_at": 0}
+BOOT_STATE_LOCK = threading.Lock()
+BOOT_STATE = {
+    "stage": "boot",
+    "state": "starting",
+    "message": "Подготовка запуска add-on",
+    "web_ready": False,
+    "app_ready": False,
+    "started_at": time.time(),
+    "updated_at": time.time(),
+}
 
 RULES_DIR = DATA_DIR / "rules"
 RULES_DIR.mkdir(parents=True, exist_ok=True)
@@ -928,17 +938,42 @@ def save_settings(settings):
     write_json(data_path("settings.json"), settings)
 
 
+def set_boot_state(stage, message, state_value=None, web_ready=None, app_ready=None, **extra):
+    with BOOT_STATE_LOCK:
+        BOOT_STATE["stage"] = stage
+        BOOT_STATE["message"] = message
+        BOOT_STATE["updated_at"] = time.time()
+        if state_value is not None:
+            BOOT_STATE["state"] = state_value
+        if web_ready is not None:
+            BOOT_STATE["web_ready"] = bool(web_ready)
+        if app_ready is not None:
+            BOOT_STATE["app_ready"] = bool(app_ready)
+        if extra:
+            BOOT_STATE.update(extra)
+        return dict(BOOT_STATE)
+
+
+def get_boot_state():
+    with BOOT_STATE_LOCK:
+        return dict(BOOT_STATE)
+
+
 def app_activity():
+    boot = get_boot_state()
+    if not boot.get("app_ready"):
+        message = boot.get("message") or "Add-on запускается"
+        return {"state": boot.get("state", "starting"), "message": message, "updated_at": boot.get("updated_at", time.time()), "startup": boot}
     if last_error:
-        return {"state": "error", "message": f"Ошибка: {last_error}", "updated_at": time.time()}
+        return {"state": "error", "message": f"Ошибка: {last_error}", "updated_at": time.time(), "startup": boot}
     if not (singbox_process and singbox_process.poll() is None):
-        return {"state": "starting", "message": "sing-box ещё не запущен или перезапускается", "updated_at": time.time()}
+        return {"state": "starting", "message": "sing-box ещё не запущен или перезапускается", "updated_at": time.time(), "startup": boot}
     cur = current_server_info(get_proxies())
     if not cur.get("server") or cur.get("server") == "—":
-        return {"state": "connecting", "message": "Прокси запущен, идёт определение текущего VPN-сервера", "updated_at": time.time()}
+        return {"state": "connecting", "message": "Прокси запущен, идёт определение текущего VPN-сервера", "updated_at": time.time(), "startup": boot}
     if not cur.get("delay"):
-        return {"state": "checking", "message": f"Прокси работает через {cur.get('server')}; пинг ещё не проверен", "updated_at": time.time()}
-    return {"state": "ok", "message": f"Прокси работает через {cur.get('server')}, пинг {cur.get('delay')} мс", "updated_at": time.time()}
+        return {"state": "checking", "message": f"Прокси работает через {cur.get('server')}; пинг ещё не проверен", "updated_at": time.time(), "startup": boot}
+    return {"state": "ok", "message": f"Прокси работает через {cur.get('server')}, пинг {cur.get('delay')} мс", "updated_at": time.time(), "startup": boot}
 
 
 
@@ -5167,11 +5202,14 @@ class Handler(BaseHTTPRequestHandler):
                 options = load_options()
                 singbox_ok = bool(singbox_process and singbox_process.poll() is None)
                 mtg = mtg_status()
+                boot = get_boot_state()
                 return self.send_json({
                     "ok": True,
                     "app": APP_NAME,
                     "version": APP_VERSION,
-                    "backend_ready": True,
+                    "backend_ready": bool(boot.get("web_ready")),
+                    "app_ready": bool(boot.get("app_ready")),
+                    "startup": boot,
                     "singbox_running": singbox_ok,
                     "singbox_ready": singbox_ok,
                     "telegram_running": bool(mtg.get("running")),
@@ -5181,9 +5219,10 @@ class Handler(BaseHTTPRequestHandler):
                     "updated_at": time.time(),
                 })
             if path == "/api/status":
+                boot = get_boot_state()
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = list(connections_cache.get("items") or []); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
                 tg_status = mtg_status()
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": tg_status, "settings": settings, "power": power_summary(settings, tg_status), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "startup": boot, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": tg_status, "settings": settings, "power": power_summary(settings, tg_status), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/system/check":
                 return self.send_json(system_check_report())
             if path == "/api/maintenance":
@@ -5835,22 +5874,28 @@ def shutdown_handler(signum, frame):
 def main():
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
-    load_servers()
-    migrate_data()
-    settings = load_settings(); settings = update_proxy_lifecycle(settings, load_telegram_settings().get("enabled", False)); save_settings(settings)
+    set_boot_state("boot", "Создаю web-интерфейс add-on", state_value="starting", web_ready=False, app_ready=False)
 
-    # Start the management UI first. If sing-box is slow to start or its config is
-    # broken, Home Assistant Ingress should still open the panel and show diagnostics
-    # instead of displaying a generic "Error loading addon" page.
+    # Start the management UI as early as possible. After an update Home Assistant
+    # may try to open Ingress immediately; if the HTTP server is already listening,
+    # the UI can show a startup state instead of a generic loading error.
     server = ThreadingHTTPServer(("0.0.0.0", BACKEND_PORT), Handler)
+    set_boot_state("web_ready", "Веб-интерфейс готов, продолжаю запуск сервисов", state_value="starting", web_ready=True, app_ready=False)
     log("BACKEND", "READY", f"Management UI listening on 0.0.0.0:{BACKEND_PORT}")
 
     def bootstrap_proxy():
         global last_error
         try:
+            set_boot_state("data_init", "Инициализирую файлы и настройки", state_value="starting", web_ready=True, app_ready=False)
+            load_servers()
+            migrate_data()
+            settings = load_settings(); settings = update_proxy_lifecycle(settings, load_telegram_settings().get("enabled", False)); save_settings(settings)
+            set_boot_state("proxy_boot", "Запускаю прокси-сервисы", state_value="starting", web_ready=True, app_ready=False)
             start_singbox()
+            set_boot_state("app_ready", "Сервисы готовы к работе", state_value="ready", web_ready=True, app_ready=True)
         except Exception as e:
             last_error = str(e)
+            set_boot_state("error", f"Ошибка запуска: {last_error}", state_value="error", web_ready=True, app_ready=False)
             log_exception("SING_BOX", "singbox_boot_error", e, actor="system")
 
     threading.Thread(target=bootstrap_proxy, name="bootstrap-sing-box", daemon=True).start()

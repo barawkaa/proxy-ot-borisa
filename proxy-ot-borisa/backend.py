@@ -7,6 +7,7 @@ import os
 import re
 import signal
 import socket
+import select
 import subprocess
 import shutil
 import sys
@@ -20,7 +21,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.24.2"
+APP_VERSION = "1.24.3"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -31,7 +32,7 @@ RUNTIME_OPTIONS_FILE = Path("/data/runtime_options.json")
 SUBSCRIPTION_INFO_FILE = Path("/data/subscription_info.json")
 SUBSCRIPTION_SERVERS_FILE = Path("/data/subscription_servers.json")
 SERVER_SOURCES_FILE = Path("/data/server_sources.json")
-PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port", "trusted_http_proxy_port", "trusted_socks_proxy_port"]
+PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port"]
 BACKUP_VERSION = 2
 DATA_SCHEMA_VERSION = 3
 MIGRATIONS_FILE = Path("/data/migrations.json")
@@ -95,6 +96,8 @@ BACKEND_PORT = 8099
 MTG_BIN = "/usr/local/bin/mtg-multi"
 MTG_CONFIG = TMP_DIR / "mtg.toml"
 MTG_UPSTREAM_SOCKS_PORT = 2084
+INTERNAL_HTTP_PROXY_PORT = 12080
+INTERNAL_SOCKS_PROXY_PORT = 12081
 CLASH_API = "http://127.0.0.1:9090"
 SESSION_BREAK_SECONDS = 60
 RECENT_CLIENT_SECONDS = 300
@@ -430,8 +433,6 @@ def _default_options():
         "servers_json": "[]",
         "telegram_proxy_enabled": False,
         "telegram_proxy_port": 2083,
-        "trusted_http_proxy_port": 2085,
-        "trusted_socks_proxy_port": 2086,
         "telegram_front_domain": "www.google.com",
     }
 
@@ -779,7 +780,7 @@ def security_summary(sec=None, options=None):
         "warnings": warnings,
         "http_auth_enabled": bool(options.get("http_auth_enabled")),
         "socks_auth_enabled": bool(options.get("socks_auth_enabled")),
-        "ports": {"http": options.get("http_proxy_port"), "socks": options.get("socks_proxy_port"), "telegram": options.get("telegram_proxy_port"), "trusted_http": options.get("trusted_http_proxy_port"), "trusted_socks": options.get("trusted_socks_proxy_port")},
+        "ports": {"http": options.get("http_proxy_port"), "socks": options.get("socks_proxy_port"), "telegram": options.get("telegram_proxy_port"), "trusted_mode": "same_ports"},
     }
 
 
@@ -4337,10 +4338,6 @@ def make_singbox_config():
     socks_port = int(options["socks_proxy_port"])
     socks_tag = f"IN-SOCKS5-{socks_port}"
     http_tag = f"IN-HTTP-{http_port}"
-    trusted_http_port = int(options.get("trusted_http_proxy_port") or 0)
-    trusted_socks_port = int(options.get("trusted_socks_proxy_port") or 0)
-    trusted_http_tag = f"IN-HTTP-TRUSTED-{trusted_http_port}"
-    trusted_socks_tag = f"IN-SOCKS5-TRUSTED-{trusted_socks_port}"
     mtg_upstream_tag = f"IN-MTG-UPSTREAM-{MTG_UPSTREAM_SOCKS_PORT}"
     users = load_proxy_users()
     socks_auth = []
@@ -4358,21 +4355,14 @@ def make_singbox_config():
             if u.get("enabled", True) and u.get("http_enabled", True)
         ]
     security = load_security()
-    trusted_bypass_enabled = bool(security.get("trusted_auth_bypass_enabled"))
-    trusted_bypass_cidrs = normalize_cidr_list(security.get("trusted_auth_bypass_cidrs") or [])
+    # External HTTP/SOCKS ports are served by the local auth gateway. sing-box only
+    # listens on localhost without auth. The gateway decides per source IP whether
+    # a client may bypass auth or must authenticate normally.
     inbounds = [
-        {"type": "socks", "tag": socks_tag, "listen": "0.0.0.0", "listen_port": socks_port},
-        {"type": "http", "tag": http_tag, "listen": "0.0.0.0", "listen_port": http_port},
+        {"type": "socks", "tag": socks_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_SOCKS_PROXY_PORT},
+        {"type": "http", "tag": http_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_HTTP_PROXY_PORT},
     ]
-    if trusted_bypass_enabled and trusted_bypass_cidrs and security.get("trusted_auth_bypass_socks", True):
-        inbounds.append({"type": "socks", "tag": trusted_socks_tag, "listen": "0.0.0.0", "listen_port": trusted_socks_port})
-    if trusted_bypass_enabled and trusted_bypass_cidrs and security.get("trusted_auth_bypass_http", True):
-        inbounds.append({"type": "http", "tag": trusted_http_tag, "listen": "0.0.0.0", "listen_port": trusted_http_port})
     inbounds.append({"type": "socks", "tag": mtg_upstream_tag, "listen": "127.0.0.1", "listen_port": MTG_UPSTREAM_SOCKS_PORT})
-    if socks_auth:
-        inbounds[0]["users"] = socks_auth
-    if http_auth:
-        inbounds[1]["users"] = http_auth
     proxy_selector = {
         "type": "selector",
         "tag": "Proxy",
@@ -4414,15 +4404,6 @@ def make_singbox_config():
     if blocked_cidrs:
         rules.append({"source_ip_cidr": blocked_cidrs, "outbound": "block"})
 
-    trusted_inbounds = []
-    if trusted_bypass_enabled and trusted_bypass_cidrs:
-        if security.get("trusted_auth_bypass_socks", True):
-            trusted_inbounds.append(trusted_socks_tag)
-        if security.get("trusted_auth_bypass_http", True):
-            trusted_inbounds.append(trusted_http_tag)
-    if trusted_inbounds:
-        rules.append({"inbound": trusted_inbounds, "source_ip_cidr": trusted_bypass_cidrs, "outbound": "Proxy"})
-        rules.append({"inbound": trusted_inbounds, "outbound": "block"})
 
     security = load_security()
     denied_source_cidrs = denied_source_cidrs_from_security(security)
@@ -4491,6 +4472,329 @@ def make_singbox_config():
     }
 
 
+
+AUTH_GATEWAY_SOCKETS = []
+AUTH_GATEWAY_THREADS = []
+AUTH_GATEWAY_STOP = threading.Event()
+GATEWAY_ACTIVE_LOCK = threading.Lock()
+GATEWAY_ACTIVE = {}
+
+
+def ip_matches_cidrs(ip, cidrs):
+    try:
+        addr = ipaddress.ip_address(str(ip))
+    except Exception:
+        return False
+    for cidr in cidrs or []:
+        try:
+            if addr in ipaddress.ip_network(str(cidr), strict=False):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def proxy_user_credentials(service):
+    users = load_proxy_users()
+    result = set()
+    service_key = 'http_enabled' if service == 'http' else 'socks_enabled'
+    for u in users:
+        if u.get('enabled', True) and u.get(service_key, True):
+            username = str(u.get('username') or '')
+            password = str(u.get('password') or '')
+            if username and password:
+                result.add((username, password))
+    return result
+
+
+def check_proxy_credentials(service, username, password):
+    return (str(username or ''), str(password or '')) in proxy_user_credentials(service)
+
+
+def is_trusted_bypass_ip(ip, service):
+    sec = load_security()
+    if not sec.get('trusted_auth_bypass_enabled'):
+        return False
+    if service == 'http' and not sec.get('trusted_auth_bypass_http', True):
+        return False
+    if service == 'socks' and not sec.get('trusted_auth_bypass_socks', True):
+        return False
+    return ip_matches_cidrs(ip, sec.get('trusted_auth_bypass_cidrs') or [])
+
+
+
+
+def gateway_activity_start(ip, service, trusted=False, auth_user='', destination=''):
+    key = f"gateway:{service}:{ip}:{threading.get_ident()}:{secrets.token_hex(3)}"
+    now = time.time()
+    with GATEWAY_ACTIVE_LOCK:
+        GATEWAY_ACTIVE[key] = {"key": key, "ip": ip, "service": service, "trusted": bool(trusted), "auth_user": auth_user or "", "destination": destination or "proxy-gateway", "started_at": now, "last_seen": now}
+    return key
+
+
+def gateway_activity_touch(key):
+    with GATEWAY_ACTIVE_LOCK:
+        if key in GATEWAY_ACTIVE:
+            GATEWAY_ACTIVE[key]["last_seen"] = time.time()
+
+
+def gateway_activity_end(key):
+    with GATEWAY_ACTIVE_LOCK:
+        GATEWAY_ACTIVE.pop(key, None)
+
+
+def gateway_active_snapshot():
+    with GATEWAY_ACTIVE_LOCK:
+        return [dict(v) for v in GATEWAY_ACTIVE.values()]
+
+def read_exact(sock, n):
+    data = b''
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise OSError('connection closed')
+        data += chunk
+    return data
+
+
+def read_until(sock, marker=b'\r\n\r\n', limit=65536):
+    data = b''
+    while marker not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+        if len(data) > limit:
+            raise OSError('header too large')
+    return data
+
+
+def relay_pair(a, b):
+    sockets = [a, b]
+    try:
+        for s in sockets:
+            s.setblocking(False)
+        while not AUTH_GATEWAY_STOP.is_set():
+            readable, _, exceptional = select.select(sockets, [], sockets, 1.0)
+            if exceptional:
+                break
+            if not readable:
+                continue
+            for src in readable:
+                try:
+                    data = src.recv(65536)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    return
+                dst = b if src is a else a
+                dst.sendall(data)
+    finally:
+        for s in sockets:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+
+
+def parse_http_proxy_destination(header_bytes):
+    try:
+        text = header_bytes.decode('iso-8859-1', errors='ignore')
+        lines = text.split('\r\n')
+        if lines:
+            parts = lines[0].split()
+            if len(parts) >= 2:
+                method = parts[0].upper()
+                target = parts[1]
+                if method == 'CONNECT':
+                    return target.split(':', 1)[0]
+                parsed = urllib.parse.urlparse(target)
+                if parsed.hostname:
+                    return parsed.hostname
+        for line in lines:
+            if line.lower().startswith('host:'):
+                return line.split(':', 1)[1].strip().split(':', 1)[0]
+    except Exception:
+        pass
+    return 'proxy-gateway'
+
+def http_auth_username(header_bytes):
+    try:
+        text = header_bytes.decode('iso-8859-1', errors='ignore')
+        for line in text.split('\r\n'):
+            if line.lower().startswith('proxy-authorization:'):
+                value = line.split(':', 1)[1].strip()
+                if value.lower().startswith('basic '):
+                    raw = base64.b64decode(value.split(None, 1)[1]).decode('utf-8', errors='ignore')
+                    username, password = raw.split(':', 1) if ':' in raw else (raw, '')
+                    return username if check_proxy_credentials('http', username, password) else ''
+    except Exception:
+        pass
+    return ''
+
+
+def handle_http_gateway(client, addr):
+    ip = addr[0]
+    options = load_options()
+    activity_key = None
+    try:
+        header = read_until(client)
+        if not header:
+            return
+        trusted = is_trusted_bypass_ip(ip, 'http')
+        auth_required = bool(options.get('http_auth_enabled')) and not trusted
+        auth_user = http_auth_username(header) if auth_required else ''
+        if auth_required and not auth_user:
+            client.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="Proxy ot Borisa"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            log('SECURITY', 'PROXY_AUTH_REQUIRED', 'HTTP proxy auth required', actor='gateway', action='http_auth_required', target=ip)
+            return
+        activity_key = gateway_activity_start(ip, 'HTTP proxy', trusted=trusted, auth_user=auth_user, destination=parse_http_proxy_destination(header))
+        upstream = socket.create_connection(('127.0.0.1', INTERNAL_HTTP_PROXY_PORT), timeout=10)
+        upstream.sendall(header)
+        relay_pair(client, upstream)
+    except Exception as e:
+        try:
+            client.close()
+        except Exception:
+            pass
+    finally:
+        if activity_key:
+            gateway_activity_end(activity_key)
+
+
+def socks_auth_exchange(client, ip):
+    greeting = read_exact(client, 2)
+    if greeting[0] != 5:
+        raise OSError('not socks5')
+    methods = read_exact(client, greeting[1])
+    auth_required = bool(load_options().get('socks_auth_enabled')) and not is_trusted_bypass_ip(ip, 'socks')
+    if not auth_required:
+        upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
+        upstream.sendall(greeting + methods)
+        return upstream, ''
+    if 2 not in methods:
+        client.sendall(b'\x05\xff')
+        raise OSError('socks auth method not offered')
+    client.sendall(b'\x05\x02')
+    ver = read_exact(client, 1)
+    if ver != b'\x01':
+        raise OSError('bad socks auth version')
+    ulen = read_exact(client, 1)[0]
+    username = read_exact(client, ulen).decode('utf-8', errors='ignore')
+    plen = read_exact(client, 1)[0]
+    password = read_exact(client, plen).decode('utf-8', errors='ignore')
+    if not check_proxy_credentials('socks', username, password):
+        client.sendall(b'\x01\x01')
+        log('SECURITY', 'PROXY_AUTH_FAILED', 'SOCKS5 proxy auth failed', actor='gateway', action='socks_auth_failed', target=ip, extra={'username': username})
+        raise OSError('socks auth failed')
+    client.sendall(b'\x01\x00')
+    req_head = read_exact(client, 4)
+    if req_head[0] != 5 or req_head[1] != 1:
+        client.sendall(b'\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00')
+        raise OSError('unsupported socks command')
+    atyp = req_head[3]
+    if atyp == 1:
+        addr_part = read_exact(client, 4)
+    elif atyp == 3:
+        ln = read_exact(client, 1)
+        addr_part = ln + read_exact(client, ln[0])
+    elif atyp == 4:
+        addr_part = read_exact(client, 16)
+    else:
+        client.sendall(b'\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00')
+        raise OSError('bad address type')
+    port_part = read_exact(client, 2)
+    req = req_head + addr_part + port_part
+    upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
+    upstream.sendall(b'\x05\x01\x00')
+    resp = read_exact(upstream, 2)
+    if resp != b'\x05\x00':
+        raise OSError('internal socks rejected no-auth')
+    upstream.sendall(req)
+    resp_head = read_exact(upstream, 4)
+    atyp2 = resp_head[3]
+    if atyp2 == 1:
+        rest = read_exact(upstream, 4 + 2)
+    elif atyp2 == 3:
+        ln = read_exact(upstream, 1)
+        rest = ln + read_exact(upstream, ln[0] + 2)
+    elif atyp2 == 4:
+        rest = read_exact(upstream, 16 + 2)
+    else:
+        rest = read_exact(upstream, 2)
+    client.sendall(resp_head + rest)
+    return upstream, username
+
+
+def handle_socks_gateway(client, addr):
+    ip = addr[0]
+    activity_key = None
+    try:
+        trusted = is_trusted_bypass_ip(ip, 'socks')
+        upstream, auth_user = socks_auth_exchange(client, ip)
+        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user)
+        relay_pair(client, upstream)
+    except Exception:
+        try:
+            client.close()
+        except Exception:
+            pass
+    finally:
+        if activity_key:
+            gateway_activity_end(activity_key)
+
+
+def _gateway_loop(service, listen_port, handler):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', int(listen_port)))
+    sock.listen(256)
+    sock.settimeout(1.0)
+    AUTH_GATEWAY_SOCKETS.append(sock)
+    log('GATEWAY', 'START', f'{service.upper()} auth gateway listening on 0.0.0.0:{listen_port}', actor='system', action='gateway_start')
+    try:
+        while not AUTH_GATEWAY_STOP.is_set():
+            try:
+                client, addr = sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=handler, args=(client, addr), name=f'{service}-gateway-client', daemon=True).start()
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def start_auth_gateways():
+    stop_auth_gateways()
+    AUTH_GATEWAY_STOP.clear()
+    options = load_options()
+    for service, port, handler in [('http', int(options.get('http_proxy_port')), handle_http_gateway), ('socks', int(options.get('socks_proxy_port')), handle_socks_gateway)]:
+        ok, reason = _port_is_free(port)
+        if not ok:
+            raise RuntimeError(f"Не удалось открыть внешний {service.upper()} порт {port}: {reason}")
+        th = threading.Thread(target=_gateway_loop, args=(service, port, handler), name=f'{service}-auth-gateway', daemon=True)
+        th.start()
+        AUTH_GATEWAY_THREADS.append(th)
+        time.sleep(0.05)
+    time.sleep(0.2)
+
+
+def stop_auth_gateways():
+    AUTH_GATEWAY_STOP.set()
+    for s in list(AUTH_GATEWAY_SOCKETS):
+        try:
+            s.close()
+        except Exception:
+            pass
+    AUTH_GATEWAY_SOCKETS.clear()
+    AUTH_GATEWAY_THREADS.clear()
+
 def clash_request(method, path, body=None, timeout=8):
     options = load_options()
     url = CLASH_API + path
@@ -4517,6 +4821,7 @@ def write_config(path=None, cfg=None):
 
 def stop_singbox():
     global singbox_process
+    stop_auth_gateways()
     if singbox_process and singbox_process.poll() is None:
         log("SING_BOX", "STOP", "Stopping sing-box")
         singbox_process.terminate()
@@ -4566,6 +4871,7 @@ def start_singbox(prechecked_config=None):
         shutil.copyfile(SINGBOX_CONFIG, LAST_GOOD_SINGBOX_CONFIG)
     except Exception as e:
         log_exception("SING_BOX", "LAST_GOOD_SAVE", e, target=str(LAST_GOOD_SINGBOX_CONFIG))
+    start_auth_gateways()
     apply_power_selectors()
     start_mtg()
 
@@ -5346,6 +5652,19 @@ def build_clients(connections):
         state = peer.get('state') or ('SECRET_IDENTIFIED' if peer.get('identity_method') == 'telegram_secret' else 'UNKNOWN')
         item['tcp_states'][state] = item['tcp_states'].get(state, 0) + 1
 
+    for gw in gateway_active_snapshot():
+        ip = gw.get('ip')
+        if not ip or ip == '—' or is_loopback_ip(ip):
+            continue
+        username = gw.get('auth_user') if gw.get('auth_user') and gw.get('auth_user') != 'auth' else ''
+        user = users_by_name.get(username) if username else None
+        item = ensure_client_group(grouped, history, trusted, ip, now, gw.get('service') or 'HTTP/SOCKS', user=user, username=username)
+        item.setdefault('identities', set()).add('access:trusted_ip_bypass' if gw.get('trusted') else 'access:auth_gateway')
+        dest = gw.get('destination') or 'proxy-gateway'
+        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': dest}, 'upload': 0, 'download': 0, 'chains': ['auth-gateway', 'Proxy']})
+        item.setdefault('main_hosts', {})[simplify_host(dest)] = item.setdefault('main_hosts', {}).get(simplify_host(dest), 0) + 1
+        item['hosts'].add(dest)
+
     active_keys = set(grouped.keys())
     try:
         update_client_session_history(grouped, history, now)
@@ -5852,7 +6171,7 @@ class Handler(BaseHTTPRequestHandler):
                 boot = get_boot_state()
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = list(connections_cache.get("items") or []); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
                 tg_status = mtg_status()
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "startup": boot, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": tg_status, "settings": settings, "power": power_summary(settings, tg_status), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "trusted_http_proxy_port": options.get("trusted_http_proxy_port"), "trusted_socks_proxy_port": options.get("trusted_socks_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"]), "trusted_auth_bypass_enabled": bool(load_security().get("trusted_auth_bypass_enabled")), "trusted_auth_bypass_cidrs": len(load_security().get("trusted_auth_bypass_cidrs") or [])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "startup": boot, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": tg_status, "settings": settings, "power": power_summary(settings, tg_status), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"]), "trusted_auth_bypass_enabled": bool(load_security().get("trusted_auth_bypass_enabled")), "trusted_auth_bypass_cidrs": len(load_security().get("trusted_auth_bypass_cidrs") or [])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/system/check":
                 return self.send_json(system_check_report())
             if path == "/api/maintenance":
@@ -6005,8 +6324,6 @@ class Handler(BaseHTTPRequestHandler):
                     "http_proxy_port": body.get("http_proxy_port"),
                     "socks_proxy_port": body.get("socks_proxy_port"),
                     "telegram_proxy_port": body.get("telegram_proxy_port"),
-                    "trusted_http_proxy_port": body.get("trusted_http_proxy_port"),
-                    "trusted_socks_proxy_port": body.get("trusted_socks_proxy_port"),
                 }
                 old_ports = load_options()
                 ports, checks = validate_runtime_ports(candidate, allow_current=True)
@@ -6230,6 +6547,70 @@ class Handler(BaseHTTPRequestHandler):
                     trusted = load_trusted(); trusted.pop(ip, None); save_trusted(trusted)
                 log("CLIENT", "DELETE", f"Deleted client from list: {ip or key}", actor="ui", action="client_delete", target=key or ip, extra={"closed": closed, "removed_keys": removed_keys, "mtg_restarted": mtg_restarted})
                 return self.send_json({"ok": True, "closed": closed, "removed_keys": removed_keys, "mtg_restarted": mtg_restarted})
+            if path == "/api/clients/bulk":
+                action = str(body.get("action") or "").strip()
+                selected = body.get("clients") or []
+                if action not in {"delete", "block", "trust", "untrust", "disconnect"}:
+                    raise ValueError("Неизвестное массовое действие")
+                if not isinstance(selected, list) or not selected:
+                    raise ValueError("Клиенты не выбраны")
+                ips = []
+                keys = []
+                for item in selected:
+                    if not isinstance(item, dict):
+                        continue
+                    ip = str(item.get("ip") or "").strip()
+                    key = str(item.get("key") or "").strip()
+                    if ip:
+                        ips.append(ip)
+                    if key:
+                        keys.append(key)
+                ips = sorted(set(ips))
+                keys = sorted(set(keys))
+                closed = 0
+                removed_keys = []
+                blocked_added = []
+                if action in {"disconnect", "delete"}:
+                    for c in get_connections_raw():
+                        if get_source_ip(c) in ips and close_connection(get_conn_id(c)):
+                            closed += 1
+                if action == "delete":
+                    history = load_clients()
+                    for hk, hv in list(history.items()):
+                        if hk in keys or hv.get('ip') in ips or hk in ['ip:' + ip for ip in ips]:
+                            removed_keys.append(hk)
+                            history.pop(hk, None)
+                    save_clients(history)
+                    trusted = load_trusted()
+                    for ip in ips:
+                        trusted.pop(ip, None)
+                    save_trusted(trusted)
+                elif action == "block":
+                    items = load_blocked()
+                    existing = {x.get('cidr') for x in items}
+                    duration = block_duration_to_seconds(body.get("duration_seconds") or "permanent")
+                    expires_at = time.time() + duration if duration else None
+                    for ip in ips:
+                        cidr = normalize_ip_cidr(ip)
+                        if cidr not in existing:
+                            items.append({"cidr": cidr, "ip": extract_ip_from_cidr(cidr), "comment": "Bulk block from clients panel", "created_at": time.time(), "duration_seconds": duration, "expires_at": expires_at, "source": "manual"})
+                            existing.add(cidr)
+                            blocked_added.append(cidr)
+                    save_blocked(items)
+                    restart_singbox_background('clients_bulk_block')
+                elif action == "trust":
+                    trusted = load_trusted()
+                    for ip in ips:
+                        trusted[ip] = {"name": "Доверенный клиент " + ip, "trusted_at": time.time()}
+                    save_trusted(trusted)
+                    purge_exempt_autobans(load_security())
+                elif action == "untrust":
+                    trusted = load_trusted()
+                    for ip in ips:
+                        trusted.pop(ip, None)
+                    save_trusted(trusted)
+                log("CLIENT", "BULK", f"Bulk client action: {action}", actor="ui", action="client_bulk_" + action, extra={"ips": ips, "keys": keys, "closed": closed, "removed_keys": removed_keys, "blocked_added": blocked_added})
+                return self.send_json({"ok": True, "action": action, "ips": ips, "keys": keys, "closed": closed, "removed_keys": removed_keys, "blocked_added": blocked_added})
             if path == "/api/blocklist":
                 ip = body.get("ip") or body.get("cidr")
                 comment = body.get("comment") or ""
@@ -6609,6 +6990,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def shutdown_handler(signum, frame):
+    stop_auth_gateways()
     stop_mtg()
     stop_singbox()
     sys.exit(0)

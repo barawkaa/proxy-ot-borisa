@@ -252,9 +252,10 @@ finally:
     shutil.rmtree(_tmp_data, ignore_errors=True)
 
 
-# Trusted auth bypass regression checks. Trusted access must be implemented
-# through separate unauthenticated inbounds plus source_ip_cidr rules, without
-# leaking application-only trusted_* settings into sing-box JSON.
+# Trusted auth bypass regression checks. Trusted access must be implemented on
+# the standard HTTP/SOCKS ports through the local auth gateway. sing-box itself
+# must listen only on internal localhost ports and must not receive application-
+# only trusted_* settings or extra trusted external ports.
 _tmp_data2 = pathlib.Path(tempfile.mkdtemp())
 _old_data_dir2 = backend.DATA_DIR
 _old_sources_file2 = backend.SERVER_SOURCES_FILE
@@ -272,8 +273,6 @@ try:
         "http_proxy_port": 2081,
         "socks_proxy_port": 2080,
         "telegram_proxy_port": 2083,
-        "trusted_http_proxy_port": 2085,
-        "trusted_socks_proxy_port": 2086,
         "http_auth_enabled": True,
         "socks_auth_enabled": True,
         "proxy_username": "u",
@@ -296,15 +295,16 @@ try:
     backend.save_servers(_servers)
     cfg = backend.make_singbox_config()
     inbound_tags = {i.get("tag"): i for i in cfg.get("inbounds", []) if isinstance(i, dict)}
-    assert "IN-HTTP-TRUSTED-2085" in inbound_tags, inbound_tags
-    assert "IN-SOCKS5-TRUSTED-2086" in inbound_tags, inbound_tags
-    assert "users" not in inbound_tags["IN-HTTP-TRUSTED-2085"], inbound_tags["IN-HTTP-TRUSTED-2085"]
-    assert "users" not in inbound_tags["IN-SOCKS5-TRUSTED-2086"], inbound_tags["IN-SOCKS5-TRUSTED-2086"]
-    rules = cfg.get("route", {}).get("rules", [])
-    assert any(r.get("inbound") and "IN-HTTP-TRUSTED-2085" in r.get("inbound") and r.get("source_ip_cidr") == ["192.168.1.35/32"] and r.get("outbound") == "Proxy" for r in rules), rules
-    assert any(r.get("inbound") and "IN-HTTP-TRUSTED-2085" in r.get("inbound") and r.get("outbound") == "block" for r in rules), rules
+    assert "IN-HTTP-TRUSTED-2085" not in inbound_tags, inbound_tags
+    assert "IN-SOCKS5-TRUSTED-2086" not in inbound_tags, inbound_tags
+    assert inbound_tags["IN-HTTP-2081"].get("listen") == "127.0.0.1"
+    assert inbound_tags["IN-HTTP-2081"].get("listen_port") == backend.INTERNAL_HTTP_PROXY_PORT
+    assert inbound_tags["IN-SOCKS5-2080"].get("listen") == "127.0.0.1"
+    assert inbound_tags["IN-SOCKS5-2080"].get("listen_port") == backend.INTERNAL_SOCKS_PROXY_PORT
+    assert "users" not in inbound_tags["IN-HTTP-2081"], inbound_tags["IN-HTTP-2081"]
+    assert "users" not in inbound_tags["IN-SOCKS5-2080"], inbound_tags["IN-SOCKS5-2080"]
     dumped = json.dumps(cfg, ensure_ascii=False)
-    for forbidden in ["trusted_auth_bypass_enabled", "trusted_auth_bypass_cidrs", "trusted_auth_bypass_http", "trusted_auth_bypass_socks"]:
+    for forbidden in ["trusted_auth_bypass_enabled", "trusted_auth_bypass_cidrs", "trusted_auth_bypass_http", "trusted_auth_bypass_socks", "trusted_http_proxy_port", "trusted_socks_proxy_port"]:
         assert forbidden not in dumped, forbidden
 finally:
     backend.DATA_DIR = _old_data_dir2
@@ -315,9 +315,10 @@ finally:
     shutil.rmtree(_tmp_data2, ignore_errors=True)
 
 assert "secTrustedBypassEnabled" in html
-assert "portTrustedHttpInput" in html and "portTrustedSocksInput" in html
+assert "portTrustedHttpInput" not in html and "portTrustedSocksInput" not in html
 assert "Доверенный доступ без авторизации" in html
-assert "trusted_http_proxy_port" in backend_text and "trusted_socks_proxy_port" in backend_text
+assert "trusted_http_proxy_port" not in backend_text and "trusted_socks_proxy_port" not in backend_text
+assert "/api/clients/bulk" in backend_text and "btnApplyClientBulk" in html
 
 # Dockerfile build sanity. For Home Assistant local builds we intentionally
 # use the upstream prebuilt :latest images for sing-box and mtg-multi.

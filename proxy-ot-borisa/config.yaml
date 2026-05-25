@@ -1,5 +1,5 @@
 name: "Proxy от Бориса"
-version: "1.24.2"
+version: "1.24.3"
 slug: "proxy_ot_borisa"
 description: "Управляемый HTTP/SOCKS/Telegram MTProto прокси на базе sing-box"
 arch:
@@ -23,8 +23,6 @@ options:
   socks_proxy_port: 2080
   telegram_proxy_enabled: false
   telegram_proxy_port: 2083
-  trusted_http_proxy_port: 2085
-  trusted_socks_proxy_port: 2086
   telegram_front_domain: "www.google.com"
   socks_auth_enabled: true
   http_auth_enabled: true
@@ -42,8 +40,6 @@ schema:
   socks_proxy_port: "int(1,65535)"
   telegram_proxy_enabled: "bool"
   telegram_proxy_port: "int(1,65535)"
-  trusted_http_proxy_port: "int(1,65535)"
-  trusted_socks_proxy_port: "int(1,65535)"
   telegram_front_domain: "str"
   socks_auth_enabled: "bool"
   http_auth_enabled: "bool"
@@ -59,14 +55,10 @@ ports:
   2080/tcp: 2080
   2081/tcp: 2081
   2083/tcp: 2083
-  2085/tcp: 2085
-  2086/tcp: 2086
   8099/tcp: null
 
 ports_description:
   2080/tcp: "SOCKS5 proxy default port"
   2081/tcp: "HTTP proxy default port"
   2083/tcp: "Telegram MTProto default port, single shared port for all Telegram users"
-  2085/tcp: "Trusted HTTP proxy without auth, restricted by IP/CIDR allowlist"
-  2086/tcp: "Trusted SOCKS5 proxy without auth, restricted by IP/CIDR allowlist"
   8099/tcp: "Management UI through Home Assistant Ingress"

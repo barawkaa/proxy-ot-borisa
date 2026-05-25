@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.6"
+APP_VERSION = "1.25.7"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -5178,13 +5178,33 @@ def handle_http_gateway(client, addr):
             gateway_activity_end(activity_key)
 
 
+def _decode_socks_domain(raw):
+    """Decode a SOCKS5 domain name without breaking the connection.
+
+    Python's built-in idna codec does not support errors='ignore'. v1.25.6 used
+    bytes.decode('idna', errors='ignore'), which raises UnicodeError for normal
+    domain requests from curl/Keenetic and caused the external SOCKS5 port 2080
+    to close during handshake. Keep this helper deliberately conservative:
+    telemetry must never break the SOCKS tunnel.
+    """
+    if not raw:
+        return ''
+    try:
+        return raw.decode('idna')
+    except Exception:
+        try:
+            return raw.decode('ascii', errors='ignore')
+        except Exception:
+            return ''
+
+
 def _socks_destination_from_request(req_head, addr_part, port_part):
     atyp = req_head[3]
     host = ''
     if atyp == 1:
         host = socket.inet_ntop(socket.AF_INET, addr_part)
     elif atyp == 3:
-        host = addr_part[1:].decode('idna', errors='ignore') if addr_part else ''
+        host = _decode_socks_domain(addr_part[1:] if addr_part else b'')
     elif atyp == 4:
         host = socket.inet_ntop(socket.AF_INET6, addr_part)
     port = int.from_bytes(port_part, 'big') if port_part else 0

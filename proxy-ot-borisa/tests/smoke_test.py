@@ -511,6 +511,22 @@ finally:
     backend.route_test_domain = _old_route_test_domain
     backend.GATEWAY_ACTIVE.clear(); backend.GATEWAY_RECENT.clear()
 
+# v1.25.7: SOCKS5 domain telemetry must not break router/curl clients.
+# Regression: bytes.decode('idna', errors='ignore') raises UnicodeError and
+# closed external port 2080 before the client received a SOCKS reply.
+assert backend._decode_socks_domain(b'api.ipify.org') == 'api.ipify.org'
+assert backend._decode_socks_domain(b'xn--d1acpjx3f.xn--p1ai')
+_req_head = b'\x05\x01\x00\x03'
+_domain = b'api.ipify.org'
+_host, _port = backend._socks_destination_from_request(_req_head, bytes([len(_domain)]) + _domain, (443).to_bytes(2, 'big'))
+assert _host == 'api.ipify.org' and _port == 443, (_host, _port)
+_old_trusted = backend.is_trusted_bypass_ip
+try:
+    backend.is_trusted_bypass_ip = lambda ip, service=None: service == 'socks' and ip == '188.143.204.77'
+    assert backend.is_trusted_bypass_ip('188.143.204.77', 'socks') is True
+finally:
+    backend.is_trusted_bypass_ip = _old_trusted
+
 assert 'subscriptionSourcesMiniHtml' in html and 'Трафик по источникам серверов:' in html
 assert '"traffic": traffic' in backend_text and 'subscription_traffic_refresh' in backend_text
 

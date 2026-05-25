@@ -20,7 +20,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.24.1"
+APP_VERSION = "1.24.2"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -31,7 +31,7 @@ RUNTIME_OPTIONS_FILE = Path("/data/runtime_options.json")
 SUBSCRIPTION_INFO_FILE = Path("/data/subscription_info.json")
 SUBSCRIPTION_SERVERS_FILE = Path("/data/subscription_servers.json")
 SERVER_SOURCES_FILE = Path("/data/server_sources.json")
-PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port"]
+PORT_KEYS = ["http_proxy_port", "socks_proxy_port", "telegram_proxy_port", "trusted_http_proxy_port", "trusted_socks_proxy_port"]
 BACKUP_VERSION = 2
 DATA_SCHEMA_VERSION = 3
 MIGRATIONS_FILE = Path("/data/migrations.json")
@@ -224,6 +224,11 @@ DEFAULT_SECURITY = {
     "autoban_exempt_allowlist": True,
     "autoban_exempt_cidrs": [],
     "http_public_warning_ack": False,
+    "trusted_auth_bypass_enabled": False,
+    "trusted_auth_bypass_http": True,
+    "trusted_auth_bypass_socks": True,
+    "trusted_auth_bypass_cidrs": [],
+    "trusted_auth_bypass_unknown_mode": "auth",
     "updated_at": 0,
     "country_lists": {}
 }
@@ -425,6 +430,8 @@ def _default_options():
         "servers_json": "[]",
         "telegram_proxy_enabled": False,
         "telegram_proxy_port": 2083,
+        "trusted_http_proxy_port": 2085,
+        "trusted_socks_proxy_port": 2086,
         "telegram_front_domain": "www.google.com",
     }
 
@@ -550,7 +557,8 @@ def ports_summary():
         "notes": [
             "Порты меняются внутри приложения и сохраняются в /data/runtime_ports.json.",
             "После изменения внешние пробросы на роутере нужно изменить вручную.",
-            "Конфигурация add-on остаётся резервным источником для первого запуска и восстановления."
+            "Конфигурация add-on остаётся резервным источником для первого запуска и восстановления.",
+            "Trusted HTTP/SOCKS порты предназначены для устройств без поддержки proxy-auth и работают только для доверенных IP/CIDR."
         ]
     }
 
@@ -583,7 +591,14 @@ def load_security():
         sec[key] = bool(sec.get(key, True))
     if not isinstance(sec.get("autoban_exempt_cidrs"), list):
         sec["autoban_exempt_cidrs"] = []
+    if not isinstance(sec.get("trusted_auth_bypass_cidrs"), list):
+        sec["trusted_auth_bypass_cidrs"] = []
     sec["autoban_exempt_cidrs"] = normalize_cidr_list(sec.get("autoban_exempt_cidrs") or [])
+    sec["trusted_auth_bypass_cidrs"] = normalize_cidr_list(sec.get("trusted_auth_bypass_cidrs") or [])
+    for key in ["trusted_auth_bypass_enabled", "trusted_auth_bypass_http", "trusted_auth_bypass_socks"]:
+        sec[key] = bool(sec.get(key, DEFAULT_SECURITY.get(key)))
+    if sec.get("trusted_auth_bypass_unknown_mode") not in {"auth", "block"}:
+        sec["trusted_auth_bypass_unknown_mode"] = "auth"
     for key, fallback in [("autoban_max_connections_per_ip", 120), ("autoban_max_new_connections_per_minute", 240), ("autoban_window_seconds", 60), ("autoban_duration_seconds", 3600)]:
         try:
             sec[key] = int(sec.get(key) or fallback)
@@ -754,11 +769,17 @@ def security_summary(sec=None, options=None):
         "autoban_max_new_connections_per_minute": int(sec.get("autoban_max_new_connections_per_minute") or 0),
         "autoban_window_seconds": int(sec.get("autoban_window_seconds") or 0),
         "autoban_duration_seconds": int(sec.get("autoban_duration_seconds") or 0),
+        "trusted_auth_bypass_enabled": bool(sec.get("trusted_auth_bypass_enabled")),
+        "trusted_auth_bypass_http": bool(sec.get("trusted_auth_bypass_http")),
+        "trusted_auth_bypass_socks": bool(sec.get("trusted_auth_bypass_socks")),
+        "trusted_auth_bypass_cidrs": sec.get("trusted_auth_bypass_cidrs") or [],
+        "trusted_auth_bypass_cidrs_count": len(sec.get("trusted_auth_bypass_cidrs") or []),
+        "trusted_auth_bypass_unknown_mode": sec.get("trusted_auth_bypass_unknown_mode", "auth"),
         "country_lists": sec.get("country_lists") or {},
         "warnings": warnings,
         "http_auth_enabled": bool(options.get("http_auth_enabled")),
         "socks_auth_enabled": bool(options.get("socks_auth_enabled")),
-        "ports": {"http": options.get("http_proxy_port"), "socks": options.get("socks_proxy_port"), "telegram": options.get("telegram_proxy_port")},
+        "ports": {"http": options.get("http_proxy_port"), "socks": options.get("socks_proxy_port"), "telegram": options.get("telegram_proxy_port"), "trusted_http": options.get("trusted_http_proxy_port"), "trusted_socks": options.get("trusted_socks_proxy_port")},
     }
 
 
@@ -1777,6 +1798,7 @@ def system_check_report():
     else:
         items.append(_check_item("warn", "HTTP auth", "HTTP-прокси без авторизации. Это опасно, если порт открыт в интернет.", "Не пробрасывайте HTTP-порт наружу или включите авторизацию, если клиенты её поддерживают.", "security"))
     items.append(_check_item("ok" if options.get("socks_auth_enabled") else "warn", "SOCKS5 auth", "SOCKS5 защищён авторизацией." if options.get("socks_auth_enabled") else "SOCKS5 без авторизации.", "Включите SOCKS5 auth для внешнего доступа." if not options.get("socks_auth_enabled") else "", "security"))
+    items.append(_check_item("ok" if (not security.get("trusted_auth_bypass_enabled") or security.get("trusted_auth_bypass_cidrs")) else "warn", "Trusted bypass", "Доверенный доступ без авторизации настроен." if security.get("trusted_auth_bypass_enabled") else "Trusted bypass выключен.", "Добавьте доверенные IP/CIDR или выключите bypass." if security.get("trusted_auth_bypass_enabled") and not security.get("trusted_auth_bypass_cidrs") else "", "security"))
     items.append(_check_item("ok" if security.get("autoban_enabled") else "warn", "Автоблокировка", "Автоблокировка включена." if security.get("autoban_enabled") else "Автоблокировка выключена.", "Включите автоблокировку, если прокси доступен из интернета." if not security.get("autoban_enabled") else "", "security"))
     if security.get("country_filter_enabled"):
         items.append(_check_item("ok" if ru.get("count") else "warn", "RU CIDR геофильтр", f"Включён. CIDR в базе: {ru.get('count') or 0}.", "Обновите RU IP-список, если база пустая." if not ru.get("count") else "", "security"))
@@ -4315,6 +4337,10 @@ def make_singbox_config():
     socks_port = int(options["socks_proxy_port"])
     socks_tag = f"IN-SOCKS5-{socks_port}"
     http_tag = f"IN-HTTP-{http_port}"
+    trusted_http_port = int(options.get("trusted_http_proxy_port") or 0)
+    trusted_socks_port = int(options.get("trusted_socks_proxy_port") or 0)
+    trusted_http_tag = f"IN-HTTP-TRUSTED-{trusted_http_port}"
+    trusted_socks_tag = f"IN-SOCKS5-TRUSTED-{trusted_socks_port}"
     mtg_upstream_tag = f"IN-MTG-UPSTREAM-{MTG_UPSTREAM_SOCKS_PORT}"
     users = load_proxy_users()
     socks_auth = []
@@ -4331,11 +4357,18 @@ def make_singbox_config():
             for u in users
             if u.get("enabled", True) and u.get("http_enabled", True)
         ]
+    security = load_security()
+    trusted_bypass_enabled = bool(security.get("trusted_auth_bypass_enabled"))
+    trusted_bypass_cidrs = normalize_cidr_list(security.get("trusted_auth_bypass_cidrs") or [])
     inbounds = [
         {"type": "socks", "tag": socks_tag, "listen": "0.0.0.0", "listen_port": socks_port},
         {"type": "http", "tag": http_tag, "listen": "0.0.0.0", "listen_port": http_port},
-        {"type": "socks", "tag": mtg_upstream_tag, "listen": "127.0.0.1", "listen_port": MTG_UPSTREAM_SOCKS_PORT},
     ]
+    if trusted_bypass_enabled and trusted_bypass_cidrs and security.get("trusted_auth_bypass_socks", True):
+        inbounds.append({"type": "socks", "tag": trusted_socks_tag, "listen": "0.0.0.0", "listen_port": trusted_socks_port})
+    if trusted_bypass_enabled and trusted_bypass_cidrs and security.get("trusted_auth_bypass_http", True):
+        inbounds.append({"type": "http", "tag": trusted_http_tag, "listen": "0.0.0.0", "listen_port": trusted_http_port})
+    inbounds.append({"type": "socks", "tag": mtg_upstream_tag, "listen": "127.0.0.1", "listen_port": MTG_UPSTREAM_SOCKS_PORT})
     if socks_auth:
         inbounds[0]["users"] = socks_auth
     if http_auth:
@@ -4380,6 +4413,16 @@ def make_singbox_config():
     blocked_cidrs = [item.get("cidr") for item in blocked if item.get("cidr")]
     if blocked_cidrs:
         rules.append({"source_ip_cidr": blocked_cidrs, "outbound": "block"})
+
+    trusted_inbounds = []
+    if trusted_bypass_enabled and trusted_bypass_cidrs:
+        if security.get("trusted_auth_bypass_socks", True):
+            trusted_inbounds.append(trusted_socks_tag)
+        if security.get("trusted_auth_bypass_http", True):
+            trusted_inbounds.append(trusted_http_tag)
+    if trusted_inbounds:
+        rules.append({"inbound": trusted_inbounds, "source_ip_cidr": trusted_bypass_cidrs, "outbound": "Proxy"})
+        rules.append({"inbound": trusted_inbounds, "outbound": "block"})
 
     security = load_security()
     denied_source_cidrs = denied_source_cidrs_from_security(security)
@@ -5261,7 +5304,11 @@ def build_clients(connections):
             continue
         username = get_connection_username(conn)
         user = users_by_name.get(username) if username else None
-        item = ensure_client_group(grouped, history, trusted, ip, now, 'HTTP/SOCKS', user=user, username=username)
+        inbound_tag = str(conn.get('inbound') or (conn.get('metadata') or {}).get('inbound') or (conn.get('metadata') or {}).get('inboundTag') or '')
+        service_label = 'Trusted HTTP/SOCKS без auth' if 'TRUSTED' in inbound_tag.upper() else 'HTTP/SOCKS'
+        item = ensure_client_group(grouped, history, trusted, ip, now, service_label, user=user, username=username)
+        if 'TRUSTED' in inbound_tag.upper():
+            item.setdefault('identities', set()).add('access:trusted_ip_bypass')
         item['connections'].append(conn)
         item['upload'] += int(conn.get('upload') or 0)
         item['download'] += int(conn.get('download') or 0)
@@ -5805,7 +5852,7 @@ class Handler(BaseHTTPRequestHandler):
                 boot = get_boot_state()
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = list(connections_cache.get("items") or []); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
                 tg_status = mtg_status()
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "startup": boot, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": tg_status, "settings": settings, "power": power_summary(settings, tg_status), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "startup": boot, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": tg_status, "settings": settings, "power": power_summary(settings, tg_status), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "trusted_http_proxy_port": options.get("trusted_http_proxy_port"), "trusted_socks_proxy_port": options.get("trusted_socks_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"]), "trusted_auth_bypass_enabled": bool(load_security().get("trusted_auth_bypass_enabled")), "trusted_auth_bypass_cidrs": len(load_security().get("trusted_auth_bypass_cidrs") or [])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
             if path == "/api/system/check":
                 return self.send_json(system_check_report())
             if path == "/api/maintenance":
@@ -5958,6 +6005,8 @@ class Handler(BaseHTTPRequestHandler):
                     "http_proxy_port": body.get("http_proxy_port"),
                     "socks_proxy_port": body.get("socks_proxy_port"),
                     "telegram_proxy_port": body.get("telegram_proxy_port"),
+                    "trusted_http_proxy_port": body.get("trusted_http_proxy_port"),
+                    "trusted_socks_proxy_port": body.get("trusted_socks_proxy_port"),
                 }
                 old_ports = load_options()
                 ports, checks = validate_runtime_ports(candidate, allow_current=True)
@@ -6217,12 +6266,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "trusted": trusted, "removed_autobans": removed_autobans})
             if path == "/api/security":
                 sec = load_security()
-                for key in ["country_filter_enabled", "allowed_countries", "custom_allowed_cidrs", "custom_denied_cidrs", "autoban_enabled", "autoban_max_connections_per_ip", "autoban_max_new_connections_per_minute", "autoban_window_seconds", "autoban_duration_seconds", "autoban_exempt_trusted_clients", "autoban_exempt_registered_users", "autoban_exempt_allowlist", "autoban_exempt_cidrs", "http_public_warning_ack"]:
+                for key in ["country_filter_enabled", "allowed_countries", "custom_allowed_cidrs", "custom_denied_cidrs", "autoban_enabled", "autoban_max_connections_per_ip", "autoban_max_new_connections_per_minute", "autoban_window_seconds", "autoban_duration_seconds", "autoban_exempt_trusted_clients", "autoban_exempt_registered_users", "autoban_exempt_allowlist", "autoban_exempt_cidrs", "http_public_warning_ack", "trusted_auth_bypass_enabled", "trusted_auth_bypass_http", "trusted_auth_bypass_socks", "trusted_auth_bypass_cidrs", "trusted_auth_bypass_unknown_mode"]:
                     if key in body:
                         sec[key] = body[key]
                 sec["custom_allowed_cidrs"] = normalize_cidr_list(sec.get("custom_allowed_cidrs") or [])
                 sec["custom_denied_cidrs"] = normalize_cidr_list(sec.get("custom_denied_cidrs") or [])
                 sec["autoban_exempt_cidrs"] = normalize_cidr_list(sec.get("autoban_exempt_cidrs") or [])
+                sec["trusted_auth_bypass_cidrs"] = normalize_cidr_list(sec.get("trusted_auth_bypass_cidrs") or [])
+                if sec.get("trusted_auth_bypass_unknown_mode") not in {"auth", "block"}:
+                    sec["trusted_auth_bypass_unknown_mode"] = "auth"
                 save_security(sec)
                 removed_autobans = purge_exempt_autobans(sec)
                 log("SECURITY", "SAVE", "Security settings saved", actor="ui", action="security_save", extra={"country_filter_enabled": sec.get("country_filter_enabled"), "autoban_enabled": sec.get("autoban_enabled")})

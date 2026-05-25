@@ -116,38 +116,44 @@
         <div class="wizard-step"><h3>Включение и выключение</h3><div class="muted">Переключатель рядом с пользователем включает или отключает именно его доступ. Общие HTTP/SOCKS5/Telegram включаются в <b>Обзоре</b>.</div></div>
       </div></details>
 
-      <details class="instruction-group"><summary>4. Telegram MTProto<span class="muted">Порт, secret, статусы и ограничения идентификации.</span></summary><div class="instruction-content">
+      <details class="instruction-group"><summary>4. Доверенный доступ без авторизации<span class="muted">Для браузеров, ZeroOmega, Nintendo и устройств без поддержки proxy-auth.</span></summary><div class="instruction-content">
+        <div class="wizard-step"><h3>Для чего нужен trusted bypass</h3><div class="muted">Некоторые клиенты не умеют передавать логин/пароль proxy, особенно SOCKS5 auth в браузерах и расширениях. Для них есть отдельные trusted HTTP/SOCKS5 порты без авторизации, но только для IP/CIDR, которые ты явно разрешил.</div></div>
+        <div class="wizard-step"><h3>Как настроить</h3><ol><li>Открой <b>Настройки → Безопасность</b>.</li><li>Включи <b>Доверенный доступ без авторизации</b>.</li><li>Добавь IP рабочего ПК, приставки, Nintendo или роутера, например <span class="tag">192.168.1.35</span>.</li><li>Открой <b>Настройки → Порты</b> и посмотри trusted HTTP/SOCKS5 порты.</li><li>В ZeroOmega укажи IP сервера и trusted-порт, поля логина и пароля оставь пустыми.</li></ol></div>
+        <div class="wizard-step"><h3>Безопасность</h3><div class="muted">Trusted-порты не должны быть открыты всем. Не добавляй <span class="tag">0.0.0.0/0</span>. Лучше указывать конкретный IP устройства или узкую домашнюю подсеть, если ты понимаешь последствия.</div></div>
+      </div></details>
+
+      <details class="instruction-group"><summary>5. Telegram MTProto<span class="muted">Порт, secret, статусы и ограничения идентификации.</span></summary><div class="instruction-content">
         <div class="wizard-step"><h3>Что вводить в Telegram-клиент</h3><div class="muted">Обычно нужны три поля: <b>сервер</b>, <b>порт</b> и <b>secret</b>. Сервер — внешний IP или DDNS. Порт — общий MTProto-порт из вкладки <b>Telegram</b>. Secret — индивидуальный secret пользователя.</div></div>
         <div class="wizard-step"><h3>Идентификация Telegram-пользователей</h3><div class="muted">Telegram MTProto не использует логин/пароль. Пользователь определяется по индивидуальному <b>secret</b>. IP мобильных клиентов ненадёжен, потому что постоянно меняется.</div></div>
         <div class="wizard-step"><h3>Статус онлайн</h3><div class="muted">Статус строится по активности secret и имеет небольшой grace-период. Если Telegram сам держит соединение нестабильно или клиент спит, статус может стать «недавно был», а не мгновенно «оффлайн».</div></div>
       </div></details>
 
-      <details class="instruction-group"><summary>5. Маршрутизация<span class="muted">Какие домены идут через VPN, а какие напрямую.</span></summary><div class="instruction-content">
+      <details class="instruction-group"><summary>6. Маршрутизация<span class="muted">Какие домены идут через VPN, а какие напрямую.</span></summary><div class="instruction-content">
         <div class="wizard-step"><h3>Режимы</h3><div class="muted"><b>Всё через прокси</b> удобно для проверки. <b>Заблокированные + ручные списки</b> обычно лучше для повседневной работы: обычные сайты идут напрямую, нужные домены — через VPN.</div></div>
         <div class="wizard-step"><h3>Ручные домены</h3><div class="muted">Домены лучше писать без <span class="tag">https://</span> и без пути: например <span class="tag">chatgpt.com</span>, <span class="tag">openai.com</span>, нужные CDN/API.</div></div>
         <div class="wizard-step"><h3>Проверка маршрута</h3><div class="muted">Блок проверки маршрута показывает, почему домен пойдёт через VPN или напрямую. Это помогает не гадать, почему сайт открылся криво или часть ресурсов пошла мимо прокси.</div></div>
       </div></details>
 
-      <details class="instruction-group"><summary>6. Трафик, история и активность<span class="muted">Что приложение фиксирует, а что не перехватывает.</span></summary><div class="instruction-content">
+      <details class="instruction-group"><summary>7. Трафик, история и активность<span class="muted">Что приложение фиксирует, а что не перехватывает.</span></summary><div class="instruction-content">
         <div class="wizard-step"><h3>Трафик подписки</h3><div class="muted">Если провайдер отдаёт лимит в заголовках подписки, приложение показывает лимит, использовано и остаток. Если лимит неизвестен, используй ручной учёт.</div></div>
         <div class="wizard-step"><h3>История подключений и активность</h3><div class="muted">История фиксирует метаданные: клиент, время, сервис входа, маршрут, домены/IP назначения и объём трафика, если он доступен. Дополнительно ведётся агрегированная активность по доменам/IP: первый/последний раз замечен, маршрут, сервис и счётчики. Приложение не перехватывает содержимое HTTPS, пароли, формы, cookie и личные сообщения.</div></div>
         <div class="wizard-step"><h3>Ограничения истории</h3><div class="muted">Сессии клиентов хранятся 30 дней или 2000 последних сессий. Активные сессии не удаляются при автоочистке.</div></div>
       </div></details>
 
-      <details class="instruction-group"><summary>7. Хранение данных, журналы и очистка<span class="muted">Что хранится внутри add-on и почему файлы не должны расти бесконечно.</span></summary><div class="instruction-content">
+      <details class="instruction-group"><summary>8. Хранение данных, журналы и очистка<span class="muted">Что хранится внутри add-on и почему файлы не должны расти бесконечно.</span></summary><div class="instruction-content">
         <div class="wizard-step"><h3>Главный принцип</h3><div class="muted">Все рабочие JSON-файлы должны быть зарегистрированы в <b>DATA_REGISTRY</b>. Если файл может расти, у него должен быть лимит, очистка и отображение в <b>Обслуживании</b>.</div></div>
         <div class="wizard-step"><h3>Основные лимиты</h3><ul><li><b>История клиентов</b> — 30 дней или 2000 сессий.</li><li><b>MTProto activity</b> — 30 дней или 1000 записей.</li><li><b>Аудит</b> — 5000 событий.</li><li><b>Технические события</b> — 2000 событий.</li><li><b>Кэш геолокации</b> — 7 дней или лимит записей.</li><li><b>Временные счётчики автобана</b> — очищаются по рабочему окну автобана.</li><li><b>Автобэкапы servers.json</b> — только 5 последних копий.</li><li><b>Активность клиентов по доменам/IP</b> — 30 дней или 10000 агрегированных записей.</li><li><b>Кэш rule-set маршрутизации</b> — до 200 файлов; лишнее очищается.</li></ul></div>
         <div class="wizard-step"><h3>Автобэкапы servers.json</h3><div class="muted">Создаются перед изменением списка серверов, чтобы можно было восстановиться после ошибки импорта. Они могут содержать параметры VPN-серверов, поэтому считаются чувствительными. В обычный backup они не включаются, старые копии удаляются автоматически.</div></div>
         <div class="wizard-step"><h3>Обслуживание</h3><div class="muted">Вкладка <b>Обслуживание</b> показывает путь файла, размер, число записей, секретность, участие в backup, наличие cleanup и понятное объяснение: зачем файл нужен и можно ли его чистить.</div></div>
       </div></details>
 
-      <details class="instruction-group"><summary>8. Логирование и диагностика<span class="muted">Как не превратить журнал в мусор.</span></summary><div class="instruction-content">
+      <details class="instruction-group"><summary>9. Логирование и диагностика<span class="muted">Как не превратить журнал в мусор.</span></summary><div class="instruction-content">
         <div class="wizard-step"><h3>Обычный режим</h3><div class="muted">Для постоянной работы ставь уровень <b>warn</b>. Тогда sing-box не пишет каждое соединение, а оставляет только предупреждения и важные события.</div></div>
         <div class="wizard-step"><h3>Когда включать info/debug</h3><div class="muted"><b>info</b> и <b>debug</b> нужны только на время диагностики. После проверки лучше вернуть <b>warn</b>, иначе журнал станет большим и нечитаемым.</div></div>
         <div class="wizard-step"><h3>После обновления add-on</h3><div class="muted">UI проверяет <span class="tag">/api/health</span> и ждёт готовности сервисов. Если сам Home Assistant показал временную ошибку загрузки add-on, обычно достаточно подождать несколько секунд и открыть страницу снова.</div></div>
       </div></details>
 
-      <details class="instruction-group"><summary>9. Keenetic через Proxy Client<span class="muted">Как подключить роутер к локальному/внешнему прокси.</span></summary><div class="instruction-content">
+      <details class="instruction-group"><summary>10. Keenetic через Proxy Client<span class="muted">Как подключить роутер к локальному/внешнему прокси.</span></summary><div class="instruction-content">
         <div class="support-note"><b>Важно по версии KeeneticOS.</b> Proxy Client появился в KeeneticOS 3.9, но для нормального интерфейса лучше ориентироваться на KeeneticOS 5.x и новее.</div>
         <div class="wizard-step"><h3>1. Установить компонент Proxy Client</h3><ol><li>Открой Keenetic.</li><li>Перейди: <b>Управление → Настройки системы</b>.</li><li>Нажми <b>Изменить набор компонентов</b>.</li><li>Установи <b>Proxy client / Клиент proxy</b>.</li></ol></div>
         <div class="wizard-step"><h3>2. Создать proxy-подключение</h3><ol><li><b>Интернет → Другие подключения</b>.</li><li>Добавь proxy-подключение.</li><li>Тип: SOCKS5 или HTTP.</li><li>Сервер: внешний IP/DDNS твоего сервера.</li><li>Порт: SOCKS5 обычно <span class="tag">2080</span>, HTTP обычно <span class="tag">2081</span>.</li><li>Логин/пароль: данные пользователя из вкладки <b>Пользователи</b>.</li></ol></div>
@@ -256,9 +262,31 @@
       <div class="stats" style="margin-top:10px">
         <div class="stat"><div class="label">HTTP auth</div><div class="value" id="secHttpAuth">—</div></div>
         <div class="stat"><div class="label">SOCKS auth</div><div class="value" id="secSocksAuth">—</div></div>
+        <div class="stat"><div class="label">Trusted bypass</div><div class="value small" id="secTrustedBypassState">—</div></div>
+        <div class="stat"><div class="label">Trusted CIDR</div><div class="value" id="secTrustedBypassCount">—</div></div>
         <div class="stat"><div class="label">Разрешённых CIDR</div><div class="value" id="secAllowedCount">—</div></div>
         <div class="stat"><div class="label">Запрещённых CIDR</div><div class="value" id="secDeniedCount">—</div></div>
       </div>
+    </div>
+    <div class="card full"><h2>Доверенный доступ без авторизации</h2>
+      <div class="muted">Для браузеров, ZeroOmega, Nintendo, Smart TV и роутеров, которые не умеют proxy-auth. Основные HTTP/SOCKS порты остаются с авторизацией, а trusted-порты работают без логина/пароля только для указанных IP/CIDR.</div>
+      <label><input type="checkbox" id="secTrustedBypassEnabled"> Включить trusted-доступ без авторизации</label>
+      <div class="row">
+        <label><input type="checkbox" id="secTrustedBypassHttp"> HTTP trusted-порт</label>
+        <label><input type="checkbox" id="secTrustedBypassSocks"> SOCKS5 trusted-порт</label>
+        <label>Неизвестные IP
+          <select id="secTrustedUnknownMode">
+            <option value="auth">используют обычные auth-порты</option>
+            <option value="block">блокируются на trusted-портах</option>
+          </select>
+        </label>
+      </div>
+      <div class="two">
+        <div><b>Доверенные IP/CIDR для доступа без auth</b><div class="small muted">Лучше указывать конкретный IP устройства, например <span class="tag">192.168.1.35</span>. Не добавляй <span class="tag">0.0.0.0/0</span>.</div><textarea id="secTrustedBypassCidrs" placeholder="192.168.1.35
+192.168.1.0/24"></textarea></div>
+        <div class="support-note"><b>Как использовать в ZeroOmega</b><br><span class="muted">Укажи IP сервера и trusted-порт без логина/пароля. HTTP trusted-порт и SOCKS trusted-порт показаны во вкладке «Порты» и в этом разделе после сохранения.</span><div class="small muted" id="secTrustedBypassPorts">—</div></div>
+      </div>
+      <div class="danger-note" style="margin-top:10px">Trusted-доступ безопасен только при точном allowlist IP/CIDR. Не открывай trusted-порты наружу для всех адресов.</div>
     </div>
     <div class="card full"><h2>Геофильтр входящих подключений</h2>
       <label><input type="checkbox" id="secCountryEnabled"> Разрешать подключение к прокси только из России + локальные сети + ручной белый список</label>
@@ -307,6 +335,8 @@
         <div class="stat"><div class="label">HTTP proxy</div><div class="value" id="portHttpNow">—</div></div>
         <div class="stat"><div class="label">SOCKS5 proxy</div><div class="value" id="portSocksNow">—</div></div>
         <div class="stat"><div class="label">Telegram MTProto</div><div class="value" id="portTelegramNow">—</div></div>
+        <div class="stat"><div class="label">HTTP trusted</div><div class="value" id="portTrustedHttpNow">—</div></div>
+        <div class="stat"><div class="label">SOCKS trusted</div><div class="value" id="portTrustedSocksNow">—</div></div>
         <div class="stat"><div class="label">Источник</div><div class="value small" id="portSource">—</div></div>
       </div>
     </div>
@@ -315,6 +345,8 @@
         <label>HTTP <input id="portHttpInput" type="number" min="1" max="65535" style="width:130px"></label>
         <label>SOCKS5 <input id="portSocksInput" type="number" min="1" max="65535" style="width:130px"></label>
         <label>Telegram <input id="portTelegramInput" type="number" min="1" max="65535" style="width:130px"></label>
+        <label>HTTP trusted <input id="portTrustedHttpInput" type="number" min="1" max="65535" style="width:130px"></label>
+        <label>SOCKS trusted <input id="portTrustedSocksInput" type="number" min="1" max="65535" style="width:130px"></label>
       </div>
       <div class="row">
         <button class="primary" id="btnSavePorts">Сохранить и применить</button>
@@ -510,7 +542,7 @@ function downloadBackup(){const txt=$('backupOutput').value||JSON.stringify(stat
 async function copyBackup(){const txt=$('backupOutput').value;if(!txt){msg('Сначала создай резервную копию',true);return}await navigator.clipboard.writeText(txt);msg('Резервная копия скопирована')}
 async function restoreBackup(){if(!confirm('Восстановить настройки из резервной копии? Текущие настройки будут заменены.'))return;const raw=$('backupInput').value.trim();if(!raw)throw new Error('Вставьте JSON резервной копии');let backup;try{backup=JSON.parse(raw)}catch(e){throw new Error('JSON не читается: '+e.message)}const r=await post('/api/backup/import',{backup,mode:'replace'});$('backupMsg').textContent=r.message||'Резервная копия восстановлена';await refreshAll();}
 
-function renderOverview(){const s=state.status||{},p=s.power||{},vpn=s.vpn||{},cur=s.current||{},tg=s.telegram||{};$('appVersion').textContent=s.version||'—';$('serversCount').textContent=s.servers_count??'—';$('routingModeShort').textContent=({all_proxy:'весь VPN',blocked_plus_manual:'списки+ручной',manual_only:'ручной',all_direct:'прямой'}[(s.routing||{}).mode]||'—');$('connectionsCount').textContent=s.connections_count??'—';$('blockedCount').textContent=s.blocked_count??'—';$('clientsOnline').textContent=state.clients.filter(c=>c.status==='online').length;$('unknownOnline').textContent=state.clients.filter(c=>c.status==='online'&&!c.trusted).length;$('vpnStatus').innerHTML=vpn.connected?`<span class="ok">подключен</span>`:`<span class="bad">нет</span>`;$('proxyUptime').textContent=p.uptime_seconds?fmtDur(p.uptime_seconds):'—';$('curMode').textContent=cur.mode||'—';$('curServer').textContent=cur.server||'—';$('curPing').textContent=cur.delay?cur.delay+' мс':'—';$('powerNote').textContent=p.label||'—';if($('activityLine')){$('activityLine').textContent=(s.activity&&s.activity.message)||'Статус операции не получен';$('activityLine').className='support-note '+((s.activity&&s.activity.state)==='error'?'bad':'')}const secst=s.security_status||{},mon=s.monitor||{};$('statusPills').innerHTML=[pill(s.singbox_running?'sing-box работает':'sing-box ошибка',s.singbox_running?'green':'red'),pill(vpn.connected?'VPN сервер выбран':'VPN не подтверждён',vpn.connected?'green':'yellow'),pill((tg.running?'Telegram MTProxy работает':'Telegram MTProxy остановлен'),tg.running?'green':'yellow'),pill('Маршрутизация: '+(({all_proxy:'весь VPN',blocked_plus_manual:'списки+ручной',manual_only:'ручной',all_direct:'прямой'}[(s.routing||{}).mode])||'—'),'blue'),pill(secst.autoban_enabled?'Автобан включён':'Автобан выключен',secst.autoban_enabled?'green':'yellow'),pill(secst.country_filter_enabled?'RU геофильтр включён':'RU геофильтр выключен',secst.country_filter_enabled?'green':'gray'),pill('RU CIDR: '+(secst.ru_cidrs||0),(secst.ru_cidrs||0)>0?'blue':'yellow'),pill(secst.http_auth_enabled?'HTTP auth включена':'HTTP auth выкл',secst.http_auth_enabled?'green':'red'),pill('Источников серверов: '+((state.serverSources||[]).length),'blue'),pill('Мониторинг: '+(mon.interval_seconds||15)+' сек','gray')].join('');setBtn($('btnHttp'),!!p.http_enabled,'🌐 HTTP '+(p.http_enabled?'ВКЛ':'ВЫКЛ'));setBtn($('btnSocks'),!!p.socks_enabled,'🧦 SOCKS5 '+(p.socks_enabled?'ВКЛ':'ВЫКЛ'));setBtn($('btnTg'),!!p.telegram_enabled,'✈️ Telegram '+(p.telegram_enabled?'ВКЛ':'ВЫКЛ'));setBtn($('btnAll'),p.state==='all_on'?true:(p.state==='all_off'?false:null),'⚡ Все прокси: '+(p.state==='all_on'?'ВКЛ':p.state==='all_off'?'ВЫКЛ':'частично'));renderServerSelector();renderHeaderSummary();}
+function renderOverview(){const s=state.status||{},p=s.power||{},vpn=s.vpn||{},cur=s.current||{},tg=s.telegram||{};$('appVersion').textContent=s.version||'—';$('serversCount').textContent=s.servers_count??'—';$('routingModeShort').textContent=({all_proxy:'весь VPN',blocked_plus_manual:'списки+ручной',manual_only:'ручной',all_direct:'прямой'}[(s.routing||{}).mode]||'—');$('connectionsCount').textContent=s.connections_count??'—';$('blockedCount').textContent=s.blocked_count??'—';$('clientsOnline').textContent=state.clients.filter(c=>c.status==='online').length;$('unknownOnline').textContent=state.clients.filter(c=>c.status==='online'&&!c.trusted).length;$('vpnStatus').innerHTML=vpn.connected?`<span class="ok">подключен</span>`:`<span class="bad">нет</span>`;$('proxyUptime').textContent=p.uptime_seconds?fmtDur(p.uptime_seconds):'—';$('curMode').textContent=cur.mode||'—';$('curServer').textContent=cur.server||'—';$('curPing').textContent=cur.delay?cur.delay+' мс':'—';$('powerNote').textContent=p.label||'—';if($('activityLine')){$('activityLine').textContent=(s.activity&&s.activity.message)||'Статус операции не получен';$('activityLine').className='support-note '+((s.activity&&s.activity.state)==='error'?'bad':'')}const secst=s.security_status||{},mon=s.monitor||{};$('statusPills').innerHTML=[pill(s.singbox_running?'sing-box работает':'sing-box ошибка',s.singbox_running?'green':'red'),pill(vpn.connected?'VPN сервер выбран':'VPN не подтверждён',vpn.connected?'green':'yellow'),pill((tg.running?'Telegram MTProxy работает':'Telegram MTProxy остановлен'),tg.running?'green':'yellow'),pill('Маршрутизация: '+(({all_proxy:'весь VPN',blocked_plus_manual:'списки+ручной',manual_only:'ручной',all_direct:'прямой'}[(s.routing||{}).mode])||'—'),'blue'),pill(secst.autoban_enabled?'Автобан включён':'Автобан выключен',secst.autoban_enabled?'green':'yellow'),pill(secst.country_filter_enabled?'RU геофильтр включён':'RU геофильтр выключен',secst.country_filter_enabled?'green':'gray'),pill('RU CIDR: '+(secst.ru_cidrs||0),(secst.ru_cidrs||0)>0?'blue':'yellow'),pill(secst.http_auth_enabled?'HTTP auth включена':'HTTP auth выкл',secst.http_auth_enabled?'green':'red'),pill(secst.trusted_auth_bypass_enabled?'Trusted bypass: '+(secst.trusted_auth_bypass_cidrs||0)+' CIDR':'Trusted bypass выкл',secst.trusted_auth_bypass_enabled?'green':'gray'),pill('Источников серверов: '+((state.serverSources||[]).length),'blue'),pill('Мониторинг: '+(mon.interval_seconds||15)+' сек','gray')].join('');setBtn($('btnHttp'),!!p.http_enabled,'🌐 HTTP '+(p.http_enabled?'ВКЛ':'ВЫКЛ'));setBtn($('btnSocks'),!!p.socks_enabled,'🧦 SOCKS5 '+(p.socks_enabled?'ВКЛ':'ВЫКЛ'));setBtn($('btnTg'),!!p.telegram_enabled,'✈️ Telegram '+(p.telegram_enabled?'ВКЛ':'ВЫКЛ'));setBtn($('btnAll'),p.state==='all_on'?true:(p.state==='all_off'?false:null),'⚡ Все прокси: '+(p.state==='all_on'?'ВКЛ':p.state==='all_off'?'ВЫКЛ':'частично'));renderServerSelector();renderHeaderSummary();}
 
 function listText(v){return Array.isArray(v)?v.join('\n'):(v||'')}
 function textList(id){return ($(id).value||'').split(/[,;\n]+/).map(x=>x.trim()).filter(Boolean)}
@@ -519,8 +551,8 @@ async function saveRouting(updateSources=false){const r=state.routing||{};r.mode
 
 function pingText(tag){const p=state.serverPings[tag]||{};return p.delay?p.delay+' мс':(p.error?esc(p.error):'—')}
 function renderServerSelector(){const sel=$('serverSelect');if(!sel)return;const cur=state.status?.current?.mode||'auto';sel.innerHTML='<option value="auto">auto — автоматический выбор</option>'+state.servers.map(s=>{const pr=priorityProfile(s).name;return `<option value="${esc(s.tag)}">${esc(s.tag)} — ${esc(pr)} — ${pingText(s.tag)}</option>`}).join('');sel.value=cur&&cur!=='—'?cur:'auto'}
-function renderPorts(){const p=state.ports||{},a=p.active||{},d=p.addon_defaults||{};$('portHttpNow').textContent=a.http_proxy_port||'—';$('portSocksNow').textContent=a.socks_proxy_port||'—';$('portTelegramNow').textContent=a.telegram_proxy_port||'—';$('portSource').textContent=p.source||'—';$('portHttpInput').value=a.http_proxy_port||'';$('portSocksInput').value=a.socks_proxy_port||'';$('portTelegramInput').value=a.telegram_proxy_port||'';const hint=`<div>Пробросы на внешнем роутере должны соответствовать рабочим портам:</div><div class="mini-list" style="margin-top:8px">${pill('HTTP WAN '+(a.http_proxy_port||'—')+' → сервер:'+(a.http_proxy_port||'—'),'blue')}${pill('SOCKS5 WAN '+(a.socks_proxy_port||'—')+' → сервер:'+(a.socks_proxy_port||'—'),'blue')}${pill('Telegram WAN '+(a.telegram_proxy_port||'—')+' → сервер:'+(a.telegram_proxy_port||'—'),'blue')}</div><div class="small muted" style="margin-top:8px">Значения из конфигурации add-on для восстановления: HTTP ${esc(d.http_proxy_port||'—')}, SOCKS5 ${esc(d.socks_proxy_port||'—')}, Telegram ${esc(d.telegram_proxy_port||'—')}.</div>`;$('portsRouterHint').innerHTML=hint;$('portsMessage').textContent='Рабочие порты загружены.'}
-async function savePorts(){const body={http_proxy_port:Number($('portHttpInput').value),socks_proxy_port:Number($('portSocksInput').value),telegram_proxy_port:Number($('portTelegramInput').value),apply:true};$('portsMessage').textContent='Сохраняю порты и перезапускаю прокси-сервисы...';const r=await post('/api/ports',body);state.ports=r.ports;renderPorts();$('portsMessage').textContent=r.message||'Порты сохранены.';await loadStatus();await loadLogs()}
+function renderPorts(){const p=state.ports||{},a=p.active||{},d=p.addon_defaults||{};$('portHttpNow').textContent=a.http_proxy_port||'—';$('portSocksNow').textContent=a.socks_proxy_port||'—';$('portTelegramNow').textContent=a.telegram_proxy_port||'—';$('portTrustedHttpNow').textContent=a.trusted_http_proxy_port||'—';$('portTrustedSocksNow').textContent=a.trusted_socks_proxy_port||'—';$('portSource').textContent=p.source||'—';$('portHttpInput').value=a.http_proxy_port||'';$('portSocksInput').value=a.socks_proxy_port||'';$('portTelegramInput').value=a.telegram_proxy_port||'';$('portTrustedHttpInput').value=a.trusted_http_proxy_port||'';$('portTrustedSocksInput').value=a.trusted_socks_proxy_port||'';const hint=`<div>Пробросы на внешнем роутере должны соответствовать рабочим портам:</div><div class="mini-list" style="margin-top:8px">${pill('HTTP auth '+(a.http_proxy_port||'—'),'blue')}${pill('SOCKS5 auth '+(a.socks_proxy_port||'—'),'blue')}${pill('HTTP trusted '+(a.trusted_http_proxy_port||'—'),'green')}${pill('SOCKS trusted '+(a.trusted_socks_proxy_port||'—'),'green')}${pill('Telegram '+(a.telegram_proxy_port||'—'),'blue')}</div><div class="small muted" style="margin-top:8px">Trusted-порты работают без логина/пароля только для доверенных IP/CIDR из раздела «Безопасность». Значения из конфигурации add-on для восстановления: HTTP ${esc(d.http_proxy_port||'—')}, SOCKS5 ${esc(d.socks_proxy_port||'—')}, Telegram ${esc(d.telegram_proxy_port||'—')}.</div>`;$('portsRouterHint').innerHTML=hint;$('portsMessage').textContent='Рабочие порты загружены.'}
+async function savePorts(){const body={http_proxy_port:Number($('portHttpInput').value),socks_proxy_port:Number($('portSocksInput').value),telegram_proxy_port:Number($('portTelegramInput').value),trusted_http_proxy_port:Number($('portTrustedHttpInput').value),trusted_socks_proxy_port:Number($('portTrustedSocksInput').value),apply:true};$('portsMessage').textContent='Сохраняю порты и перезапускаю прокси-сервисы...';const r=await post('/api/ports',body);state.ports=r.ports;renderPorts();$('portsMessage').textContent=r.message||'Порты сохранены.';await loadStatus();await loadLogs()}
 function subscriptionTrafficHtml(info,showProgress=true){
   info=info||{}; const tr=info.traffic||{};
   const used=Number(tr.used||0), total=Number(tr.total||0), left=tr.remaining;
@@ -616,8 +648,16 @@ function renderSecurity(summary={}){
   $('secExemptRegistered').checked=sec.autoban_exempt_registered_users!==false;
   $('secExemptAllowlist').checked=sec.autoban_exempt_allowlist!==false;
   $('secExemptCidrs').value=(sec.autoban_exempt_cidrs||[]).join('\n');
+  $('secTrustedBypassEnabled').checked=!!sec.trusted_auth_bypass_enabled;
+  $('secTrustedBypassHttp').checked=sec.trusted_auth_bypass_http!==false;
+  $('secTrustedBypassSocks').checked=sec.trusted_auth_bypass_socks!==false;
+  $('secTrustedUnknownMode').value=sec.trusted_auth_bypass_unknown_mode||'auth';
+  $('secTrustedBypassCidrs').value=(sec.trusted_auth_bypass_cidrs||[]).join('\n');
   $('secHttpAuth').innerHTML=summary.http_auth_enabled?'<span class="ok">включена</span>':'<span class="bad">выключена</span>';
   $('secSocksAuth').innerHTML=summary.socks_auth_enabled?'<span class="ok">включена</span>':'<span class="bad">выключена</span>';
+  $('secTrustedBypassState').innerHTML=sec.trusted_auth_bypass_enabled?'<span class="ok">включён</span>':'<span class="muted">выключен</span>';
+  $('secTrustedBypassCount').textContent=(sec.trusted_auth_bypass_cidrs||[]).length;
+  const ports=(summary.ports||{}); if($('secTrustedBypassPorts'))$('secTrustedBypassPorts').innerHTML=`HTTP trusted: <span class="tag">${esc(ports.trusted_http||'—')}</span><br>SOCKS trusted: <span class="tag">${esc(ports.trusted_socks||'—')}</span>`;
   $('secAllowedCount').textContent=summary.allowed_cidrs_count??'—';
   $('secDeniedCount').textContent=summary.denied_cidrs_count??'—';
   const ru=(summary.country_lists||{}).RU||{};
@@ -626,7 +666,9 @@ function renderSecurity(summary={}){
     pill('RU CIDR: '+(ru.count||0),ru.count?'blue':'yellow'),
     pill(sec.autoban_enabled?'Автобан включён':'Автобан выключен',sec.autoban_enabled?'green':'yellow'),
     pill('Автобан: active '+(sec.autoban_max_connections_per_ip||120)+' / new '+(sec.autoban_max_new_connections_per_minute||240), sec.autoban_enabled?'blue':'gray'),
-    pill('Исключений автобана: '+((sec.autoban_exempt_cidrs||[]).length+(summary.autoban_exempt_cidrs_count||0)), 'green')
+    pill('Исключений автобана: '+((sec.autoban_exempt_cidrs||[]).length+(summary.autoban_exempt_cidrs_count||0)), 'green'),
+    pill(sec.trusted_auth_bypass_enabled?'Trusted bypass включён':'Trusted bypass выключен',sec.trusted_auth_bypass_enabled?'green':'gray'),
+    pill('Trusted CIDR: '+((sec.trusted_auth_bypass_cidrs||[]).length),sec.trusted_auth_bypass_enabled?'blue':'gray')
   ].join('');
   $('securityWarnings').innerHTML=warnings.length?warnings.map(w=>`<div class="bad">⚠ ${esc(w)}</div>`).join(''):'<span class="ok">Критичных предупреждений нет.</span>';
 }
@@ -672,7 +714,12 @@ async function saveSecurity(){
     autoban_exempt_trusted_clients:$('secExemptTrusted').checked,
     autoban_exempt_registered_users:$('secExemptRegistered').checked,
     autoban_exempt_allowlist:$('secExemptAllowlist').checked,
-    autoban_exempt_cidrs:$('secExemptCidrs').value.split(/\n|,|;/).map(x=>x.trim()).filter(Boolean)
+    autoban_exempt_cidrs:$('secExemptCidrs').value.split(/\n|,|;/).map(x=>x.trim()).filter(Boolean),
+    trusted_auth_bypass_enabled:$('secTrustedBypassEnabled').checked,
+    trusted_auth_bypass_http:$('secTrustedBypassHttp').checked,
+    trusted_auth_bypass_socks:$('secTrustedBypassSocks').checked,
+    trusted_auth_bypass_unknown_mode:$('secTrustedUnknownMode').value||'auth',
+    trusted_auth_bypass_cidrs:$('secTrustedBypassCidrs').value.split(/\n|,|;/).map(x=>x.trim()).filter(Boolean)
   };
   const r=await post('/api/security',body); await loadSecurity(); await loadLogs(); msg(r.message||'Настройки безопасности сохранены. Для применения нажми «Применить правила».');
 }

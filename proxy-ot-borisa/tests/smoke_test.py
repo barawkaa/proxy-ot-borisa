@@ -464,7 +464,7 @@ finally:
     backend.load_subscription_servers = _old_load_subscription_servers_ts
 
 
-# v1.25.3-v1.25.6: auth-gateway routes must show final VPN/DIRECT leg and trusted tag.
+# v1.25.3-v1.25.8: auth-gateway routes must show final VPN/DIRECT leg and trusted tag.
 _old_current_server_info = backend.current_server_info
 _old_get_proxies = backend.get_proxies
 try:
@@ -484,10 +484,15 @@ finally:
 
 assert "/api/route/diagnostics" in backend_text
 assert "/api/diagnostics/stream_test" in backend_text
-assert "Диагностика Proxy/VPN" in html
-assert "Ручная проверка стабильности загрузки" in html
+assert "/api/diagnostics/status" in backend_text
+assert "/api/diagnostics/url_test" in backend_text
+assert ">Диагностика</button>" in html
+assert 'id="tab-diagnostics"' in html
+assert "Проверка маршрута и входов по URL" in html
+assert "Проверка стабильности длинной загрузки" in html
 assert "trusted_ip без auth" in html
 assert "function runStreamDiagnostic" in html
+assert "function runDiagnosticsUrlTest" in html
 
 # v1.25.6: completed gateway HTTP/SOCKS requests stay visible briefly and
 # internal sing-box hop rows must not replace the real client/source.
@@ -511,7 +516,7 @@ finally:
     backend.route_test_domain = _old_route_test_domain
     backend.GATEWAY_ACTIVE.clear(); backend.GATEWAY_RECENT.clear()
 
-# v1.25.7: SOCKS5 domain telemetry must not break router/curl clients.
+# v1.25.7-v1.25.8: SOCKS5 domain telemetry must not break router/curl clients.
 # Regression: bytes.decode('idna', errors='ignore') raises UnicodeError and
 # closed external port 2080 before the client received a SOCKS reply.
 assert backend._decode_socks_domain(b'api.ipify.org') == 'api.ipify.org'
@@ -526,6 +531,12 @@ try:
     assert backend.is_trusted_bypass_ip('188.143.204.77', 'socks') is True
 finally:
     backend.is_trusted_bypass_ip = _old_trusted
+
+# v1.25.8: public SOCKS5 diagnostics and transparent reply are product requirements.
+assert "stream_test_via_public_socks_gateway" in backend_text
+assert "diagnostics_url_report" in backend_text
+assert "SOCKS5 2080" in html and "HTTP 2081" in html
+assert "Диагностика Proxy/VPN" not in html
 
 assert 'subscriptionSourcesMiniHtml' in html and 'Трафик по источникам серверов:' in html
 assert '"traffic": traffic' in backend_text and 'subscription_traffic_refresh' in backend_text

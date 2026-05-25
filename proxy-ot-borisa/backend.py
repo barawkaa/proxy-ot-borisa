@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.7"
+APP_VERSION = "1.25.8"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -5293,8 +5293,26 @@ def socks_auth_exchange(client, ip):
             raise OSError('socks no-auth method not offered')
         client.sendall(b'\x05\x00')
     req, host, port = _read_socks_connect_request(client)
-    upstream, response = _connect_internal_socks_with_raw_request(req)
-    client.sendall(response)
+    if not host or not port:
+        try:
+            client.sendall(b'\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00')
+        except Exception:
+            pass
+        raise OSError('socks request without destination')
+    # Do not forward the already-read external SOCKS request verbatim. Some clients
+    # and routers are sensitive to bind-address details returned by the upstream
+    # SOCKS server. We use the parsed destination to open the internal SOCKS5
+    # connection and send a standard success reply to the client. This keeps the
+    # public 2080 gateway transparent and stable, while still preserving telemetry.
+    try:
+        upstream = socks5_connect_via_internal(host, int(port))
+    except Exception:
+        try:
+            client.sendall(b'\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00')
+        except Exception:
+            pass
+        raise
+    client.sendall(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
     return upstream, username, host, port
 
 
@@ -6814,19 +6832,219 @@ def stream_test_via_auth_gateway(url, headers=None, max_bytes=50_000_000, timeou
             pass
 
 
+
+def _diag_parse_url(value):
+    value = str(value or '').strip()
+    if not value:
+        raise ValueError('Введите URL или домен для диагностики')
+    if '://' not in value:
+        value = 'https://' + value
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+        raise ValueError('Введите корректный URL http:// или https://')
+    return value, parsed
+
+
+def _tcp_port_probe(host, port, timeout=1.5):
+    started = time.time()
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return {'ok': True, 'ms': int((time.time() - started) * 1000), 'error': ''}
+    except Exception as e:
+        return {'ok': False, 'ms': int((time.time() - started) * 1000), 'error': f'{type(e).__name__}: {e}'}
+
+
+def diagnostics_status_report():
+    options = load_options()
+    security = load_security()
+    settings = load_settings()
+    cur = current_server_info(get_proxies())
+    ports = {
+        'http': int(options.get('http_proxy_port') or 2081),
+        'socks': int(options.get('socks_proxy_port') or 2080),
+        'telegram': int(options.get('telegram_proxy_port') or 2083),
+        'internal_socks': INTERNAL_SOCKS_PROXY_PORT,
+    }
+    checks = {name: _tcp_port_probe('127.0.0.1', port) for name, port in ports.items()}
+    return {
+        'ok': True,
+        'updated_at': time.time(),
+        'version': APP_VERSION,
+        'ports': ports,
+        'port_checks': checks,
+        'power': {
+            'http': bool(settings.get('http_enabled', True)),
+            'socks': bool(settings.get('socks_enabled', True)),
+            'telegram': bool(settings.get('telegram_enabled', True)),
+        },
+        'auth': {
+            'http_auth_enabled': bool(options.get('http_auth_enabled')),
+            'socks_auth_enabled': bool(options.get('socks_auth_enabled')),
+            'trusted_auth_bypass_enabled': bool(security.get('trusted_auth_bypass_enabled')),
+            'trusted_auth_bypass_http': bool(security.get('trusted_auth_bypass_http')),
+            'trusted_auth_bypass_socks': bool(security.get('trusted_auth_bypass_socks')),
+            'trusted_cidrs': security.get('trusted_auth_bypass_cidrs') or [],
+        },
+        'current': cur,
+        'routing': routing_summary(),
+        'recent_gateway': gateway_active_snapshot(include_recent=True)[-20:],
+        'last_error': last_error,
+    }
+
+
+def _socks5_open_via_public_gateway(host, port, timeout=10):
+    options = load_options()
+    proxy_port = int(options.get('socks_proxy_port') or 2080)
+    sock = socket.create_connection(('127.0.0.1', proxy_port), timeout=timeout)
+    try:
+        username = str(options.get('proxy_username') or '')
+        password = str(options.get('proxy_password') or '')
+        if options.get('socks_auth_enabled') and username:
+            sock.sendall(b'\x05\x02\x00\x02')
+        else:
+            sock.sendall(b'\x05\x01\x00')
+        resp = read_exact(sock, 2)
+        if resp == b'\x05\x02':
+            ub = username.encode('utf-8')[:255]
+            pb = password.encode('utf-8')[:255]
+            sock.sendall(b'\x01' + bytes([len(ub)]) + ub + bytes([len(pb)]) + pb)
+            auth_resp = read_exact(sock, 2)
+            if auth_resp != b'\x01\x00':
+                raise OSError('public SOCKS auth failed')
+        elif resp != b'\x05\x00':
+            raise OSError(f'public SOCKS rejected methods: {resp!r}')
+        try:
+            ip_obj = ipaddress.ip_address(host)
+            if ip_obj.version == 4:
+                atyp = b'\x01'; addr = ip_obj.packed
+            else:
+                atyp = b'\x04'; addr = ip_obj.packed
+        except Exception:
+            hb = str(host).encode('idna')
+            if len(hb) > 255:
+                raise OSError('domain too long')
+            atyp = b'\x03'; addr = bytes([len(hb)]) + hb
+        sock.sendall(b'\x05\x01\x00' + atyp + addr + int(port).to_bytes(2, 'big'))
+        head = read_exact(sock, 4)
+        if head[0] != 5 or head[1] != 0:
+            raise OSError(f'public SOCKS connect failed: {head!r}')
+        atyp2 = head[3]
+        if atyp2 == 1:
+            read_exact(sock, 6)
+        elif atyp2 == 3:
+            ln = read_exact(sock, 1)[0]; read_exact(sock, ln + 2)
+        elif atyp2 == 4:
+            read_exact(sock, 18)
+        else:
+            read_exact(sock, 2)
+        return sock
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
+        raise
+
+
+def stream_test_via_public_socks_gateway(url, headers=None, max_bytes=50_000_000, timeout=45):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+        raise ValueError('Введите полный URL http:// или https://')
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    sock = _socks5_open_via_public_gateway(parsed.hostname, port, timeout=10)
+    try:
+        if parsed.scheme == 'https':
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(sock, server_hostname=parsed.hostname)
+        request_target = urllib.parse.urlunparse(('', '', parsed.path or '/', parsed.params, parsed.query, parsed.fragment))
+        host_header = parsed.hostname if port in {80, 443} else f'{parsed.hostname}:{port}'
+        req_headers = {
+            'Host': host_header,
+            'User-Agent': f'ProxyOtBorisa/{APP_VERSION} diagnostics-socks',
+            'Accept': '*/*',
+            'Connection': 'close',
+        }
+        for k, v in (headers or {}).items():
+            if k and v and str(k).lower() not in {'host', 'connection'}:
+                req_headers[str(k)] = str(v)
+        req = f'GET {request_target} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in req_headers.items()) + '\r\n'
+        sock.sendall(req.encode('iso-8859-1', errors='ignore'))
+        return _read_http_response_stream(sock, max_bytes=max_bytes, timeout=timeout)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def diagnostics_url_report(url, headers=None, max_bytes=10_000_000, timeout=25):
+    url, parsed = _diag_parse_url(url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    route = route_test_domain(host)
+    result = {
+        'ok': True,
+        'updated_at': time.time(),
+        'url': url,
+        'host': host,
+        'port': port,
+        'scheme': parsed.scheme,
+        'route': route,
+        'tests': {},
+        'conclusion': '',
+        'problems': [],
+        'recommendations': [],
+    }
+    result['tcp_direct'] = _tcp_port_probe(host, port, timeout=3)
+    tests = [
+        ('http_2081', 'HTTP gateway 2081', stream_test_via_auth_gateway),
+        ('socks_2080', 'SOCKS5 gateway 2080', stream_test_via_public_socks_gateway),
+        ('internal_vpn_core', 'Internal VPN-core/sing-box', stream_test_via_internal_socks),
+    ]
+    for key, title, func in tests:
+        try:
+            res = func(url, headers=headers or {}, max_bytes=max_bytes, timeout=timeout)
+            result['tests'][key] = {'ok': bool(res.get('status')), 'title': title, **res}
+        except Exception as e:
+            result['tests'][key] = {'ok': False, 'title': title, 'error': f'{type(e).__name__}: {e}', 'downloaded_bytes': 0, 'complete': False, 'speed_bytes_per_sec': 0}
+    h = result['tests'].get('http_2081') or {}
+    s5 = result['tests'].get('socks_2080') or {}
+    core = result['tests'].get('internal_vpn_core') or {}
+    if h.get('ok') and s5.get('ok'):
+        result['conclusion'] = 'HTTP и SOCKS5 входы отвечают. Если сайт не открывается у клиента, смотрите правила роутера/браузера или конкретный внешний сервис.'
+    elif h.get('ok') and not s5.get('ok'):
+        result['conclusion'] = 'HTTP 2081 работает, SOCKS5 2080 даёт ошибку. Проблема в SOCKS5 gateway/relay или его авторизации.'
+        result['problems'].append('SOCKS5 отличается от HTTP по результату проверки одного URL.')
+        result['recommendations'].append('Проверить trusted/auth SOCKS5, handshake и relay 2080; HTTP 2081 не трогать.')
+    elif not h.get('ok') and core.get('ok'):
+        result['conclusion'] = 'Внутренний VPN-core работает, но внешний gateway даёт ошибку. Проблема на auth-gateway/relay.'
+        result['problems'].append('Внешний gateway не смог открыть URL, хотя внутренний proxy смог.')
+    elif not core.get('ok'):
+        result['conclusion'] = 'URL не проходит даже через внутренний VPN-core. Проблема может быть в выбранной VPN-ноде, маршруте или внешнем сервисе.'
+        result['problems'].append('Internal VPN-core/sing-box не дал успешный ответ.')
+        result['recommendations'].append('Сменить VPN-сервер или проверить, что домен действительно должен идти через VPN.')
+    else:
+        result['conclusion'] = 'Результат неоднозначный. Повторите проверку или используйте другой URL.'
+    return result
+
 def stream_diagnostics_report(url, headers=None, max_bytes=50_000_000, timeout=45):
     started = time.time()
     headers = headers or {}
     result = {'ok': True, 'url': url, 'updated_at': time.time(), 'tests': {}, 'conclusion': '', 'problems': [], 'recommendations': []}
-    for name, func in [('auth_gateway', stream_test_via_auth_gateway), ('internal_socks', stream_test_via_internal_socks)]:
+    for name, func in [('http_gateway', stream_test_via_auth_gateway), ('socks_gateway', stream_test_via_public_socks_gateway), ('internal_socks', stream_test_via_internal_socks)]:
         try:
             result['tests'][name] = {'ok': True, **func(url, headers=headers, max_bytes=max_bytes, timeout=timeout)}
         except Exception as e:
             result['tests'][name] = {'ok': False, 'error': f'{type(e).__name__}: {e}', 'downloaded_bytes': 0, 'complete': False}
-    ag = result['tests'].get('auth_gateway') or {}
+    ag = result['tests'].get('http_gateway') or {}
+    sg = result['tests'].get('socks_gateway') or {}
     core = result['tests'].get('internal_socks') or {}
-    if ag.get('complete') and core.get('complete'):
-        result['conclusion'] = 'Длинный поток стабилен через auth-gateway и внутренний VPN-core.'
+    if ag.get('complete') and sg.get('complete') and core.get('complete'):
+        result['conclusion'] = 'Длинный поток стабилен через HTTP gateway, SOCKS5 gateway и внутренний VPN-core.'
+    elif ag.get('complete') and not sg.get('complete') and core.get('complete'):
+        result['conclusion'] = 'HTTP и внутренний VPN-core стабильны, проблема появляется на SOCKS5 gateway/relay.'
+        result['problems'].append('SOCKS5 2080 не докачивает поток, хотя HTTP 2081 и внутренний proxy справляются.')
+        result['recommendations'].append('Чинить SOCKS5 handshake/relay, не трогая HTTP 2081.')
     elif not ag.get('complete') and core.get('complete'):
         result['conclusion'] = 'Внутренний VPN-core стабилен, обрыв появляется на auth-gateway/relay.'
         result['problems'].append('Внешний gateway обрывает или не докачивает поток, хотя внутренний proxy справляется.')
@@ -7067,6 +7285,8 @@ class Handler(BaseHTTPRequestHandler):
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 force = str((qs.get("force") or ["0"])[0]).lower() in ["1", "true", "yes"]
                 return self.send_json(route_diagnostics_report(force=force))
+            if path == "/api/diagnostics/status":
+                return self.send_json(diagnostics_status_report())
             if path == "/api/routing/test":
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 return self.send_json(route_test_domain((q.get("q") or [""])[0]))
@@ -7348,6 +7568,14 @@ class Handler(BaseHTTPRequestHandler):
                 max_bytes = int(body.get("max_bytes") or 50000000)
                 timeout = int(body.get("timeout") or 45)
                 return self.send_json(stream_diagnostics_report(url, headers=headers, max_bytes=max_bytes, timeout=timeout))
+            if path == "/api/diagnostics/url_test":
+                url = str(body.get("url") or body.get("domain") or "").strip()
+                if not url:
+                    raise ValueError("Введите URL или домен для диагностики")
+                headers = body.get("headers") if isinstance(body.get("headers"), dict) else {}
+                max_bytes = int(body.get("max_bytes") or 10000000)
+                timeout = int(body.get("timeout") or 25)
+                return self.send_json(diagnostics_url_report(url, headers=headers, max_bytes=max_bytes, timeout=timeout))
             if path == "/api/proxy/select":
                 name = body.get("name")
                 if name and name not in {"auto", "direct"}:

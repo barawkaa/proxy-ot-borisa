@@ -21,7 +21,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.0"
+APP_VERSION = "1.25.1"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -5343,15 +5343,22 @@ def get_mtg_client_connections():
     active_stats = active_mtg_users_from_stats()
 
     # Authoritative path: mtg-multi stats by configured secret/user name.
+    # The secret identifies the Telegram user. The real client IP is taken from
+    # TCP peers on the MTProto listening port only when it can be mapped safely.
+    # If several different IPs are connected at the same time, do not guess the
+    # user-to-IP mapping: show the secret identity and keep geo as unavailable.
     if active_stats:
         peer_count = len(real_peers)
+        unique_peer_ips = sorted({str(p.get('ip')) for p in real_peers if p.get('ip') and not is_loopback_ip(str(p.get('ip')))})
+        safe_single_user_ip = unique_peer_ips[0] if len(active_stats) == 1 and len(unique_peer_ips) == 1 else ''
         result = []
         for stat in active_stats:
             user = stat.get('user') or {}
             username = stat.get('username') or user.get('username') or user.get('id') or 'unknown'
+            mapped_ip = safe_single_user_ip
             result.append({
-                'ip': 'telegram:' + str(username),
-                'display_ip': 'Telegram secret: ' + str(username),
+                'ip': mapped_ip or ('telegram:' + str(username)),
+                'display_ip': mapped_ip or ('IP не определён · Telegram secret: ' + str(username)),
                 'source': 'telegram_mtproto',
                 'identity_method': 'telegram_secret',
                 'user_id': user.get('id') or '',
@@ -5363,6 +5370,8 @@ def get_mtg_client_connections():
                 'last_seen': stat.get('last_seen') or '',
                 'telegram_port': telegram_shared_port(),
                 'tcp_peer_count': peer_count,
+                'tcp_peer_ips': unique_peer_ips[:20],
+                'ip_mapping': 'single_active_secret' if mapped_ip else 'secret_only',
                 'unmapped': False,
             })
         return result
@@ -5441,7 +5450,7 @@ def is_connection_to_own_mtproto(conn):
 
 def geo_lookup(ip):
     if str(ip or '').startswith('telegram:'):
-        return {"country": "Telegram MTProto", "region": "secret", "city": "", "isp": "mtg-multi", "org": "local add-on identity", "asn": "", "timezone": "", "lat": None, "lon": None, "source": "telegram_secret"}
+        return {"country": "—", "region": "—", "city": "", "isp": "IP клиента не определён", "org": "Telegram MTProto secret", "asn": "", "timezone": "", "lat": None, "lon": None, "source": "telegram_secret_unmapped"}
     cache = read_json(data_path("geo_cache.json"), {})
     if ip in cache and time.time() - cache[ip].get("ts", 0) < 86400:
         return cache[ip]["data"]
@@ -5850,6 +5859,9 @@ def build_clients(connections):
         if peer.get('display_ip'):
             item['display_ip'] = peer.get('display_ip')
         item['mtproto_connections'] = int(item.get('mtproto_connections') or 0) + int(peer.get('connections') or 1)
+        item['mtproto_identity_method'] = peer.get('identity_method') or ''
+        item['mtproto_ip_mapping'] = peer.get('ip_mapping') or ''
+        item['mtproto_peer_ips'] = peer.get('tcp_peer_ips') or ([] if not peer.get('ip') else [peer.get('ip')])
         item['upload'] += int(peer.get('bytes_in') or 0)
         item['download'] += int(peer.get('bytes_out') or 0)
         item['hosts'].add('Telegram MTProto proxy')
@@ -5901,6 +5913,9 @@ def build_clients(connections):
             'seen_count': item['seen_count'],
             'services': sorted(item.get('services') or []),
             'last_identities': sorted(item.get('identities') or []),
+            'mtproto_identity_method': item.get('mtproto_identity_method') or '',
+            'mtproto_ip_mapping': item.get('mtproto_ip_mapping') or '',
+            'mtproto_peer_ips': item.get('mtproto_peer_ips') or [],
         }
         if became_online:
             log('CLIENT', 'ONLINE', f"Client online: {item.get('registered_name') or item.get('username') or item['ip']}", actor='backend', action='client_online', target=key, extra={'ip': item['ip'], 'services': sorted(item.get('services') or [])})
@@ -5943,6 +5958,9 @@ def build_clients(connections):
             'identities': set(old.get('last_identities') or []),
             'mtproto_connections': 0,
             'tcp_states': {},
+            'mtproto_identity_method': old.get('mtproto_identity_method') or '',
+            'mtproto_ip_mapping': old.get('mtproto_ip_mapping') or '',
+            'mtproto_peer_ips': old.get('mtproto_peer_ips') or [],
             'first_seen': old.get('first_seen'),
             'session_started': old.get('session_started'),
             'last_seen': old.get('last_seen'),
@@ -5968,6 +5986,7 @@ def build_clients(connections):
         item['geo'] = geo_lookup(item.get('ip') or '—')
         if item.get('display_ip'):
             item['display_ip'] = item.get('display_ip')
+        item['display_name'] = item.get('registered_name') or item.get('trusted_name') or item.get('username') or item.get('display_ip') or item.get('ip') or 'Неизвестный клиент'
         item['connections_count'] = len(item.get('connections') or []) + int(item.get('mtproto_connections') or 0)
         item['risk'] = risk_level(item)
         item['registered'] = bool(item.get('registered_user_id')) or bool(item.get('trusted'))

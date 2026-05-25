@@ -408,6 +408,34 @@ assert "Доверенный доступ без авторизации" in html
 assert "trusted_http_proxy_port" not in backend_text and "trusted_socks_proxy_port" not in backend_text
 assert "/api/clients/bulk" in backend_text and "btnApplyClientBulk" in html
 
+
+# v1.25.0 product checks: Security is a top-level tab, not hidden only under settings.
+assert 'data-tab="security"' in html
+assert 'data-security-panel="trusted"' in html and 'data-security-panel="geo"' in html and 'data-security-panel="autoban"' in html
+assert 'data-security-panel="blocks"' in html and 'data-security-panel="events"' in html
+assert 'Раздел безопасности вынесен' not in html
+assert 'Настройки → Безопасность' not in html
+assert 'trafficSourcesBox' in html and 'renderTrafficSources' in html
+assert 'traffic_sources' in backend_text and callable(getattr(backend, 'build_traffic_sources'))
+assert callable(getattr(backend, 'connections_for_ui')) and callable(getattr(backend, 'gateway_connections_for_ui'))
+# Synthetic gateway connections must expose the real external client, not only 127.0.0.1.
+_old_snapshot = backend.gateway_active_snapshot
+try:
+    backend.gateway_active_snapshot = lambda: [{"key":"gw1","ip":"5.17.17.147","service":"HTTP proxy","trusted":True,"destination":"ifconfig.me","started_at":1,"last_seen":2}]
+    _ui_conns = backend.connections_for_ui([])
+    assert _ui_conns and _ui_conns[0]["metadata"]["sourceIP"] == "5.17.17.147", _ui_conns
+    assert _ui_conns[0]["metadata"]["access"] == "trusted_ip_bypass", _ui_conns
+finally:
+    backend.gateway_active_snapshot = _old_snapshot
+# Traffic by source must not collapse all providers into one unexplained bar.
+_ts = backend.build_traffic_sources(
+    {"manual_sources":[{"id":"m1","name":"Manual VPS","limit_bytes":100,"used_bytes":40}]},
+    [],
+    [{"id":"sub1","name":"Main sub","type":"subscription","servers_count":14,"enabled":True,"use_in_auto":True}],
+    {"traffic":{"total":1000,"upload":100,"download":200},"updated_at":123},
+)
+assert _ts["summary"]["auto_sources"] == 1 and _ts["summary"]["manual_sources"] == 1, _ts
+
 # Dockerfile build sanity. For Home Assistant local builds we intentionally
 # use the upstream prebuilt :latest images for sing-box and mtg-multi.
 # Building mtg-multi from source inside HA proved fragile because upstream

@@ -21,7 +21,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.24.4"
+APP_VERSION = "1.25.0"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -3435,6 +3435,49 @@ def delete_manual_traffic_source(source_id):
     return sources
 
 
+def build_traffic_sources(traffic=None, servers=None, server_sources=None, subscription_info=None):
+    """Build a human-readable traffic model by server source."""
+    traffic = traffic if isinstance(traffic, dict) else load_traffic()
+    servers = servers if isinstance(servers, list) else load_servers()
+    source_summary = server_sources_summary(servers).get("sources", []) if server_sources is None else server_sources
+    subscription_info = subscription_info if isinstance(subscription_info, dict) else load_subscription_info()
+    provider_traffic = (subscription_info.get("traffic") or {}) if isinstance(subscription_info, dict) else {}
+    provider_limit = int(provider_traffic.get("total") or 0)
+    provider_used = int(provider_traffic.get("upload") or 0) + int(provider_traffic.get("download") or 0)
+    settings = load_settings()
+    main_url = str(settings.get("subscription_url") or "").strip()
+    subscription_sources = [s for s in source_summary if str(s.get("type") or "") == "subscription"]
+    provider_source_id = None
+    if provider_limit and subscription_sources:
+        for src in subscription_sources:
+            if main_url and str(src.get("url") or "").strip() == main_url:
+                provider_source_id = src.get("id")
+                break
+        provider_source_id = provider_source_id or subscription_sources[0].get("id")
+    items = []
+    for src in source_summary:
+        src_id = str(src.get("id") or "")
+        mode = "unknown"; limit = 0; used = 0
+        note = "Лимит не задан. Можно добавить ручной учёт ниже."
+        if provider_source_id and src_id == str(provider_source_id):
+            mode = "subscription_auto"; limit = provider_limit; used = provider_used
+            note = "Автоматически из основной подписки провайдера."
+        elif src.get("type") in {"manual", "legacy", "json", "json_import"}:
+            mode = "manual_or_unknown"
+            note = "Источник без автоматического трафика: задай ручной лимит, если у провайдера есть ограничение."
+        elif src.get("type") == "subscription":
+            mode = "subscription_unknown"
+            note = "Подписка есть, но автоматический трафик для неё не получен. Можно вести вручную."
+        left = max(0, limit - used) if limit else 0
+        pct = min(100, used / limit * 100) if limit else 0
+        items.append({"id": src_id, "name": src.get("name") or src_id or "Источник", "type": src.get("type") or "unknown", "servers_count": int(src.get("servers_count") or 0), "enabled": bool(src.get("enabled", True)), "use_in_auto": bool(src.get("use_in_auto", True)), "traffic_mode": mode, "limit_bytes": limit, "used_bytes": used, "left_bytes": left, "percent": pct, "updated_at": subscription_info.get("updated_at") if mode == "subscription_auto" else 0, "note": note})
+    manual = normalize_manual_traffic_sources(traffic)
+    for src in manual:
+        limit = int(src.get("limit_bytes") or 0); used = int(src.get("used_bytes") or 0)
+        items.append({"id": "manual_" + str(src.get("id") or ""), "name": src.get("name") or "Ручной лимит", "type": "manual_traffic", "servers_count": 0, "enabled": True, "use_in_auto": False, "traffic_mode": "manual", "limit_bytes": limit, "used_bytes": used, "left_bytes": max(0, limit - used) if limit else 0, "percent": min(100, used / limit * 100) if limit else 0, "updated_at": src.get("updated_at") or 0, "note": src.get("note") or "Ручной учёт, не связан автоматически с конкретной подпиской.", "manual_source_id": src.get("id")})
+    return {"items": items, "summary": {"total_sources": len(source_summary), "auto_sources": len([x for x in items if x.get("traffic_mode") == "subscription_auto"]), "manual_sources": len(manual), "unknown_sources": len([x for x in items if x.get("traffic_mode") in {"unknown", "manual_or_unknown", "subscription_unknown"}])}}
+
+
 def load_client_limits():
     return read_json(data_path("client_limits.json"), {})
 
@@ -4546,6 +4589,51 @@ def gateway_activity_end(key):
 def gateway_active_snapshot():
     with GATEWAY_ACTIVE_LOCK:
         return [dict(v) for v in GATEWAY_ACTIVE.values()]
+
+def gateway_connections_for_ui():
+    """Synthetic connection rows for the UI.
+
+    The auth-gateway relays real clients to internal localhost ports, so sing-box
+    sees loopback as the source. These synthetic rows keep the Connections page
+    focused on the actual external client and destination.
+    """
+    rows = []
+    now = time.time()
+    for gw in gateway_active_snapshot():
+        ip = gw.get("ip") or "—"
+        if not ip or ip == "—" or is_loopback_ip(ip):
+            continue
+        service = gw.get("service") or "HTTP/SOCKS"
+        dest = gw.get("destination") or "proxy-gateway"
+        trusted = bool(gw.get("trusted"))
+        rows.append({
+            "id": gw.get("key") or f"gateway-{ip}-{now}",
+            "network": "tcp",
+            "type": service,
+            "upload": int(gw.get("upload") or 0),
+            "download": int(gw.get("download") or 0),
+            "chains": ["auth-gateway", "Proxy"],
+            "metadata": {
+                "sourceIP": ip,
+                "destination": dest,
+                "host": dest,
+                "network": "tcp",
+                "type": service,
+                "user": gw.get("auth_user") or ("trusted_ip_bypass" if trusted else ""),
+                "access": "trusted_ip_bypass" if trusted else "auth_gateway",
+                "gateway": True,
+            },
+            "gateway": True,
+            "trusted_bypass": trusted,
+            "started_at": gw.get("started_at") or now,
+            "last_seen": gw.get("last_seen") or now,
+        })
+    return rows
+
+
+def connections_for_ui(conns):
+    return list(conns or []) + gateway_connections_for_ui()
+
 
 def read_exact(sock, n):
     data = b''
@@ -6319,7 +6407,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(get_proxies())
             if path == "/api/connections":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                conns = get_monitored_connections(force=(qs.get("force", ["0"])[0] == "1"), run_autoban=True); return self.send_json({"connections": conns, "updated_at": connections_cache.get("updated_at", 0)})
+                conns = get_monitored_connections(force=(qs.get("force", ["0"])[0] == "1"), run_autoban=True); return self.send_json({"connections": connections_for_ui(conns), "updated_at": connections_cache.get("updated_at", 0), "gateway_connections": len(gateway_connections_for_ui())})
             if path == "/api/clients":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 conns = get_monitored_connections(force=(qs.get("force", ["0"])[0] == "1"), run_autoban=True); return self.send_json({"clients": build_clients(conns), "updated_at": connections_cache.get("updated_at", 0)})
@@ -6386,6 +6474,9 @@ class Handler(BaseHTTPRequestHandler):
                     tr["provider_updated_at"] = sub.get("updated_at") or 0
                 else:
                     tr["source"] = "local"
+                ts = build_traffic_sources(tr, load_servers(), None, sub)
+                tr["traffic_sources"] = ts.get("items", [])
+                tr["traffic_sources_summary"] = ts.get("summary", {})
                 return self.send_json(tr)
             if path == "/api/client_limits":
                 return self.send_json({"limits": load_client_limits()})

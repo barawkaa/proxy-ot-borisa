@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.8"
+APP_VERSION = "1.25.9"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -4917,7 +4917,7 @@ def read_until(sock, marker=b'\r\n\r\n', limit=65536):
     return data
 
 
-def relay_pair(a, b, activity_key=None):
+def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
     """Relay two TCP sockets reliably for long-lived streams.
 
     v1.25.3 used non-blocking sockets with sendall(). On a loaded Raspberry Pi or
@@ -4954,6 +4954,12 @@ def relay_pair(a, b, activity_key=None):
                 if not data:
                     break
                 dst.sendall(data)
+                try:
+                    tap = upload_tap if direction == 'upload' else download_tap
+                    if tap:
+                        tap(data)
+                except Exception as tap_error:
+                    log('GATEWAY', 'TAP_ERROR', f'Relay telemetry tap failed: {type(tap_error).__name__}: {tap_error}', actor='gateway', action='relay_tap_error')
                 if activity_key:
                     if direction == 'upload':
                         gateway_activity_add_bytes(activity_key, upload=len(data), download=0)
@@ -5262,6 +5268,95 @@ def _connect_internal_socks_with_raw_request(req):
         raise
 
 
+
+class _Socks5DestinationTap:
+    """Parse the first SOCKS5 CONNECT request while bytes are transparently relayed.
+
+    This is intentionally non-invasive: it never consumes, rewrites or delays the
+    client stream. Trusted routers (Keenetic and similar) are especially sensitive
+    to SOCKS5 handshake details, so telemetry must observe the stream instead of
+    terminating and recreating the SOCKS session.
+    """
+    def __init__(self, activity_key):
+        self.activity_key = activity_key
+        self.buf = b''
+        self.done = False
+
+    def __call__(self, data):
+        if self.done or not data:
+            return
+        self.buf = (self.buf + data)[:1024]
+        try:
+            parsed = self._try_parse(self.buf)
+        except Exception:
+            parsed = None
+        if parsed:
+            host, port = parsed
+            if host and port:
+                gateway_activity_update_destination(self.activity_key, f'{host}:{port}', service='SOCKS5 proxy')
+            self.done = True
+
+    @staticmethod
+    def _try_parse(buf):
+        if len(buf) < 4:
+            return None
+        # The upload stream after method negotiation starts with the SOCKS5 request.
+        # VER CMD RSV ATYP ... PORT
+        if buf[0] != 5:
+            return None
+        cmd = buf[1]
+        if cmd != 1:  # only CONNECT is supported/interesting for our proxy use-case
+            return None
+        atyp = buf[3]
+        pos = 4
+        host = ''
+        if atyp == 1:
+            if len(buf) < pos + 4 + 2:
+                return None
+            host = socket.inet_ntop(socket.AF_INET, buf[pos:pos+4])
+            pos += 4
+        elif atyp == 3:
+            if len(buf) < pos + 1:
+                return None
+            ln = buf[pos]
+            pos += 1
+            if len(buf) < pos + ln + 2:
+                return None
+            host = _decode_socks_domain(buf[pos:pos+ln])
+            pos += ln
+        elif atyp == 4:
+            if len(buf) < pos + 16 + 2:
+                return None
+            host = socket.inet_ntop(socket.AF_INET6, buf[pos:pos+16])
+            pos += 16
+        else:
+            return None
+        port = int.from_bytes(buf[pos:pos+2], 'big')
+        return host, port
+
+
+def _trusted_socks_passthrough(client, ip, greeting, methods):
+    """Restore the v1.25.2 transparent SOCKS5 path for trusted routers.
+
+    v1.25.2 forwarded the SOCKS5 handshake to the internal sing-box SOCKS inbound
+    and relayed bytes unchanged. Later versions parsed/recreated the handshake to
+    improve UI destinations, but that broke some router/SOCKS clients. This path
+    keeps the stable transparent behaviour and adds a passive tap for destination
+    telemetry.
+    """
+    upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
+    try:
+        upstream.sendall(greeting + methods)
+        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=True, auth_user='', destination='proxy-gateway')
+        tap = _Socks5DestinationTap(activity_key)
+        return upstream, '', activity_key, tap
+    except Exception:
+        try:
+            upstream.close()
+        except Exception:
+            pass
+        raise
+
 def socks_auth_exchange(client, ip):
     greeting = read_exact(client, 2)
     if greeting[0] != 5:
@@ -5269,29 +5364,35 @@ def socks_auth_exchange(client, ip):
     methods = read_exact(client, greeting[1])
     trusted = is_trusted_bypass_ip(ip, 'socks')
     auth_required = bool(load_options().get('socks_auth_enabled')) and not trusted
-    username = ''
-    if auth_required:
-        if 2 not in methods:
-            client.sendall(b'\x05\xff')
-            raise OSError('socks auth method not offered')
-        client.sendall(b'\x05\x02')
-        ver = read_exact(client, 1)
-        if ver != b'\x01':
-            raise OSError('bad socks auth version')
-        ulen = read_exact(client, 1)[0]
-        username = read_exact(client, ulen).decode('utf-8', errors='ignore')
-        plen = read_exact(client, 1)[0]
-        password = read_exact(client, plen).decode('utf-8', errors='ignore')
-        if not check_proxy_credentials('socks', username, password):
-            client.sendall(b'\x01\x01')
-            log('SECURITY', 'PROXY_AUTH_FAILED', 'SOCKS5 proxy auth failed', actor='gateway', action='socks_auth_failed', target=ip, extra={'username': username})
-            raise OSError('socks auth failed')
-        client.sendall(b'\x01\x00')
-    else:
+
+    # Critical compatibility path: trusted routers must use a transparent SOCKS5
+    # passthrough exactly like the stable v1.25.2 implementation. Do not answer the
+    # handshake here and do not recreate the CONNECT request. The internal sing-box
+    # SOCKS inbound will negotiate directly with the client through the relay.
+    if not auth_required:
         if 0 not in methods:
             client.sendall(b'\x05\xff')
             raise OSError('socks no-auth method not offered')
-        client.sendall(b'\x05\x00')
+        return _trusted_socks_passthrough(client, ip, greeting, methods)
+
+    username = ''
+    if 2 not in methods:
+        client.sendall(b'\x05\xff')
+        raise OSError('socks auth method not offered')
+    client.sendall(b'\x05\x02')
+    ver = read_exact(client, 1)
+    if ver != b'\x01':
+        raise OSError('bad socks auth version')
+    ulen = read_exact(client, 1)[0]
+    username = read_exact(client, ulen).decode('utf-8', errors='ignore')
+    plen = read_exact(client, 1)[0]
+    password = read_exact(client, plen).decode('utf-8', errors='ignore')
+    if not check_proxy_credentials('socks', username, password):
+        client.sendall(b'\x01\x01')
+        log('SECURITY', 'PROXY_AUTH_FAILED', 'SOCKS5 proxy auth failed', actor='gateway', action='socks_auth_failed', target=ip, extra={'username': username})
+        raise OSError('socks auth failed')
+    client.sendall(b'\x01\x00')
+
     req, host, port = _read_socks_connect_request(client)
     if not host or not port:
         try:
@@ -5299,11 +5400,6 @@ def socks_auth_exchange(client, ip):
         except Exception:
             pass
         raise OSError('socks request without destination')
-    # Do not forward the already-read external SOCKS request verbatim. Some clients
-    # and routers are sensitive to bind-address details returned by the upstream
-    # SOCKS server. We use the parsed destination to open the internal SOCKS5
-    # connection and send a standard success reply to the client. This keeps the
-    # public 2080 gateway transparent and stable, while still preserving telemetry.
     try:
         upstream = socks5_connect_via_internal(host, int(port))
     except Exception:
@@ -5313,18 +5409,16 @@ def socks_auth_exchange(client, ip):
             pass
         raise
     client.sendall(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
-    return upstream, username, host, port
+    activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=False, auth_user=username, destination=f'{host}:{port}')
+    return upstream, username, activity_key, None
 
 
 def handle_socks_gateway(client, addr):
     ip = addr[0]
     activity_key = None
     try:
-        trusted = is_trusted_bypass_ip(ip, 'socks')
-        upstream, auth_user, host, port = socks_auth_exchange(client, ip)
-        destination = f'{host}:{port}' if host and port else (host or 'proxy-gateway')
-        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user, destination=destination)
-        relay_pair(client, upstream, activity_key=activity_key)
+        upstream, auth_user, activity_key, upload_tap = socks_auth_exchange(client, ip)
+        relay_pair(client, upstream, activity_key=activity_key, upload_tap=upload_tap)
     except Exception as e:
         log_exception('GATEWAY', 'SOCKS_ERROR', e, actor='gateway', target=ip)
         try:
@@ -5334,7 +5428,6 @@ def handle_socks_gateway(client, addr):
     finally:
         if activity_key:
             gateway_activity_end(activity_key)
-
 
 def _gateway_loop(service, listen_port, handler):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

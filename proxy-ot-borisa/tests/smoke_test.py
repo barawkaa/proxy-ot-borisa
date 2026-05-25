@@ -436,6 +436,36 @@ _ts = backend.build_traffic_sources(
 )
 assert _ts["summary"]["auto_sources"] == 1 and _ts["summary"]["manual_sources"] == 1, _ts
 
+# v1.25.2: provider traffic must survive old/legacy source metadata.
+_old_load_settings_ts = backend.load_settings
+_old_load_subscription_servers_ts = backend.load_subscription_servers
+try:
+    backend.load_settings = lambda: {"subscription_url": "https://example.test/sub"}
+    backend.load_subscription_servers = lambda: {"servers": [{"tag": f"s{i}"} for i in range(14)]}
+    _legacy_ts = backend.build_traffic_sources(
+        {"manual_sources": []},
+        [{"tag": f"s{i}", "source_id": "legacy", "source_type": "legacy"} for i in range(14)],
+        [
+            {"id":"legacy","name":"Ранее добавленные серверы","type":"legacy","servers_count":14,"enabled":True,"use_in_auto":True},
+            {"id":"manual","name":"Ручные серверы","type":"manual","servers_count":0,"enabled":True,"use_in_auto":True},
+        ],
+        {"url":"https://example.test/sub","servers_count":14,"traffic":{"total":1000,"upload":100,"download":200},"updated_at":123},
+    )
+    assert _legacy_ts["summary"]["auto_sources"] == 1, _legacy_ts
+    assert any(x.get("id") == "legacy" and x.get("traffic_mode") == "subscription_auto" for x in _legacy_ts["items"]), _legacy_ts
+    _fallback_ts = backend.build_traffic_sources(
+        {"manual_sources": []}, [],
+        [{"id":"json_import","name":"JSON","type":"json","servers_count":2,"enabled":True,"use_in_auto":True}],
+        {"url":"https://different.test/sub","servers_count":14,"traffic":{"total":1000,"upload":100,"download":200},"updated_at":123},
+    )
+    assert _fallback_ts["summary"]["auto_sources"] == 1, _fallback_ts
+finally:
+    backend.load_settings = _old_load_settings_ts
+    backend.load_subscription_servers = _old_load_subscription_servers_ts
+
+assert 'subscriptionSourcesMiniHtml' in html and 'Трафик по источникам серверов:' in html
+assert '"traffic": traffic' in backend_text and 'subscription_traffic_refresh' in backend_text
+
 # Dockerfile build sanity. For Home Assistant local builds we intentionally
 # use the upstream prebuilt :latest images for sing-box and mtg-multi.
 # Building mtg-multi from source inside HA proved fragile because upstream

@@ -483,6 +483,7 @@ async function refreshSubscriptionTrafficQuiet(){
   try{
     const r=await post('/api/subscription/refresh_traffic',{});
     state.subscriptionInfo=r.subscription_info||state.subscriptionInfo;
+    if(r.traffic)state.traffic={...(state.traffic||{}),...r.traffic,provider_checked_now:true};
     return true;
   }catch(e){
     state.lastTrafficRefreshError=e.message||String(e);
@@ -548,9 +549,19 @@ function subscriptionTrafficHtml(info,showProgress=true){
   const totalText=total?fmtBytes(total):'не указан / безлимит';
   return `<div class="stats"><div class="stat"><div class="label">Статус</div><div class="value">${esc(info.status||'—')}</div></div><div class="stat"><div class="label">Серверов</div><div class="value">${esc(info.servers_count||0)}</div></div><div class="stat"><div class="label">Использовано</div><div class="value">${fmtBytes(used)}</div></div><div class="stat"><div class="label">Осталось</div><div class="value">${leftText}</div></div><div class="stat"><div class="label">Всего</div><div class="value">${totalText}</div></div><div class="stat"><div class="label">До</div><div class="value small">${expire}</div></div></div>${showProgress?`<div class="progress" style="margin-top:12px"><div class="bar" style="width:${pct}%"></div></div>`:''}<div class="small muted" style="margin-top:8px">Источник трафика: ${esc(info.traffic_source||tr.source||'не найден')} · User-Agent: ${esc(info.user_agent||'—')} · канал: ${esc(info.via||'—')} · обновлено: ${fmtTime(info.updated_at)}</div><div class="small muted tag" style="margin-top:6px">URL: ${esc(info.url||state.subscriptionUrl||'—')}</div>${(info.errors||[]).length?'<div class="bad small" style="margin-top:8px">Ошибки: '+esc((info.errors||[]).slice(0,3).join(' | '))+'</div>':''}`;
 }
+function subscriptionSourcesMiniHtml(){
+  const items=((state.traffic||{}).traffic_sources||[]).filter(x=>x.traffic_mode==='subscription_auto'||x.type==='subscription'||x.type==='legacy'||x.type==='json'||x.type==='manual');
+  if(!items.length)return '<div class="small muted" style="margin-top:10px">Трафик по источникам серверов появится после загрузки вкладки «Трафик» или обновления данных.</div>';
+  const rows=items.slice(0,8).map(x=>{
+    const limit=Number(x.limit_bytes||0), used=Number(x.used_bytes||0), left=Math.max(0,limit-used);
+    const mode=x.traffic_mode==='subscription_auto'?'авто из подписки':(x.traffic_mode==='manual'?'ручной':'лимит не задан');
+    return `<tr><td><b>${esc(x.name||'Источник')}</b><br><span class="muted small">${esc(sourceTypeLabel(x.type))} · ${esc(mode)}</span></td><td>${esc(x.servers_count||0)}</td><td>${limit?fmtBytes(limit):'—'}</td><td>${fmtBytes(used)}</td><td>${limit?fmtBytes(left):'—'}</td><td class="small muted">${esc(x.note||'')}</td></tr>`
+  }).join('');
+  return `<div class="small muted" style="margin-top:12px"><b>Трафик по источникам серверов:</b></div><table style="margin-top:6px"><thead><tr><th>Источник</th><th>Серверов</th><th>Лимит</th><th>Использовано</th><th>Осталось</th><th>Комментарий</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
 function renderSubscriptionInfo(){
   const info=state.subscriptionInfo||{};
-  const html=subscriptionTrafficHtml(info);
+  const html=subscriptionTrafficHtml(info)+subscriptionSourcesMiniHtml();
   if($('subscriptionBox')) $('subscriptionBox').innerHTML=html;
   if($('trafficSubscriptionBox')) $('trafficSubscriptionBox').innerHTML=subscriptionTrafficHtml(info,false);
 }

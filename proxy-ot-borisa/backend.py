@@ -21,7 +21,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.1"
+APP_VERSION = "1.25.2"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -3435,34 +3435,116 @@ def delete_manual_traffic_source(source_id):
     return sources
 
 
+def normalized_source_url(value):
+    """Normalize subscription/source URL only for internal matching, never for display."""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(value)
+        scheme = (parsed.scheme or "").lower()
+        netloc = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+        query = parsed.query or ""
+        if scheme and netloc:
+            return urllib.parse.urlunparse((scheme, netloc, path, "", query, ""))
+    except Exception:
+        pass
+    return value.rstrip("/")
+
+
+def provider_traffic_numbers(subscription_info):
+    traffic = (subscription_info.get("traffic") or {}) if isinstance(subscription_info, dict) else {}
+    total = int(traffic.get("total") or 0)
+    upload = int(traffic.get("upload") or 0)
+    download = int(traffic.get("download") or 0)
+    used = int(traffic.get("used") or (upload + download) or 0)
+    return traffic, total, used
+
+
+def find_provider_traffic_source_id(source_summary, subscription_info, servers=None):
+    """Attach provider traffic to the best matching source, including old legacy installs.
+
+    v1.25.1 could show a real subscription as "Источник без автоматического трафика"
+    when servers were imported before source metadata existed. Matching is intentionally
+    defensive: exact URL first, then subscription source, then the only populated source,
+    then server count, then legacy fallback.
+    """
+    source_summary = [s for s in (source_summary or []) if isinstance(s, dict)]
+    subscription_info = subscription_info if isinstance(subscription_info, dict) else {}
+    servers = servers if isinstance(servers, list) else []
+    traffic, total, used = provider_traffic_numbers(subscription_info)
+    if not (total or used or traffic):
+        return None, ""
+
+    settings = load_settings()
+    urls = {
+        normalized_source_url(settings.get("subscription_url")),
+        normalized_source_url(subscription_info.get("url")),
+        normalized_source_url(subscription_info.get("source_url")),
+    }
+    urls.discard("")
+
+    for src in source_summary:
+        if normalized_source_url(src.get("url")) in urls:
+            return src.get("id"), "url"
+
+    subscription_sources = [s for s in source_summary if str(s.get("type") or "") == "subscription"]
+    populated_subscription_sources = [s for s in subscription_sources if int(s.get("servers_count") or 0) > 0]
+    if len(populated_subscription_sources) == 1:
+        return populated_subscription_sources[0].get("id"), "single_subscription_source"
+    if len(subscription_sources) == 1:
+        return subscription_sources[0].get("id"), "subscription_source"
+
+    populated = [s for s in source_summary if int(s.get("servers_count") or 0) > 0]
+    if len(populated) == 1:
+        return populated[0].get("id"), "single_populated_source"
+
+    expected_count = int(subscription_info.get("servers_count") or 0)
+    if expected_count <= 0:
+        try:
+            expected_count = len(load_subscription_servers().get("servers") or [])
+        except Exception:
+            expected_count = 0
+    if expected_count > 0:
+        matches = [s for s in source_summary if int(s.get("servers_count") or 0) == expected_count]
+        if len(matches) == 1:
+            return matches[0].get("id"), "server_count"
+        legacy_matches = [s for s in matches if str(s.get("id") or "") == "legacy" or str(s.get("type") or "") == "legacy"]
+        if legacy_matches:
+            return legacy_matches[0].get("id"), "legacy_server_count"
+
+    if subscription_sources:
+        return subscription_sources[0].get("id"), "first_subscription_source"
+    legacy = next((s for s in source_summary if str(s.get("id") or "") == "legacy" and int(s.get("servers_count") or 0) > 0), None)
+    if legacy:
+        return legacy.get("id"), "legacy_fallback"
+    return None, "unmatched"
+
+
 def build_traffic_sources(traffic=None, servers=None, server_sources=None, subscription_info=None):
     """Build a human-readable traffic model by server source."""
     traffic = traffic if isinstance(traffic, dict) else load_traffic()
     servers = servers if isinstance(servers, list) else load_servers()
     source_summary = server_sources_summary(servers).get("sources", []) if server_sources is None else server_sources
     subscription_info = subscription_info if isinstance(subscription_info, dict) else load_subscription_info()
-    provider_traffic = (subscription_info.get("traffic") or {}) if isinstance(subscription_info, dict) else {}
-    provider_limit = int(provider_traffic.get("total") or 0)
-    provider_used = int(provider_traffic.get("upload") or 0) + int(provider_traffic.get("download") or 0)
-    settings = load_settings()
-    main_url = str(settings.get("subscription_url") or "").strip()
-    subscription_sources = [s for s in source_summary if str(s.get("type") or "") == "subscription"]
-    provider_source_id = None
-    if provider_limit and subscription_sources:
-        for src in subscription_sources:
-            if main_url and str(src.get("url") or "").strip() == main_url:
-                provider_source_id = src.get("id")
-                break
-        provider_source_id = provider_source_id or subscription_sources[0].get("id")
+    provider_traffic, provider_limit, provider_used = provider_traffic_numbers(subscription_info)
+    provider_source_id, match_reason = find_provider_traffic_source_id(source_summary, subscription_info, servers)
+    has_provider_traffic = bool(provider_traffic) or bool(provider_limit) or bool(provider_used)
+
     items = []
+    matched_provider = False
     for src in source_summary:
         src_id = str(src.get("id") or "")
         mode = "unknown"; limit = 0; used = 0
         note = "Лимит не задан. Можно добавить ручной учёт ниже."
-        if provider_source_id and src_id == str(provider_source_id):
-            mode = "subscription_auto"; limit = provider_limit; used = provider_used
-            note = "Автоматически из основной подписки провайдера."
-        elif src.get("type") in {"manual", "legacy", "json", "json_import"}:
+        if has_provider_traffic and provider_source_id and src_id == str(provider_source_id):
+            mode = "subscription_auto"; limit = provider_limit; used = provider_used; matched_provider = True
+            if match_reason in {"legacy_server_count", "legacy_fallback", "single_populated_source", "server_count"}:
+                note = "Автоматически из текущей подписки провайдера. Источник сопоставлен с ранее добавленными серверами."
+            else:
+                note = "Автоматически из текущей подписки провайдера."
+        elif src.get("type") in {"manual", "legacy", "json", "json_import", "links", "config"}:
             mode = "manual_or_unknown"
             note = "Источник без автоматического трафика: задай ручной лимит, если у провайдера есть ограничение."
         elif src.get("type") == "subscription":
@@ -3470,7 +3552,14 @@ def build_traffic_sources(traffic=None, servers=None, server_sources=None, subsc
             note = "Подписка есть, но автоматический трафик для неё не получен. Можно вести вручную."
         left = max(0, limit - used) if limit else 0
         pct = min(100, used / limit * 100) if limit else 0
-        items.append({"id": src_id, "name": src.get("name") or src_id or "Источник", "type": src.get("type") or "unknown", "servers_count": int(src.get("servers_count") or 0), "enabled": bool(src.get("enabled", True)), "use_in_auto": bool(src.get("use_in_auto", True)), "traffic_mode": mode, "limit_bytes": limit, "used_bytes": used, "left_bytes": left, "percent": pct, "updated_at": subscription_info.get("updated_at") if mode == "subscription_auto" else 0, "note": note})
+        items.append({"id": src_id, "name": src.get("name") or src_id or "Источник", "type": src.get("type") or "unknown", "servers_count": int(src.get("servers_count") or 0), "enabled": bool(src.get("enabled", True)), "use_in_auto": bool(src.get("use_in_auto", True)), "traffic_mode": mode, "limit_bytes": limit, "used_bytes": used, "left_bytes": left, "percent": pct, "updated_at": subscription_info.get("updated_at") if mode == "subscription_auto" else 0, "note": note, "traffic_match": match_reason if mode == "subscription_auto" else ""})
+
+    if has_provider_traffic and not matched_provider:
+        limit = provider_limit; used = provider_used
+        left = max(0, limit - used) if limit else 0
+        pct = min(100, used / limit * 100) if limit else 0
+        items.insert(0, {"id": "subscription_current", "name": "Трафик текущей подписки", "type": "subscription", "servers_count": int(subscription_info.get("servers_count") or 0), "enabled": True, "use_in_auto": True, "traffic_mode": "subscription_auto", "limit_bytes": limit, "used_bytes": used, "left_bytes": left, "percent": pct, "updated_at": subscription_info.get("updated_at") or 0, "note": "Провайдер отдал автоматический трафик, но источник серверов не удалось однозначно сопоставить. Данные показаны отдельно, чтобы лимит не пропал.", "traffic_match": match_reason or "fallback_unmatched"})
+
     manual = normalize_manual_traffic_sources(traffic)
     for src in manual:
         limit = int(src.get("limit_bytes") or 0); used = int(src.get("used_bytes") or 0)
@@ -7140,7 +7229,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Ссылка подписки не сохранена")
                 parsed = fetch_and_parse_subscription(url, timeout=30)
                 info = save_subscription_info(parsed.get("subscription_info") or {})
-                return self.send_json({"ok": True, "subscription_info": info})
+                traffic = load_traffic()
+                traffic["manual_sources"] = normalize_manual_traffic_sources(traffic)
+                ts = build_traffic_sources(traffic, load_servers(), None, info)
+                traffic["subscription_info"] = info
+                traffic["traffic_sources"] = ts.get("items", [])
+                traffic["traffic_sources_summary"] = ts.get("summary", {})
+                log("TRAFFIC", "REFRESH", "Subscription traffic refreshed", actor="ui", action="subscription_traffic_refresh", target=url, extra={"traffic_found": bool((info.get("traffic") or {})), "auto_sources": ts.get("summary", {}).get("auto_sources")})
+                return self.send_json({"ok": True, "subscription_info": info, "traffic": traffic})
             if path == "/api/client_limits":
                 key = str(body.get("key") or "")
                 if not key:

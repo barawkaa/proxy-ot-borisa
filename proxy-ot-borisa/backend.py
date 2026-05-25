@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.5"
+APP_VERSION = "1.25.6"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -4611,6 +4611,9 @@ AUTH_GATEWAY_THREADS = []
 AUTH_GATEWAY_STOP = threading.Event()
 GATEWAY_ACTIVE_LOCK = threading.Lock()
 GATEWAY_ACTIVE = {}
+GATEWAY_RECENT = {}
+GATEWAY_RECENT_TTL_SECONDS = 90
+GATEWAY_RECENT_MAX_RECORDS = 300
 
 
 def ip_matches_cidrs(ip, cidrs):
@@ -4698,14 +4701,43 @@ def gateway_activity_update_destination(key, destination='', service=None):
             item["service"] = service
 
 
+def _prune_gateway_recent_locked(now=None):
+    now = now or time.time()
+    for k, v in list(GATEWAY_RECENT.items()):
+        if now - float(v.get("last_seen") or v.get("ended_at") or 0) > GATEWAY_RECENT_TTL_SECONDS:
+            GATEWAY_RECENT.pop(k, None)
+    if len(GATEWAY_RECENT) > GATEWAY_RECENT_MAX_RECORDS:
+        keep = sorted(GATEWAY_RECENT.items(), key=lambda kv: float((kv[1] or {}).get("last_seen") or 0), reverse=True)[:GATEWAY_RECENT_MAX_RECORDS]
+        GATEWAY_RECENT.clear()
+        GATEWAY_RECENT.update(dict(keep))
+
+
 def gateway_activity_end(key):
+    if not key:
+        return
+    now = time.time()
     with GATEWAY_ACTIVE_LOCK:
-        GATEWAY_ACTIVE.pop(key, None)
+        item = GATEWAY_ACTIVE.pop(key, None)
+        if item:
+            item = dict(item)
+            item["ended_at"] = now
+            item["recent"] = True
+            # Keep completed gateway connections briefly. The UI polling interval can
+            # easily miss short HTTP/SOCKS requests after they close, which made real
+            # clients disappear while raw internal sing-box rows stayed visible.
+            if item.get("destination") and item.get("destination") != "proxy-gateway" or int(item.get("upload") or 0) or int(item.get("download") or 0):
+                GATEWAY_RECENT[key] = item
+        _prune_gateway_recent_locked(now)
 
 
-def gateway_active_snapshot():
+def gateway_active_snapshot(include_recent=True):
+    now = time.time()
     with GATEWAY_ACTIVE_LOCK:
-        return [dict(v) for v in GATEWAY_ACTIVE.values()]
+        _prune_gateway_recent_locked(now)
+        items = [dict(v, recent=False, active=True) for v in GATEWAY_ACTIVE.values()]
+        if include_recent:
+            items.extend([dict(v, active=False, recent=True) for v in GATEWAY_RECENT.values()])
+        return items
 
 
 def is_gateway_service_destination(destination):
@@ -4747,7 +4779,7 @@ def gateway_connections_for_ui():
     """
     rows = []
     now = time.time()
-    for gw in gateway_active_snapshot():
+    for gw in _gateway_snapshot_for_ui():
         ip = gw.get("ip") or "—"
         if not ip or ip == "—" or is_loopback_ip(ip):
             continue
@@ -4782,18 +4814,85 @@ def gateway_connections_for_ui():
                 "route_display": " → ".join(route_info.get("chains") or ["auth-gateway", "Proxy"]),
                 "route_final": route_info.get("final"),
                 "route_warning": route_info.get("warning"),
+                "recent": bool(gw.get("recent")),
+                "active": not bool(gw.get("recent")),
             },
             "gateway": True,
             "service_connection": bool(route_info.get("service_connection")),
             "trusted_bypass": trusted,
             "started_at": gw.get("started_at") or now,
             "last_seen": gw.get("last_seen") or now,
+            "ended_at": gw.get("ended_at") or None,
+            "recent": bool(gw.get("recent")),
+            "active": not bool(gw.get("recent")),
         })
     return rows
 
 
+def _gateway_snapshot_for_ui():
+    try:
+        return gateway_active_snapshot(include_recent=True)
+    except TypeError:
+        # Some smoke tests monkey-patch gateway_active_snapshot with an older
+        # no-argument callable. Keep the product code backward-testable.
+        return gateway_active_snapshot()
+
+
+def _gateway_destinations_for_dedup():
+    hosts = set()
+    for gw in _gateway_snapshot_for_ui():
+        dest = gw.get("destination") or ""
+        h = normalize_endpoint_host(dest)
+        if h:
+            hosts.add(h)
+    return hosts
+
+
+def is_internal_proxy_raw_connection(conn, gateway_hosts=None):
+    """True for raw sing-box rows created by our local auth-gateway hop.
+
+    They are useful for low-level debugging but must not replace the real
+    external client in the main Connections/Clients UI. The synthetic gateway
+    rows carry the real source IP, auth/trusted label, destination and route.
+    """
+    meta = conn.get("metadata") or {}
+    src = str(get_source_ip(conn) or "")
+    inbound = str(conn.get("inbound") or meta.get("inbound") or meta.get("inboundTag") or "")
+    host = normalize_endpoint_host(get_host(conn) or meta.get("destination") or meta.get("host") or "")
+    gateway_hosts = gateway_hosts or set()
+    internal_src = False
+    try:
+        addr = ipaddress.ip_address(src)
+        internal_src = addr.is_loopback or addr.is_private or addr.is_link_local
+    except Exception:
+        internal_src = False
+    internal_inbound = "IN-SOCKS5" in inbound.upper() or str(INTERNAL_SOCKS_PROXY_PORT) in inbound
+    if (internal_src or internal_inbound) and host and host in gateway_hosts:
+        return True
+    return False
+
+
+def mark_internal_service_connection(conn):
+    c = dict(conn or {})
+    meta = dict(c.get("metadata") or {})
+    meta["service_connection"] = True
+    meta["internal_note"] = "Внутренний технический hop auth-gateway → sing-box. Основная клиентская строка показывается отдельно."
+    c["metadata"] = meta
+    c["service_connection"] = True
+    return c
+
+
 def connections_for_ui(conns):
-    return list(conns or []) + gateway_connections_for_ui()
+    gateway_rows = gateway_connections_for_ui()
+    gateway_hosts = _gateway_destinations_for_dedup()
+    raw_rows = []
+    for conn in list(conns or []):
+        if is_internal_proxy_raw_connection(conn, gateway_hosts=gateway_hosts):
+            # Hide duplicate raw rows from the main list. They caused "SE1-vless → Proxy"
+            # / "proxy-gateway" to appear instead of the real client IP and site.
+            continue
+        raw_rows.append(conn)
+    return raw_rows + gateway_rows
 
 
 def read_exact(sock, n):
@@ -6117,7 +6216,7 @@ def build_clients(connections):
         state = peer.get('state') or ('SECRET_IDENTIFIED' if peer.get('identity_method') == 'telegram_secret' else 'UNKNOWN')
         item['tcp_states'][state] = item['tcp_states'].get(state, 0) + 1
 
-    for gw in gateway_active_snapshot():
+    for gw in _gateway_snapshot_for_ui():
         ip = gw.get('ip')
         if not ip or ip == '—' or is_loopback_ip(ip):
             continue
@@ -6135,7 +6234,7 @@ def build_clients(connections):
         route_info = route_chain_for_destination(dest)
         up = int(gw.get('upload') or 0); down = int(gw.get('download') or 0)
         item['upload'] += up; item['download'] += down
-        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning')})
+        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning'), 'recent': bool(gw.get('recent')), 'active': not bool(gw.get('recent'))})
         
         if route_info.get('service_connection'):
             item.setdefault('service_connections', 0)

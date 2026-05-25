@@ -464,7 +464,7 @@ finally:
     backend.load_subscription_servers = _old_load_subscription_servers_ts
 
 
-# v1.25.3-v1.25.5: auth-gateway routes must show final VPN/DIRECT leg and trusted tag.
+# v1.25.3-v1.25.6: auth-gateway routes must show final VPN/DIRECT leg and trusted tag.
 _old_current_server_info = backend.current_server_info
 _old_get_proxies = backend.get_proxies
 try:
@@ -488,6 +488,28 @@ assert "Диагностика Proxy/VPN" in html
 assert "Ручная проверка стабильности загрузки" in html
 assert "trusted_ip без auth" in html
 assert "function runStreamDiagnostic" in html
+
+# v1.25.6: completed gateway HTTP/SOCKS requests stay visible briefly and
+# internal sing-box hop rows must not replace the real client/source.
+_old_route_test_domain = backend.route_test_domain
+try:
+    backend.route_test_domain = lambda host: {"route":"Proxy/VPN","proxy_server":"node-1","proxy_delay":123,"reason":"test"}
+    backend.GATEWAY_ACTIVE.clear(); backend.GATEWAY_RECENT.clear()
+    _gkey = backend.gateway_activity_start("188.143.204.77", "HTTP proxy", trusted=True, destination="example.com")
+    backend.gateway_activity_add_bytes(_gkey, upload=11, download=22)
+    backend.gateway_activity_end(_gkey)
+    _recent_rows = backend.connections_for_ui([])
+    assert _recent_rows and _recent_rows[0].get("recent") is True, _recent_rows
+    assert _recent_rows[0]["metadata"]["sourceIP"] == "188.143.204.77", _recent_rows
+    assert _recent_rows[0]["metadata"]["host"] == "example.com", _recent_rows
+    _raw_internal = {"metadata":{"sourceIP":"127.0.0.1","host":"example.com","inbound":"IN-SOCKS5-12081"}, "download": 1, "upload": 1}
+    _deduped = backend.connections_for_ui([_raw_internal])
+    assert len(_deduped) == 1 and _deduped[0].get("gateway") is True, _deduped
+    _clients_recent = backend.build_clients([])
+    assert _clients_recent and _clients_recent[0]["ip"] == "188.143.204.77", _clients_recent
+finally:
+    backend.route_test_domain = _old_route_test_domain
+    backend.GATEWAY_ACTIVE.clear(); backend.GATEWAY_RECENT.clear()
 
 assert 'subscriptionSourcesMiniHtml' in html and 'Трафик по источникам серверов:' in html
 assert '"traffic": traffic' in backend_text and 'subscription_traffic_refresh' in backend_text
@@ -527,6 +549,6 @@ assert "SERVER_SOURCES_FILE" in backend_text
 assert "source_id" in backend_text and "source_name" in backend_text
 print(json.dumps({"server_sources_checks": True}, ensure_ascii=False))
 
-# v1.25.5: no product UI/function preset for a service-specific console/game preset.
+# v1.25.6: no product UI/function preset for a service-specific console/game preset.
 assert "nintendo" not in backend_text.lower()
 assert "nintendo" not in html.lower()

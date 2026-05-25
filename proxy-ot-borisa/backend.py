@@ -21,7 +21,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.24.3"
+APP_VERSION = "1.24.4"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -4601,24 +4601,140 @@ def relay_pair(a, b):
 
 def parse_http_proxy_destination(header_bytes):
     try:
-        text = header_bytes.decode('iso-8859-1', errors='ignore')
-        lines = text.split('\r\n')
-        if lines:
-            parts = lines[0].split()
-            if len(parts) >= 2:
-                method = parts[0].upper()
-                target = parts[1]
-                if method == 'CONNECT':
-                    return target.split(':', 1)[0]
-                parsed = urllib.parse.urlparse(target)
-                if parsed.hostname:
-                    return parsed.hostname
-        for line in lines:
-            if line.lower().startswith('host:'):
-                return line.split(':', 1)[1].strip().split(':', 1)[0]
+        info = parse_http_proxy_request(header_bytes)
+        if info.get('host'):
+            return info.get('host')
     except Exception:
         pass
     return 'proxy-gateway'
+
+
+def parse_http_proxy_request(header_bytes):
+    text = header_bytes.decode('iso-8859-1', errors='ignore')
+    head, sep, body = text.partition('\r\n\r\n')
+    if not sep:
+        raise OSError('incomplete HTTP request header')
+    lines = head.split('\r\n') if head else []
+    if not lines:
+        raise OSError('empty HTTP request')
+    parts = lines[0].split()
+    if len(parts) < 3:
+        raise OSError('bad HTTP request line')
+    method, target, version = parts[0].upper(), parts[1], parts[2]
+    headers = []
+    host_header = ''
+    for line in lines[1:]:
+        if not line or ':' not in line:
+            continue
+        name, value = line.split(':', 1)
+        lname = name.strip().lower()
+        if lname == 'host':
+            host_header = value.strip()
+        if lname in {'proxy-authorization', 'proxy-connection'}:
+            continue
+        headers.append((name.strip(), value.strip()))
+    host = ''
+    port = 443 if method == 'CONNECT' else 80
+    path = target
+    if method == 'CONNECT':
+        if ':' in target:
+            host, port_s = target.rsplit(':', 1)
+            try:
+                port = int(port_s)
+            except Exception:
+                port = 443
+        else:
+            host = target
+            port = 443
+        path = target
+    else:
+        parsed = urllib.parse.urlparse(target)
+        if parsed.hostname:
+            host = parsed.hostname
+            port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+            path = urllib.parse.urlunparse(('', '', parsed.path or '/', parsed.params, parsed.query, parsed.fragment))
+        elif host_header:
+            host_part = host_header
+            if host_part.startswith('[') and ']' in host_part:
+                host = host_part[1:].split(']', 1)[0]
+                rest = host_part.split(']', 1)[1]
+                if rest.startswith(':'):
+                    try:
+                        port = int(rest[1:])
+                    except Exception:
+                        port = 80
+            elif ':' in host_part:
+                host, port_s = host_part.rsplit(':', 1)
+                try:
+                    port = int(port_s)
+                except Exception:
+                    port = 80
+            else:
+                host = host_part
+            path = target or '/'
+        else:
+            raise OSError('HTTP proxy request without host')
+    return {'method': method, 'target': target, 'version': version, 'host': host, 'port': int(port), 'path': path or '/', 'headers': headers, 'body_prefix': body.encode('iso-8859-1', errors='ignore')}
+
+
+def socks5_connect_via_internal(host, port):
+    upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
+    try:
+        upstream.sendall(b'\x05\x01\x00')
+        resp = read_exact(upstream, 2)
+        if resp != b'\x05\x00':
+            raise OSError('internal SOCKS rejected no-auth')
+        try:
+            ip_obj = ipaddress.ip_address(host)
+            if ip_obj.version == 4:
+                atyp = b'\x01'; addr = ip_obj.packed
+            else:
+                atyp = b'\x04'; addr = ip_obj.packed
+        except Exception:
+            host_b = str(host).encode('idna')
+            if len(host_b) > 255:
+                raise OSError('domain too long')
+            atyp = b'\x03'; addr = bytes([len(host_b)]) + host_b
+        req = b'\x05\x01\x00' + atyp + addr + int(port).to_bytes(2, 'big')
+        upstream.sendall(req)
+        head = read_exact(upstream, 4)
+        if head[0] != 5 or head[1] != 0:
+            raise OSError(f'internal SOCKS connect failed: {head!r}')
+        atyp2 = head[3]
+        if atyp2 == 1:
+            read_exact(upstream, 4 + 2)
+        elif atyp2 == 3:
+            ln = read_exact(upstream, 1)[0]
+            read_exact(upstream, ln + 2)
+        elif atyp2 == 4:
+            read_exact(upstream, 16 + 2)
+        else:
+            read_exact(upstream, 2)
+        return upstream
+    except Exception:
+        try:
+            upstream.close()
+        except Exception:
+            pass
+        raise
+
+
+def build_origin_http_request(info):
+    lines = [f"{info['method']} {info['path']} {info['version']}"]
+    has_host = False
+    for name, value in info.get('headers') or []:
+        if name.lower() == 'host':
+            has_host = True
+        lines.append(f"{name}: {value}")
+    if not has_host:
+        host = info['host']
+        if int(info['port']) not in {80, 443}:
+            host = f"{host}:{info['port']}"
+        lines.append(f"Host: {host}")
+    lines.append('')
+    lines.append('')
+    return '\r\n'.join(lines).encode('iso-8859-1', errors='ignore') + (info.get('body_prefix') or b'')
+
 
 def http_auth_username(header_bytes):
     try:
@@ -4646,15 +4762,25 @@ def handle_http_gateway(client, addr):
         trusted = is_trusted_bypass_ip(ip, 'http')
         auth_required = bool(options.get('http_auth_enabled')) and not trusted
         auth_user = http_auth_username(header) if auth_required else ''
+        unknown_mode = load_security().get('trusted_auth_bypass_unknown_mode', 'auth')
+        if auth_required and not auth_user and unknown_mode == 'block':
+            client.sendall(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            log('SECURITY', 'PROXY_AUTH_BLOCKED', 'HTTP proxy blocked for unknown IP', actor='gateway', action='http_auth_blocked', target=ip)
+            return
         if auth_required and not auth_user:
             client.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="Proxy ot Borisa"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
             log('SECURITY', 'PROXY_AUTH_REQUIRED', 'HTTP proxy auth required', actor='gateway', action='http_auth_required', target=ip)
             return
-        activity_key = gateway_activity_start(ip, 'HTTP proxy', trusted=trusted, auth_user=auth_user, destination=parse_http_proxy_destination(header))
-        upstream = socket.create_connection(('127.0.0.1', INTERNAL_HTTP_PROXY_PORT), timeout=10)
-        upstream.sendall(header)
+        info = parse_http_proxy_request(header)
+        activity_key = gateway_activity_start(ip, 'HTTP proxy', trusted=trusted, auth_user=auth_user, destination=info.get('host') or 'proxy-gateway')
+        upstream = socks5_connect_via_internal(info['host'], info['port'])
+        if info['method'] == 'CONNECT':
+            client.sendall(b'HTTP/1.1 200 Connection Established\r\nProxy-Agent: Proxy ot Borisa\r\n\r\n')
+        else:
+            upstream.sendall(build_origin_http_request(info))
         relay_pair(client, upstream)
     except Exception as e:
+        log_exception('GATEWAY', 'HTTP_ERROR', e, actor='gateway', target=ip)
         try:
             client.close()
         except Exception:

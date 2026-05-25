@@ -1,7 +1,7 @@
 # Proxy от Бориса
 
 
-> Текущая версия add-on: **1.24.3**. Архив собран как полноценный Home Assistant add-on repository: включает `repository.yaml`, корневой `README.md`, `CHANGELOG.md`, папку add-on и все файлы, необходимые для установки/публикации.
+> Текущая версия add-on: **1.24.4**. Архив собран как полноценный Home Assistant add-on repository: включает `repository.yaml`, корневой `README.md`, `CHANGELOG.md`, папку add-on и все файлы, необходимые для установки/публикации.
 
 **Proxy от Бориса** — это Home Assistant add-on, который превращает вашу VPN/VLESS-подписку в управляемый HTTP/SOCKS5/Telegram MTProto прокси-шлюз.
 

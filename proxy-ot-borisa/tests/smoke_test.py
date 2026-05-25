@@ -9,6 +9,9 @@ import pathlib
 import re
 import subprocess
 import sys
+import socket
+import threading
+import time
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -313,6 +316,91 @@ finally:
     backend.RUNTIME_PORTS_FILE = _old_runtime_ports_file
     backend.OPTIONS_FILE = _old_options_file
     shutil.rmtree(_tmp_data2, ignore_errors=True)
+
+
+# HTTP gateway end-to-end regression: trusted HTTP proxy CONNECT and GET must
+# be forwarded to the internal SOCKS listener instead of resetting connection.
+def _dummy_socks_server(port_holder, seen, ready):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(('127.0.0.1', 0))
+    srv.listen(5)
+    port_holder.append(srv.getsockname()[1])
+    ready.set()
+    deadline = time.time() + 5
+    try:
+        while time.time() < deadline and len(seen) < 3:
+            srv.settimeout(0.5)
+            try:
+                c, _ = srv.accept()
+            except socket.timeout:
+                continue
+            with c:
+                greeting = c.recv(3)
+                assert greeting == b'\x05\x01\x00', greeting
+                c.sendall(b'\x05\x00')
+                head = c.recv(4)
+                assert head[:3] == b'\x05\x01\x00', head
+                atyp = head[3]
+                if atyp == 3:
+                    ln = c.recv(1)[0]
+                    host = c.recv(ln).decode('idna')
+                elif atyp == 1:
+                    host = socket.inet_ntoa(c.recv(4))
+                else:
+                    raise AssertionError('unexpected atyp ' + repr(atyp))
+                port = int.from_bytes(c.recv(2), 'big')
+                seen.append((host, port))
+                c.sendall(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
+                c.settimeout(0.7)
+                try:
+                    req = c.recv(4096)
+                except socket.timeout:
+                    req = b''
+                if req:
+                    seen.append(('request', req.split(b'\r\n', 1)[0].decode('iso-8859-1', errors='ignore')))
+                    c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK')
+    finally:
+        srv.close()
+
+_old_internal_socks = backend.INTERNAL_SOCKS_PROXY_PORT
+_old_load_security = backend.load_security
+_old_load_options = backend.load_options
+try:
+    port_holder, seen = [], []
+    ready = threading.Event()
+    th = threading.Thread(target=_dummy_socks_server, args=(port_holder, seen, ready), daemon=True)
+    th.start(); assert ready.wait(2), 'dummy socks not ready'
+    backend.INTERNAL_SOCKS_PROXY_PORT = port_holder[0]
+    backend.load_security = lambda: {
+        'trusted_auth_bypass_enabled': True,
+        'trusted_auth_bypass_http': True,
+        'trusted_auth_bypass_socks': True,
+        'trusted_auth_bypass_cidrs': ['127.0.0.1/32'],
+        'trusted_auth_bypass_unknown_mode': 'auth',
+    }
+    backend.load_options = lambda: {'http_auth_enabled': True, 'socks_auth_enabled': True}
+    client, server = socket.socketpair()
+    tconn = threading.Thread(target=backend.handle_http_gateway, args=(server, ('127.0.0.1', 5555)), daemon=True)
+    tconn.start()
+    client.sendall(b'CONNECT ifconfig.me:443 HTTP/1.1\r\nHost: ifconfig.me:443\r\n\r\n')
+    resp = client.recv(4096)
+    assert b'200 Connection Established' in resp, resp
+    client.close(); tconn.join(1)
+    assert ('ifconfig.me', 443) in seen, seen
+    client, server = socket.socketpair()
+    tget = threading.Thread(target=backend.handle_http_gateway, args=(server, ('127.0.0.1', 5555)), daemon=True)
+    tget.start()
+    client.sendall(b'GET http://example.com/path?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n')
+    resp = client.recv(4096)
+    assert b'200 OK' in resp, resp
+    client.close(); tget.join(1)
+    assert ('example.com', 80) in seen, seen
+    assert ('request', 'GET /path?q=1 HTTP/1.1') in seen, seen
+finally:
+    backend.INTERNAL_SOCKS_PROXY_PORT = _old_internal_socks
+    backend.load_security = _old_load_security
+    backend.load_options = _old_load_options
 
 assert "secTrustedBypassEnabled" in html
 assert "portTrustedHttpInput" not in html and "portTrustedSocksInput" not in html

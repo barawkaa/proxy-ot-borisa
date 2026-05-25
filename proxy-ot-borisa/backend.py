@@ -17,11 +17,12 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
+import ssl
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.2"
+APP_VERSION = "1.25.3"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -39,6 +40,7 @@ MIGRATIONS_FILE = Path("/data/migrations.json")
 AUDIT_LOG_FILE = Path("/data/audit.json")
 MTG_ACTIVITY_FILE = Path("/data/mtproto_activity.json")
 NETWORK_QUALITY_FILE = Path("/data/network_quality.json")
+ROUTE_DIAGNOSTICS_FILE = Path("/data/route_diagnostics.json")
 AUDIT_LOG_LIMIT = 5000
 LAST_GOOD_SINGBOX_CONFIG = DATA_DIR / "sing-box.last-good.json"
 EVENT_LOG_LIMIT = 2000
@@ -86,6 +88,7 @@ DATA_REGISTRY = {
     "client_limits": {"path": DATA_DIR / "client_limits.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Лимиты клиентов"},
     "mtproto_activity": {"path": MTG_ACTIVITY_FILE, "backup": True, "maintenance": True, "cleanup": "prune_mtg_activity_file", "contains_secrets": False, "description": "Активность MTProto", "retention_days": 30, "max_records": MTG_ACTIVITY_MAX_RECORDS},
     "network_quality": {"path": NETWORK_QUALITY_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Диагностика задержек"},
+    "route_diagnostics": {"path": ROUTE_DIAGNOSTICS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Диагностика маршрута Proxy/VPN"},
     "migrations": {"path": MIGRATIONS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Миграции"},
     "last_good_singbox_config": {"path": LAST_GOOD_SINGBOX_CONFIG, "backup": False, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Последний рабочий конфиг sing-box"},
 }
@@ -4670,6 +4673,18 @@ def gateway_activity_touch(key):
             GATEWAY_ACTIVE[key]["last_seen"] = time.time()
 
 
+def gateway_activity_add_bytes(key, upload=0, download=0):
+    if not key:
+        return
+    with GATEWAY_ACTIVE_LOCK:
+        item = GATEWAY_ACTIVE.get(key)
+        if not item:
+            return
+        item["last_seen"] = time.time()
+        item["upload"] = int(item.get("upload") or 0) + max(0, int(upload or 0))
+        item["download"] = int(item.get("download") or 0) + max(0, int(download or 0))
+
+
 def gateway_activity_end(key):
     with GATEWAY_ACTIVE_LOCK:
         GATEWAY_ACTIVE.pop(key, None)
@@ -4678,6 +4693,32 @@ def gateway_activity_end(key):
 def gateway_active_snapshot():
     with GATEWAY_ACTIVE_LOCK:
         return [dict(v) for v in GATEWAY_ACTIVE.values()]
+
+
+def route_chain_for_destination(destination):
+    host = str(destination or "").strip()
+    if not host or host == "proxy-gateway":
+        return {"chains": ["auth-gateway", "Proxy", "маршрут не определён"], "route": "unknown", "final": "unknown", "warning": "Нет назначения для определения маршрута."}
+    try:
+        decision = route_test_domain(host)
+    except Exception as e:
+        return {"chains": ["auth-gateway", "Proxy", "маршрут не определён"], "route": "unknown", "final": "unknown", "warning": str(e)}
+    route = str(decision.get("route") or "").lower()
+    server = decision.get("proxy_server") or "—"
+    delay = decision.get("proxy_delay")
+    reason = decision.get("reason") or "default"
+    if route == "direct":
+        final = "DIRECT"
+        warn = "Трафик идёт напрямую через Raspberry/провайдера, а не через VPN."
+    else:
+        if not server or server in {"—", "direct"}:
+            final = "VPN не выбран"
+            warn = "Маршрут требует Proxy/VPN, но активный VPN-сервер не подтверждён."
+        else:
+            final = f"VPN: {server}" + (f" · {delay} мс" if delay else "")
+            warn = ""
+    return {"chains": ["auth-gateway", "Proxy", final], "route": decision.get("route") or "Proxy", "final": final, "reason": reason, "warning": warn, "decision": decision}
+
 
 def gateway_connections_for_ui():
     """Synthetic connection rows for the UI.
@@ -4695,22 +4736,32 @@ def gateway_connections_for_ui():
         service = gw.get("service") or "HTTP/SOCKS"
         dest = gw.get("destination") or "proxy-gateway"
         trusted = bool(gw.get("trusted"))
+        route_info = route_chain_for_destination(dest)
+        access_label = "trusted_ip_bypass" if trusted else "auth_gateway"
         rows.append({
             "id": gw.get("key") or f"gateway-{ip}-{now}",
             "network": "tcp",
             "type": service,
             "upload": int(gw.get("upload") or 0),
             "download": int(gw.get("download") or 0),
-            "chains": ["auth-gateway", "Proxy"],
+            "chains": route_info.get("chains") or ["auth-gateway", "Proxy"],
+            "route_display": " → ".join(route_info.get("chains") or ["auth-gateway", "Proxy"]),
+            "route_final": route_info.get("final"),
+            "route_decision": route_info.get("route"),
+            "route_reason": route_info.get("reason"),
+            "route_warning": route_info.get("warning"),
             "metadata": {
                 "sourceIP": ip,
                 "destination": dest,
                 "host": dest,
                 "network": "tcp",
                 "type": service,
-                "user": gw.get("auth_user") or ("trusted_ip_bypass" if trusted else ""),
-                "access": "trusted_ip_bypass" if trusted else "auth_gateway",
+                "user": gw.get("auth_user") or access_label,
+                "access": access_label,
                 "gateway": True,
+                "route_display": " → ".join(route_info.get("chains") or ["auth-gateway", "Proxy"]),
+                "route_final": route_info.get("final"),
+                "route_warning": route_info.get("warning"),
             },
             "gateway": True,
             "trusted_bypass": trusted,
@@ -4746,7 +4797,7 @@ def read_until(sock, marker=b'\r\n\r\n', limit=65536):
     return data
 
 
-def relay_pair(a, b):
+def relay_pair(a, b, activity_key=None):
     sockets = [a, b]
     try:
         for s in sockets:
@@ -4766,6 +4817,11 @@ def relay_pair(a, b):
                     return
                 dst = b if src is a else a
                 dst.sendall(data)
+                if activity_key:
+                    if src is a:
+                        gateway_activity_add_bytes(activity_key, upload=len(data), download=0)
+                    else:
+                        gateway_activity_add_bytes(activity_key, upload=0, download=len(data))
     finally:
         for s in sockets:
             try:
@@ -4955,7 +5011,7 @@ def handle_http_gateway(client, addr):
             client.sendall(b'HTTP/1.1 200 Connection Established\r\nProxy-Agent: Proxy ot Borisa\r\n\r\n')
         else:
             upstream.sendall(build_origin_http_request(info))
-        relay_pair(client, upstream)
+        relay_pair(client, upstream, activity_key=activity_key)
     except Exception as e:
         log_exception('GATEWAY', 'HTTP_ERROR', e, actor='gateway', target=ip)
         try:
@@ -5038,7 +5094,7 @@ def handle_socks_gateway(client, addr):
         trusted = is_trusted_bypass_ip(ip, 'socks')
         upstream, auth_user = socks_auth_exchange(client, ip)
         activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user)
-        relay_pair(client, upstream)
+        relay_pair(client, upstream, activity_key=activity_key)
     except Exception:
         try:
             client.close()
@@ -5973,10 +6029,19 @@ def build_clients(connections):
             continue
         username = gw.get('auth_user') if gw.get('auth_user') and gw.get('auth_user') != 'auth' else ''
         user = users_by_name.get(username) if username else None
-        item = ensure_client_group(grouped, history, trusted, ip, now, gw.get('service') or 'HTTP/SOCKS', user=user, username=username)
+        service_name = gw.get('service') or 'HTTP/SOCKS'
+        if gw.get('trusted'):
+            service_name = 'Trusted HTTP/SOCKS без auth'
+        item = ensure_client_group(grouped, history, trusted, ip, now, service_name, user=user, username=username)
+        if gw.get('trusted'):
+            item['trusted'] = True
+            item['trusted_name'] = item.get('trusted_name') or 'trusted_ip_bypass'
         item.setdefault('identities', set()).add('access:trusted_ip_bypass' if gw.get('trusted') else 'access:auth_gateway')
         dest = gw.get('destination') or 'proxy-gateway'
-        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': dest}, 'upload': 0, 'download': 0, 'chains': ['auth-gateway', 'Proxy']})
+        route_info = route_chain_for_destination(dest)
+        up = int(gw.get('upload') or 0); down = int(gw.get('download') or 0)
+        item['upload'] += up; item['download'] += down
+        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': dest, 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'route_warning': route_info.get('warning')})
         item.setdefault('main_hosts', {})[simplify_host(dest)] = item.setdefault('main_hosts', {}).get(simplify_host(dest), 0) + 1
         item['hosts'].add(dest)
 
@@ -6284,6 +6349,122 @@ def load_network_quality_report():
     return data if isinstance(data, dict) else {}
 
 
+
+
+def https_get_via_internal_socks(host, path='/', timeout=8.0):
+    sock = socks5_connect_via_internal(host, 443)
+    try:
+        ctx = ssl.create_default_context()
+        with ctx.wrap_socket(sock, server_hostname=host) as tls:
+            tls.settimeout(timeout)
+            req = f"GET {path or '/'} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: ProxyOtBorisa/{APP_VERSION} route-check\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+            tls.sendall(req.encode('ascii', errors='ignore'))
+            data = b''
+            while len(data) < 65536:
+                chunk = tls.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            text = data.decode('utf-8', errors='ignore')
+            head, _, body = text.partition('\r\n\r\n')
+            status = 0
+            first = head.split('\r\n', 1)[0] if head else ''
+            m = re.search(r"HTTP/\S+\s+(\d+)", first)
+            if m:
+                status = int(m.group(1))
+            return {"ok": bool(status and status < 500), "status": status, "body": body.strip()[:200], "headers": head[:1000]}
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def direct_public_ip(timeout=5.0):
+    try:
+        req = urllib.request.Request('https://api.ipify.org', headers={"User-Agent": f"ProxyOtBorisa/{APP_VERSION} direct-check"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return {"ok": True, "ip": resp.read().decode('utf-8', errors='ignore').strip(), "status": getattr(resp, 'status', 0)}
+    except Exception as e:
+        return {"ok": False, "ip": "", "error": str(e)}
+
+
+def proxy_public_ip(timeout=8.0):
+    try:
+        res = https_get_via_internal_socks('api.ipify.org', '/', timeout=timeout)
+        ip = (res.get('body') or '').strip().split()[0] if res.get('body') else ''
+        ok = bool(res.get('ok') and re.match(r"^[0-9a-fA-F:.]+$", ip or ''))
+        return {"ok": ok, "ip": ip, "status": res.get('status'), "raw": res}
+    except Exception as e:
+        return {"ok": False, "ip": "", "error": str(e)}
+
+
+def route_diagnostics_report(force=False):
+    cached = read_json(ROUTE_DIAGNOSTICS_FILE, {})
+    now = time.time()
+    if not force and isinstance(cached, dict) and now - float(cached.get('updated_at') or 0) < 60:
+        return cached
+    started = time.time()
+    proxies = get_proxies()
+    current = current_server_info(proxies)
+    vpn = vpn_status(proxies)
+    direct_ip = direct_public_ip()
+    proxy_ip = proxy_public_ip()
+    domains = [
+        'api.ipify.org',
+        'ifconfig.me',
+        'accounts.nintendo.com',
+        'ctest-dl.p01.lp1.ctest.srv.nintendo.net',
+        'fro-1.p01.lp1.penne.srv.nintendo.net',
+    ]
+    route_tests = []
+    for d in domains:
+        try:
+            rt = route_test_domain(d)
+            route_tests.append({"domain": d, "ok": True, **rt})
+        except Exception as e:
+            route_tests.append({"domain": d, "ok": False, "error": str(e)})
+    same_ip = bool(direct_ip.get('ok') and proxy_ip.get('ok') and direct_ip.get('ip') and direct_ip.get('ip') == proxy_ip.get('ip'))
+    nintendo_direct = any(x.get('domain','').endswith('nintendo.net') and str(x.get('route')).lower() == 'direct' for x in route_tests)
+    problems = []
+    recommendations = []
+    if not vpn.get('connected'):
+        problems.append('Активный VPN-сервер не подтверждён.')
+        recommendations.append('Выберите сервер во вкладке Обзор/VPN-серверы и нажмите проверку маршрута снова.')
+    routing_mode = (load_routing().get('mode') or 'all_proxy')
+    if same_ip and routing_mode == 'all_proxy':
+        problems.append('В режиме Весь трафик через VPN внешний IP через Proxy совпадает с прямым IP Raspberry.')
+        recommendations.append('Проверьте активный VPN-сервер и перезапустите sing-box: при all_proxy IP должен быть иностранным.')
+    elif same_ip:
+        recommendations.append('IP через Proxy для api.ipify.org совпадает с прямым IP. В split-routing это нормально для доменов, которые не добавлены в VPN-правила.')
+    if nintendo_direct:
+        problems.append('Nintendo-домены сейчас классифицируются как DIRECT.')
+        recommendations.append('Включите пресет Nintendo в маршрутизации или временно режим Весь трафик через VPN.')
+    status = 'ok' if not problems else ('warn' if vpn.get('connected') else 'bad')
+    report = {
+        "ok": True,
+        "status": status,
+        "updated_at": now,
+        "duration_ms": int((time.time() - started) * 1000),
+        "current": current,
+        "vpn": vpn,
+        "direct_ip": direct_ip,
+        "proxy_ip": proxy_ip,
+        "same_ip": same_ip,
+        "route_tests": route_tests,
+        "routing_mode": routing_mode,
+        "problems": problems,
+        "recommendations": recommendations,
+        "note": "Проверка показывает финальный маршрут: клиент → auth-gateway → Proxy → VPN/DIRECT. IP через Proxy может совпадать с Raspberry, если текущие правила отправляют домен напрямую.",
+    }
+    write_json(ROUTE_DIAGNOSTICS_FILE, report)
+    return report
+
+
+def load_route_diagnostics_report():
+    data = read_json(ROUTE_DIAGNOSTICS_FILE, {})
+    return data if isinstance(data, dict) else {}
+
 def close_connection(cid):
     if not cid:
         return False
@@ -6503,6 +6684,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not cached:
                     cached = {"ok": True, "updated_at": 0, "proxy_tests": [], "direct": {}, "note": "Проверка ещё не запускалась."}
                 return self.send_json(cached)
+            if path == "/api/route/diagnostics":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                force = str((qs.get("force") or ["0"])[0]).lower() in ["1", "true", "yes"]
+                return self.send_json(route_diagnostics_report(force=force))
             if path == "/api/routing/test":
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 return self.send_json(route_test_domain((q.get("q") or [""])[0]))
@@ -6774,6 +6959,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(route_test_domain(body.get("q") or body.get("domain") or body.get("value") or ""))
             if path == "/api/network/quality":
                 return self.send_json(network_quality_report(names=body.get("names") or None, limit=body.get("limit") or 12))
+            if path == "/api/route/diagnostics":
+                return self.send_json(route_diagnostics_report(force=True))
             if path == "/api/proxy/select":
                 name = body.get("name")
                 if name and name not in {"auto", "direct"}:

@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.3"
+APP_VERSION = "1.25.4"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -4798,36 +4798,71 @@ def read_until(sock, marker=b'\r\n\r\n', limit=65536):
 
 
 def relay_pair(a, b, activity_key=None):
-    sockets = [a, b]
-    try:
-        for s in sockets:
-            s.setblocking(False)
-        while not AUTH_GATEWAY_STOP.is_set():
-            readable, _, exceptional = select.select(sockets, [], sockets, 1.0)
-            if exceptional:
-                break
-            if not readable:
-                continue
-            for src in readable:
-                try:
-                    data = src.recv(65536)
-                except BlockingIOError:
-                    continue
+    """Relay two TCP sockets reliably for long-lived streams.
+
+    v1.25.3 used non-blocking sockets with sendall(). On a loaded Raspberry Pi or
+    a slow client this can raise BlockingIOError/partial-send situations and close
+    large downloads early. The gateway must be boring and stable: two blocking
+    forwarder threads, explicit half-close, byte accounting, no heavy logic in the
+    hot path.
+    """
+    stop = threading.Event()
+
+    def close_quiet(sock):
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def shutdown_write(sock):
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except Exception:
+            pass
+
+    def pump(src, dst, direction):
+        try:
+            try:
+                src.setblocking(True)
+                dst.setblocking(True)
+                src.settimeout(300)
+                dst.settimeout(300)
+            except Exception:
+                pass
+            while not stop.is_set() and not AUTH_GATEWAY_STOP.is_set():
+                data = src.recv(65536)
                 if not data:
-                    return
-                dst = b if src is a else a
+                    break
                 dst.sendall(data)
                 if activity_key:
-                    if src is a:
+                    if direction == 'upload':
                         gateway_activity_add_bytes(activity_key, upload=len(data), download=0)
                     else:
                         gateway_activity_add_bytes(activity_key, upload=0, download=len(data))
+        except Exception as e:
+            # Long streams may end with peer resets; keep this at debug/noisy-safe level.
+            log('GATEWAY', 'RELAY_END', f'Relay direction {direction} stopped: {type(e).__name__}: {e}', actor='gateway', action='relay_end')
+        finally:
+            stop.set()
+            shutdown_write(dst)
+
+    threads = [
+        threading.Thread(target=pump, args=(a, b, 'upload'), name='gateway-relay-upload', daemon=True),
+        threading.Thread(target=pump, args=(b, a, 'download'), name='gateway-relay-download', daemon=True),
+    ]
+    try:
+        for th in threads:
+            th.start()
+        while not stop.is_set() and any(th.is_alive() for th in threads) and not AUTH_GATEWAY_STOP.is_set():
+            for th in threads:
+                th.join(timeout=0.5)
     finally:
-        for s in sockets:
-            try:
-                s.close()
-            except Exception:
-                pass
+        stop.set()
+        close_quiet(a)
+        close_quiet(b)
+        for th in threads:
+            if th.is_alive():
+                th.join(timeout=0.2)
 
 
 
@@ -6413,9 +6448,8 @@ def route_diagnostics_report(force=False):
     domains = [
         'api.ipify.org',
         'ifconfig.me',
-        'accounts.nintendo.com',
-        'ctest-dl.p01.lp1.ctest.srv.nintendo.net',
-        'fro-1.p01.lp1.penne.srv.nintendo.net',
+        'www.google.com',
+        'www.cloudflare.com',
     ]
     route_tests = []
     for d in domains:
@@ -6425,7 +6459,6 @@ def route_diagnostics_report(force=False):
         except Exception as e:
             route_tests.append({"domain": d, "ok": False, "error": str(e)})
     same_ip = bool(direct_ip.get('ok') and proxy_ip.get('ok') and direct_ip.get('ip') and direct_ip.get('ip') == proxy_ip.get('ip'))
-    nintendo_direct = any(x.get('domain','').endswith('nintendo.net') and str(x.get('route')).lower() == 'direct' for x in route_tests)
     problems = []
     recommendations = []
     if not vpn.get('connected'):
@@ -6437,9 +6470,6 @@ def route_diagnostics_report(force=False):
         recommendations.append('Проверьте активный VPN-сервер и перезапустите sing-box: при all_proxy IP должен быть иностранным.')
     elif same_ip:
         recommendations.append('IP через Proxy для api.ipify.org совпадает с прямым IP. В split-routing это нормально для доменов, которые не добавлены в VPN-правила.')
-    if nintendo_direct:
-        problems.append('Nintendo-домены сейчас классифицируются как DIRECT.')
-        recommendations.append('Включите пресет Nintendo в маршрутизации или временно режим Весь трафик через VPN.')
     status = 'ok' if not problems else ('warn' if vpn.get('connected') else 'bad')
     report = {
         "ok": True,
@@ -6455,11 +6485,177 @@ def route_diagnostics_report(force=False):
         "routing_mode": routing_mode,
         "problems": problems,
         "recommendations": recommendations,
-        "note": "Проверка показывает финальный маршрут: клиент → auth-gateway → Proxy → VPN/DIRECT. IP через Proxy может совпадать с Raspberry, если текущие правила отправляют домен напрямую.",
+        "note": "Проверка показывает финальный маршрут: клиент → auth-gateway → Proxy → VPN/DIRECT. IP через Proxy может совпадать с Raspberry, если текущие правила отправляют домен напрямую. Для спорного сервиса используйте ручную проверку домена и тест стабильности потока.",
     }
     write_json(ROUTE_DIAGNOSTICS_FILE, report)
     return report
 
+
+
+def _parse_http_status_and_headers(header_bytes):
+    text = header_bytes.decode('iso-8859-1', errors='ignore')
+    lines = text.split('\r\n')
+    status = 0
+    if lines:
+        m = re.search(r"HTTP/\S+\s+(\d+)", lines[0])
+        if m:
+            status = int(m.group(1))
+    headers = {}
+    for line in lines[1:]:
+        if ':' in line:
+            k, v = line.split(':', 1)
+            headers[k.strip().lower()] = v.strip()
+    return status, headers, lines[0] if lines else ''
+
+
+def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
+    started = time.time()
+    sock.settimeout(timeout)
+    buf = b''
+    while b'\r\n\r\n' not in buf and len(buf) < 131072:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    head, sep, rest = buf.partition(b'\r\n\r\n')
+    status, headers, status_line = _parse_http_status_and_headers(head)
+    expected = None
+    try:
+        expected = int(headers.get('content-length') or 0) or None
+    except Exception:
+        expected = None
+    body_read = len(rest)
+    error = ''
+    complete = False
+    try:
+        while body_read < int(max_bytes or 0):
+            if expected is not None and body_read >= expected:
+                complete = True
+                break
+            chunk = sock.recv(65536)
+            if not chunk:
+                complete = expected is None or body_read >= expected
+                break
+            body_read += len(chunk)
+    except Exception as e:
+        error = f'{type(e).__name__}: {e}'
+    duration = max(0.001, time.time() - started)
+    if expected is not None and body_read >= min(expected, int(max_bytes or expected)):
+        complete = True
+    return {
+        'status': status,
+        'status_line': status_line,
+        'headers': {k: headers.get(k) for k in ['content-length', 'content-type', 'server', 'cache-control'] if headers.get(k)},
+        'expected_bytes': expected,
+        'downloaded_bytes': body_read,
+        'complete': bool(complete),
+        'error': error,
+        'duration_seconds': round(duration, 3),
+        'speed_bytes_per_sec': int(body_read / duration) if duration else 0,
+    }
+
+
+def stream_test_via_internal_socks(url, headers=None, max_bytes=50_000_000, timeout=45):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+        raise ValueError('Введите полный URL http:// или https://')
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    path = urllib.parse.urlunparse(('', '', parsed.path or '/', parsed.params, parsed.query, parsed.fragment))
+    sock = socks5_connect_via_internal(parsed.hostname, port)
+    try:
+        if parsed.scheme == 'https':
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(sock, server_hostname=parsed.hostname)
+        req_headers = {
+            'Host': parsed.hostname if port in {80, 443} else f'{parsed.hostname}:{port}',
+            'User-Agent': f'ProxyOtBorisa/{APP_VERSION} stream-check',
+            'Accept': '*/*',
+            'Connection': 'close',
+        }
+        for k, v in (headers or {}).items():
+            if k and v and k.lower() not in {'host', 'connection'}:
+                req_headers[str(k)] = str(v)
+        req = f'GET {path} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in req_headers.items()) + '\r\n'
+        sock.sendall(req.encode('iso-8859-1', errors='ignore'))
+        return _read_http_response_stream(sock, max_bytes=max_bytes, timeout=timeout)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def stream_test_via_auth_gateway(url, headers=None, max_bytes=50_000_000, timeout=45):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+        raise ValueError('Введите полный URL http:// или https://')
+    options = load_options()
+    port = int(options.get('http_proxy_port') or 2081)
+    sock = socket.create_connection(('127.0.0.1', port), timeout=10)
+    try:
+        proxy_auth = ''
+        if options.get('http_auth_enabled'):
+            raw = f"{options.get('proxy_username') or ''}:{options.get('proxy_password') or ''}".encode('utf-8')
+            proxy_auth = 'Proxy-Authorization: Basic ' + base64.b64encode(raw).decode('ascii') + '\r\n'
+        target_port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        host_header = parsed.hostname if target_port in {80, 443} else f'{parsed.hostname}:{target_port}'
+        if parsed.scheme == 'https':
+            connect_req = f'CONNECT {host_header} HTTP/1.1\r\nHost: {host_header}\r\n{proxy_auth}Proxy-Connection: Keep-Alive\r\n\r\n'
+            sock.sendall(connect_req.encode('iso-8859-1', errors='ignore'))
+            response = read_until(sock, limit=65536)
+            status, _, _ = _parse_http_status_and_headers(response.split(b'\r\n\r\n', 1)[0])
+            if status != 200:
+                return {'status': status, 'downloaded_bytes': 0, 'complete': False, 'error': f'CONNECT failed with HTTP {status}', 'duration_seconds': 0, 'speed_bytes_per_sec': 0}
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(sock, server_hostname=parsed.hostname)
+            request_target = urllib.parse.urlunparse(('', '', parsed.path or '/', parsed.params, parsed.query, parsed.fragment))
+        else:
+            request_target = urllib.parse.urlunparse((parsed.scheme, host_header, parsed.path or '/', parsed.params, parsed.query, parsed.fragment))
+        req_headers = {
+            'Host': host_header,
+            'User-Agent': f'ProxyOtBorisa/{APP_VERSION} stream-check',
+            'Accept': '*/*',
+            'Connection': 'close',
+        }
+        for k, v in (headers or {}).items():
+            if k and v and k.lower() not in {'host', 'connection', 'proxy-authorization'}:
+                req_headers[str(k)] = str(v)
+        extra_proxy_auth = proxy_auth if parsed.scheme == 'http' else ''
+        req = f'GET {request_target} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in req_headers.items()) + extra_proxy_auth + '\r\n'
+        sock.sendall(req.encode('iso-8859-1', errors='ignore'))
+        return _read_http_response_stream(sock, max_bytes=max_bytes, timeout=timeout)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def stream_diagnostics_report(url, headers=None, max_bytes=50_000_000, timeout=45):
+    started = time.time()
+    headers = headers or {}
+    result = {'ok': True, 'url': url, 'updated_at': time.time(), 'tests': {}, 'conclusion': '', 'problems': [], 'recommendations': []}
+    for name, func in [('auth_gateway', stream_test_via_auth_gateway), ('internal_socks', stream_test_via_internal_socks)]:
+        try:
+            result['tests'][name] = {'ok': True, **func(url, headers=headers, max_bytes=max_bytes, timeout=timeout)}
+        except Exception as e:
+            result['tests'][name] = {'ok': False, 'error': f'{type(e).__name__}: {e}', 'downloaded_bytes': 0, 'complete': False}
+    ag = result['tests'].get('auth_gateway') or {}
+    core = result['tests'].get('internal_socks') or {}
+    if ag.get('complete') and core.get('complete'):
+        result['conclusion'] = 'Длинный поток стабилен через auth-gateway и внутренний VPN-core.'
+    elif not ag.get('complete') and core.get('complete'):
+        result['conclusion'] = 'Внутренний VPN-core стабилен, обрыв появляется на auth-gateway/relay.'
+        result['problems'].append('Внешний gateway обрывает или не докачивает поток, хотя внутренний proxy справляется.')
+        result['recommendations'].append('Проверьте версию relay/gateway и повторите тест после обновления add-on.')
+    elif not core.get('complete'):
+        result['conclusion'] = 'Поток обрывается уже на внутреннем VPN-core или выбранном VPN-маршруте.'
+        result['problems'].append('Даже внутренний proxy/sing-box не докачивает тестовый файл полностью.')
+        result['recommendations'].append('Смените VPN-сервер/регион и повторите проверку. Если проблема сохраняется на всех нодах — смотреть sing-box/провайдера VPN.')
+    else:
+        result['conclusion'] = 'Результат неоднозначный, повторите тест или укажите другой URL.'
+    result['duration_ms'] = int((time.time() - started) * 1000)
+    return result
 
 def load_route_diagnostics_report():
     data = read_json(ROUTE_DIAGNOSTICS_FILE, {})
@@ -6961,6 +7157,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(network_quality_report(names=body.get("names") or None, limit=body.get("limit") or 12))
             if path == "/api/route/diagnostics":
                 return self.send_json(route_diagnostics_report(force=True))
+            if path == "/api/diagnostics/stream_test":
+                url = str(body.get("url") or "").strip()
+                if not url:
+                    raise ValueError("Введите URL для проверки потока")
+                headers = body.get("headers") if isinstance(body.get("headers"), dict) else {}
+                max_bytes = int(body.get("max_bytes") or 50000000)
+                timeout = int(body.get("timeout") or 45)
+                return self.send_json(stream_diagnostics_report(url, headers=headers, max_bytes=max_bytes, timeout=timeout))
             if path == "/api/proxy/select":
                 name = body.get("name")
                 if name and name not in {"auto", "direct"}:

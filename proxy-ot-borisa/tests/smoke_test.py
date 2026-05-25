@@ -464,15 +464,15 @@ finally:
     backend.load_subscription_servers = _old_load_subscription_servers_ts
 
 
-# v1.25.3: auth-gateway routes must show final VPN/DIRECT leg and trusted tag.
+# v1.25.3/1.25.4: auth-gateway routes must show final VPN/DIRECT leg and trusted tag.
 _old_current_server_info = backend.current_server_info
 _old_get_proxies = backend.get_proxies
 try:
     backend.get_proxies = lambda: {"Proxy": {"now": "auto"}, "auto": {"now": "node-1"}, "node-1": {"delay": 123}}
-    _route_chain = backend.route_chain_for_destination("accounts.nintendo.com")
+    _route_chain = backend.route_chain_for_destination("example.com")
     assert _route_chain["chains"][0:2] == ["auth-gateway", "Proxy"], _route_chain
     assert _route_chain["chains"][-1].startswith("VPN:") or _route_chain["chains"][-1] == "DIRECT", _route_chain
-    backend.gateway_active_snapshot = lambda: [{"key":"gw2","ip":"188.143.204.77","service":"HTTP proxy","trusted":True,"destination":"accounts.nintendo.com","upload":55,"download":77,"started_at":1,"last_seen":2}]
+    backend.gateway_active_snapshot = lambda: [{"key":"gw2","ip":"188.143.204.77","service":"HTTP proxy","trusted":True,"destination":"example.com","upload":55,"download":77,"started_at":1,"last_seen":2}]
     _gw_rows = backend.gateway_connections_for_ui()
     assert _gw_rows[0]["metadata"]["access"] == "trusted_ip_bypass", _gw_rows
     assert len(_gw_rows[0]["chains"]) >= 3, _gw_rows
@@ -483,8 +483,11 @@ finally:
     backend.gateway_active_snapshot = _old_snapshot
 
 assert "/api/route/diagnostics" in backend_text
-assert "Проверка маршрута Proxy/VPN" in html
+assert "/api/diagnostics/stream_test" in backend_text
+assert "Диагностика Proxy/VPN" in html
+assert "Проверка стабильности потока" in html
 assert "trusted_ip без auth" in html
+assert "function runStreamDiagnostic" in html
 
 assert 'subscriptionSourcesMiniHtml' in html and 'Трафик по источникам серверов:' in html
 assert '"traffic": traffic' in backend_text and 'subscription_traffic_refresh' in backend_text

@@ -56,7 +56,7 @@
       <div class="card wide-card"><h2>Статус</h2><div id="statusPills"></div><div class="stats" style="margin-top:10px"><div class="stat"><div class="label">VPN</div><div class="value" id="vpnStatus">—</div></div><div class="stat"><div class="label">Прокси работает</div><div class="value" id="proxyUptime">—</div></div><div class="stat"><div class="label">Версия</div><div class="value" id="appVersion">—</div></div></div></div>
       <div class="card wide-card"><h2>Управление</h2><div class="row big-actions"><button id="btnAll" class="switch">⚡ Все прокси</button><button id="btnHttp" class="switch">🌐 HTTP</button><button id="btnSocks" class="switch">🧦 SOCKS5</button><button id="btnTg" class="switch"><img class="tg-icon" alt="Telegram" src="https://png.klev.club/uploads/posts/2024-03/png-klev-club-p-telegram-znachok-png-13.png">Telegram</button></div><div class="small muted" id="powerNote">—</div></div>
       <div class="card wide-card"><h2>Текущий сервер</h2><div class="stats"><div class="stat"><div class="label">Режим</div><div class="value" id="curMode">—</div></div><div class="stat"><div class="label">Сервер</div><div class="value" id="curServer">—</div></div><div class="stat"><div class="label">Пинг</div><div class="value" id="curPing">—</div></div></div><div class="row"><select id="serverSelect" style="min-width:220px"></select><button class="primary" id="btnSelectServer">Выбрать сервер</button></div><div class="row"><button id="btnPingCurrent">Проверить текущий</button><button id="btnPingAllOverview">Пинг всех</button><button id="btnRestart">Перезапустить sing-box</button></div><div class="small muted" id="autoNote">auto использует профили «Приоритетный» и «Обычный». Резервные серверы используются только при ручном выборе.</div><div class="small muted" id="pingNote">—</div></div>
-      <div class="card full"><h2>Проверка маршрута Proxy/VPN</h2><div class="muted">Показывает реальный внешний IP через внутренний proxy и куда пойдут Nintendo/браузер: через VPN или напрямую.</div><div id="routeDiagBox" class="support-note" style="margin-top:10px">Загрузка проверки маршрута...</div><div class="row"><button class="primary" id="btnRouteDiagRefresh">Проверить маршрут сейчас</button><button id="btnEnableNintendoVpn">Включить Nintendo через VPN</button><button onclick="openTab('routing')">Открыть маршрутизацию</button></div></div>
+      <div class="card full"><h2>Диагностика Proxy/VPN</h2><div class="muted">Показывает внешний IP, финальный маршрут через VPN/DIRECT и помогает проверить стабильность длинной загрузки для любого сервиса.</div><div id="routeDiagBox" class="support-note" style="margin-top:10px">Загрузка проверки маршрута...</div><div class="row"><button class="primary" id="btnRouteDiagRefresh">Проверить маршрут сейчас</button><button onclick="openTab('routing')">Открыть маршрутизацию</button></div><div class="support-note" style="margin-top:10px"><b>Проверка стабильности потока</b><div class="muted">Вставьте URL тестового файла/сервиса. Аддон сравнит внешний auth-gateway и внутренний VPN-core, чтобы понять, где обрывается длинная загрузка.</div><div class="row"><input id="diagStreamUrl" placeholder="https://example.com/test-file.bin или http://..." style="min-width:420px"><button id="btnDiagStreamTest" class="primary">Проверить поток</button></div><div id="diagStreamResult" class="small muted">Проверка ещё не запускалась.</div></div></div>
       <div class="card full"><h2>Сводка</h2><div class="stats"><div class="stat"><div class="label">Серверов</div><div class="value" id="serversCount">—</div></div><div class="stat"><div class="label">Маршрутизация</div><div class="value" id="routingModeShort">—</div></div><div class="stat"><div class="label">Соединений</div><div class="value" id="connectionsCount">—</div></div><div class="stat"><div class="label">Клиентов онлайн</div><div class="value" id="clientsOnline">—</div></div><div class="stat"><div class="label">Новых/неизвестных</div><div class="value" id="unknownOnline">—</div></div><div class="stat"><div class="label">Блокировок</div><div class="value" id="blockedCount">—</div></div><div class="stat"><div class="label">Остаток трафика</div><div class="value" id="trafficLeftShort">—</div></div></div></div>
     </div>
   </section>
@@ -100,7 +100,7 @@
     <div class="card full">
       <details class="instruction-group" open><summary>1. Базовая логика приложения<span class="muted">Что делает add-on и в каком порядке его настраивать.</span></summary><div class="instruction-content">
         <div class="wizard-step"><h3>Что делает add-on</h3><div class="muted">Он берёт VPN/VLESS-серверы и отдаёт их наружу как управляемые прокси: HTTP, SOCKS5 и Telegram MTProto. Клиенты подключаются к твоему серверу, а add-on отправляет трафик через выбранный VPN-сервер или напрямую по правилам маршрутизации.</div></div>
-        <div class="wizard-step"><h3>Основной порядок настройки</h3><ol><li>Добавить VPN-подписку, JSON или отдельные серверы во вкладке <b>VPN-серверы</b>.</li><li>Проверить ping серверов и оставить <b>auto</b> либо выбрать конкретный сервер.</li><li>Создать пользователей во вкладке <b>Пользователи</b>.</li><li>Проверить порты во вкладке <b>Порты и доступ</b> и пробросить нужные порты на роутере.</li><li>Настроить устройства: браузер, Keenetic, Telegram MTProto, Nintendo или другие клиенты.</li></ol></div>
+        <div class="wizard-step"><h3>Основной порядок настройки</h3><ol><li>Добавить VPN-подписку, JSON или отдельные серверы во вкладке <b>VPN-серверы</b>.</li><li>Проверить ping серверов и оставить <b>auto</b> либо выбрать конкретный сервер.</li><li>Создать пользователей во вкладке <b>Пользователи</b>.</li><li>Проверить порты во вкладке <b>Порты и доступ</b> и пробросить нужные порты на роутере.</li><li>Настроить устройства: браузер, Keenetic, Telegram MTProto, приставку или другие клиенты.</li></ol></div>
       </div></details>
 
       <details class="instruction-group"><summary>2. VPN-серверы, источники и подписки<span class="muted">Как различать серверы из подписок, JSON и ручного добавления.</span></summary><div class="instruction-content">
@@ -117,9 +117,9 @@
         <div class="wizard-step"><h3>Включение и выключение</h3><div class="muted">Переключатель рядом с пользователем включает или отключает именно его доступ. Общие HTTP/SOCKS5/Telegram включаются в <b>Обзоре</b>.</div></div>
       </div></details>
 
-      <details class="instruction-group"><summary>4. Доверенный доступ без авторизации<span class="muted">Для браузеров, ZeroOmega, Nintendo и устройств без поддержки proxy-auth.</span></summary><div class="instruction-content">
+      <details class="instruction-group"><summary>4. Доверенный доступ без авторизации<span class="muted">Для браузеров, ZeroOmega, Smart TV, приставок и устройств без поддержки proxy-auth.</span></summary><div class="instruction-content">
         <div class="wizard-step"><h3>Для чего нужен trusted bypass</h3><div class="muted">Некоторые клиенты не умеют передавать логин/пароль proxy, особенно SOCKS5 auth в браузерах и расширениях. Для них trusted-доступ работает на штатных HTTP/SOCKS5 портах: доверенные IP заходят без логина/пароля, остальные клиенты проходят обычную авторизацию.</div></div>
-        <div class="wizard-step"><h3>Как настроить</h3><ol><li>Открой главную вкладку <b>Безопасность</b>.</li><li>Включи <b>Доверенный доступ без авторизации</b>.</li><li>Добавь IP рабочего ПК, приставки, Nintendo или роутера, например <span class="tag">192.168.1.35</span>.</li><li>Открой <b>Настройки → Порты</b> и посмотри обычные HTTP/SOCKS5 порты.</li><li>В ZeroOmega укажи IP сервера и обычный HTTP/SOCKS5 порт, поля логина и пароля оставь пустыми.</li></ol></div>
+        <div class="wizard-step"><h3>Как настроить</h3><ol><li>Открой главную вкладку <b>Безопасность</b>.</li><li>Включи <b>Доверенный доступ без авторизации</b>.</li><li>Добавь IP рабочего ПК, приставки, Smart TV или роутера, например <span class="tag">192.168.1.35</span>.</li><li>Открой <b>Настройки → Порты</b> и посмотри обычные HTTP/SOCKS5 порты.</li><li>В ZeroOmega укажи IP сервера и обычный HTTP/SOCKS5 порт, поля логина и пароля оставь пустыми.</li></ol></div>
         <div class="wizard-step"><h3>Безопасность</h3><div class="muted">Trusted-доступ не должны быть открыты всем. Не добавляй <span class="tag">0.0.0.0/0</span>. Лучше указывать конкретный IP устройства или узкую домашнюю подсеть, если ты понимаешь последствия.</div></div>
       </div></details>
 
@@ -281,7 +281,7 @@
 
     <div class="security-panel active full" data-security-panel-body="trusted">
       <div class="card full"><h2>Доверенный доступ без авторизации</h2>
-        <div class="muted">Для браузеров, ZeroOmega, Nintendo, Smart TV и роутеров, которые не умеют proxy-auth. Используются штатные порты HTTP/SOCKS5: доверенные IP/CIDR идут без пароля, остальные — с обычной авторизацией.</div>
+        <div class="muted">Для браузеров, ZeroOmega, Smart TV, приставок и роутеров, которые не умеют proxy-auth. Используются штатные порты HTTP/SOCKS5: доверенные IP/CIDR идут без пароля, остальные — с обычной авторизацией.</div>
         <label><input type="checkbox" id="secTrustedBypassEnabled"> Включить trusted-доступ без авторизации</label>
         <div class="row">
           <label><input type="checkbox" id="secTrustedBypassHttp"> HTTP без auth для доверенных IP</label>
@@ -289,7 +289,7 @@
           <label>Неизвестные IP <select id="secTrustedUnknownMode"><option value="auth">требуют авторизацию</option><option value="block">блокируются полностью</option></select></label>
         </div>
         <div class="two"><div><b>Доверенные IP/CIDR</b><div class="small muted">Указывай внешние IP сетей, например рабочий IP или IP квартиры. Не добавляй <span class="tag">0.0.0.0/0</span>.</div><textarea id="secTrustedBypassCidrs" placeholder="5.17.17.147
-188.143.204.77"></textarea></div><div class="support-note"><b>ZeroOmega/Nintendo</b><br><span class="muted">Указывай обычные порты без логина/пароля. Если внешний IP сети есть в списке, приложение пропустит без авторизации.</span><div class="small muted" id="secTrustedBypassPorts">—</div></div></div>
+188.143.204.77"></textarea></div><div class="support-note"><b>ZeroOmega / устройства без proxy-auth</b><br><span class="muted">Указывай обычные порты без логина/пароля. Если внешний IP сети есть в списке, приложение пропустит без авторизации.</span><div class="small muted" id="secTrustedBypassPorts">—</div></div></div>
         <div class="danger-note" style="margin-top:10px">Trusted-доступ безопасен только при точном allowlist IP/CIDR.</div>
         <div class="row"><button class="primary" id="btnSaveSecurityTrusted">Сохранить безопасность</button><button class="safe" id="btnApplySecurityTrusted">Применить правила</button></div>
       </div>
@@ -490,13 +490,28 @@ function renderRouteDiagnostics(){
   const rows=(d.route_tests||[]).map(x=>`<tr><td>${esc(x.domain||x.normalized||'—')}</td><td>${pill(routeNameText(x.route),String(x.route).toLowerCase()==='direct'?'gray':'green')}</td><td>${esc(x.reason||x.error||'—')}</td><td>${esc(x.proxy_server||cur.server||'—')}</td></tr>`).join('');
   box.innerHTML=`<div>${pill(d.status==='ok'?'маршрут нормальный':d.status==='bad'?'есть ошибка':'есть предупреждения',cls)} обновлено: ${fmtTime(d.updated_at)}</div><div class="stats" style="margin-top:8px"><div class="stat"><div class="label">IP напрямую</div><div class="value small">${esc(direct.ip||'—')}</div></div><div class="stat"><div class="label">IP через Proxy</div><div class="value small">${esc(proxy.ip||'—')}</div></div><div class="stat"><div class="label">Активный сервер</div><div class="value small">${esc(cur.server||'—')}</div></div><div class="stat"><div class="label">VPN</div><div class="value">${vpn.connected?'<span class="ok">выбран</span>':'<span class="bad">не выбран</span>'}</div></div></div>${problems?'<div class="bad" style="margin-top:8px"><b>Проблемы:</b><ul>'+problems+'</ul></div>':''}${recs?'<div class="muted" style="margin-top:8px"><b>Что сделать:</b><ul>'+recs+'</ul></div>':''}<table style="margin-top:10px"><thead><tr><th>Домен</th><th>Маршрут</th><th>Причина</th><th>Сервер</th></tr></thead><tbody>${rows||'<tr><td colspan="4">Нет проверок.</td></tr>'}</tbody></table><div class="small muted" style="margin-top:8px">${esc(d.note||'')}</div>`;
 }
-async function enableNintendoVpn(){
-  const d=await api('/api/routing');
-  const r=d.routing||{}; r.presets=r.presets||{}; r.presets.nintendo=true;
-  await post('/api/routing',r);
-  await post('/api/route/diagnostics',{});
-  await refreshAll();
-  msg('Пресет Nintendo включён: nintendo.com/nintendo.net будут идти через VPN');
+async function runStreamDiagnostic(){
+  const url=($('diagStreamUrl')?.value||'').trim();
+  if(!url)throw new Error('Введите URL для проверки потока');
+  const r=await post('/api/diagnostics/stream_test',{url,max_bytes:50000000,timeout:45});
+  renderStreamDiagnostic(r);
+}
+function renderStreamDiagnostic(r){
+  const box=$('diagStreamResult'); if(!box)return;
+  const tests=r.tests||{};
+  const row=(name,title)=>{
+    const x=tests[name]||{};
+    const good=x.complete;
+    const status=x.status?('HTTP '+x.status):'—';
+    const size=fmtBytes(x.downloaded_bytes||0);
+    const expected=x.expected_bytes?(' из '+fmtBytes(x.expected_bytes)):'';
+    const speed=x.speed_bytes_per_sec?fmtBytes(x.speed_bytes_per_sec)+'/с':'—';
+    const err=x.error?'<br><span class="bad">'+esc(x.error)+'</span>':'';
+    return `<tr><td>${esc(title)}</td><td>${pill(good?'OK':'обрыв/ошибка',good?'green':'red')}</td><td>${esc(status)}</td><td>${size}${expected}</td><td>${speed}</td><td>${esc(x.duration_seconds||0)} с${err}</td></tr>`;
+  };
+  const problems=(r.problems||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
+  const recs=(r.recommendations||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
+  box.innerHTML=`<div><b>${esc(r.conclusion||'Проверка завершена')}</b></div><table style="margin-top:8px"><thead><tr><th>Участок</th><th>Итог</th><th>Статус</th><th>Скачано</th><th>Скорость</th><th>Время/ошибка</th></tr></thead><tbody>${row('auth_gateway','Внешний auth-gateway')}${row('internal_socks','Внутренний VPN-core')}</tbody></table>${problems?'<div class="bad"><b>Проблемы:</b><ul>'+problems+'</ul></div>':''}${recs?'<div class="muted"><b>Что сделать:</b><ul>'+recs+'</ul></div>':''}`;
 }
 async function loadTelegram(){const d=await api('/api/telegram');state.status=state.status||{};state.status.telegram=d.telegram||{};mergeTelegramPresence();renderTelegram()}
 async function loadServers(){const d=await api('/api/servers');state.servers=d.servers||[];state.serverSources=d.sources||[];state.serverPings=d.pings||{};state.autoTags=d.auto_tags||[];state.subscriptionUrl=d.subscription_url||'';state.subscriptionInfo=d.subscription_info||state.subscriptionInfo;state.subscriptionJson=d.subscription_json||state.subscriptionJson;if($('subUrl')&&!$('subUrl').value)$('subUrl').value=state.subscriptionUrl||'';if($('subscriptionJsonUrl')&&!$('subscriptionJsonUrl').value)$('subscriptionJsonUrl').value=state.subscriptionUrl||'';renderServers();renderServerSources();renderServerSelector();renderSubscriptionInfo();renderSubscriptionJson();if(state.status)renderOverview()}
@@ -1119,7 +1134,7 @@ $('btnAll').onclick=()=>runUiAction('Переключаю все прокси',(
 $('btnSelectServer').onclick=()=>runUiAction('Выбираю сервер',()=>selectServer($('serverSelect').value));
 $('btnPingCurrent').onclick=()=>runUiAction('Проверяю текущий сервер',()=>pingOne(state.status.current.server),'Пинг текущего сервера обновлён');
 $('btnRouteDiagRefresh').onclick=()=>runUiAction('Проверяю маршрут Proxy/VPN',()=>loadRouteDiagnostics(true),'Маршрут проверен');
-$('btnEnableNintendoVpn').onclick=()=>runUiAction('Включаю Nintendo через VPN',()=>enableNintendoVpn(),'Nintendo включён через VPN');
+$('btnDiagStreamTest').onclick=()=>runUiAction('Проверяю стабильность потока',()=>runStreamDiagnostic(),'Проверка потока завершена');
 $('btnPingAllOverview').onclick=()=>runUiAction('Проверяю пинг всех серверов',pingAll,'Пинг всех серверов обновлён');
 $('btnSystemCheck').onclick=()=>runUiAction('Проверяю систему',async()=>{await loadSystemCheck(true)},'Проверка системы завершена');
 $('btnSystemCheckRefresh').onclick=()=>runUiAction('Обновляю данные и проверяю систему',async()=>{await refreshAll();await loadSystemCheck(true)},'Данные обновлены, проверка завершена');

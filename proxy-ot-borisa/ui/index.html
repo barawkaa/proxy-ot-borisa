@@ -56,7 +56,7 @@
       <div class="card wide-card"><h2>Статус</h2><div id="statusPills"></div><div class="stats" style="margin-top:10px"><div class="stat"><div class="label">VPN</div><div class="value" id="vpnStatus">—</div></div><div class="stat"><div class="label">Прокси работает</div><div class="value" id="proxyUptime">—</div></div><div class="stat"><div class="label">Версия</div><div class="value" id="appVersion">—</div></div></div></div>
       <div class="card wide-card"><h2>Управление</h2><div class="row big-actions"><button id="btnAll" class="switch">⚡ Все прокси</button><button id="btnHttp" class="switch">🌐 HTTP</button><button id="btnSocks" class="switch">🧦 SOCKS5</button><button id="btnTg" class="switch"><img class="tg-icon" alt="Telegram" src="https://png.klev.club/uploads/posts/2024-03/png-klev-club-p-telegram-znachok-png-13.png">Telegram</button></div><div class="small muted" id="powerNote">—</div></div>
       <div class="card wide-card"><h2>Текущий сервер</h2><div class="stats"><div class="stat"><div class="label">Режим</div><div class="value" id="curMode">—</div></div><div class="stat"><div class="label">Сервер</div><div class="value" id="curServer">—</div></div><div class="stat"><div class="label">Пинг</div><div class="value" id="curPing">—</div></div></div><div class="row"><select id="serverSelect" style="min-width:220px"></select><button class="primary" id="btnSelectServer">Выбрать сервер</button></div><div class="row"><button id="btnPingCurrent">Проверить текущий</button><button id="btnPingAllOverview">Пинг всех</button><button id="btnRestart">Перезапустить sing-box</button></div><div class="small muted" id="autoNote">auto использует профили «Приоритетный» и «Обычный». Резервные серверы используются только при ручном выборе.</div><div class="small muted" id="pingNote">—</div></div>
-      <div class="card full"><h2>Диагностика Proxy/VPN</h2><div class="muted">Показывает внешний IP, финальный маршрут через VPN/DIRECT и помогает проверить стабильность длинной загрузки для любого сервиса.</div><div id="routeDiagBox" class="support-note" style="margin-top:10px">Загрузка проверки маршрута...</div><div class="row"><button class="primary" id="btnRouteDiagRefresh">Проверить маршрут сейчас</button><button onclick="openTab('routing')">Открыть маршрутизацию</button></div><div class="support-note" style="margin-top:10px"><b>Проверка стабильности потока</b><div class="muted">Вставьте URL тестового файла/сервиса. Аддон сравнит внешний auth-gateway и внутренний VPN-core, чтобы понять, где обрывается длинная загрузка.</div><div class="row"><input id="diagStreamUrl" placeholder="https://example.com/test-file.bin или http://..." style="min-width:420px"><button id="btnDiagStreamTest" class="primary">Проверить поток</button></div><div id="diagStreamResult" class="small muted">Проверка ещё не запускалась.</div></div></div>
+      <div class="card full"><h2>Диагностика Proxy/VPN</h2><div class="muted">Общая проверка без привязки к конкретным сервисам: выбранный сервер, правила маршрутизации и ручной тест длинной загрузки по URL, который укажет пользователь.</div><div id="routeDiagBox" class="support-note" style="margin-top:10px">Загрузка проверки маршрута...</div><div class="row"><button class="primary" id="btnRouteDiagRefresh">Обновить диагностику</button><button onclick="openTab('routing')">Открыть маршрутизацию</button></div><div class="support-note" style="margin-top:10px"><b>Ручная проверка стабильности загрузки</b><div class="muted">Вставьте прямую ссылку на тестовый файл. Если сайт не отдаёт файл, проверка покажет, что тест не состоялся, а не будет делать ложный вывод о скорости.</div><div class="row"><input id="diagStreamUrl" placeholder="Полный URL тестового файла: http://... или https://..." style="min-width:420px"><button id="btnDiagStreamTest" class="primary">Проверить загрузку</button></div><div id="diagStreamResult" class="small muted">Проверка ещё не запускалась.</div></div></div>
       <div class="card full"><h2>Сводка</h2><div class="stats"><div class="stat"><div class="label">Серверов</div><div class="value" id="serversCount">—</div></div><div class="stat"><div class="label">Маршрутизация</div><div class="value" id="routingModeShort">—</div></div><div class="stat"><div class="label">Соединений</div><div class="value" id="connectionsCount">—</div></div><div class="stat"><div class="label">Клиентов онлайн</div><div class="value" id="clientsOnline">—</div></div><div class="stat"><div class="label">Новых/неизвестных</div><div class="value" id="unknownOnline">—</div></div><div class="stat"><div class="label">Блокировок</div><div class="value" id="blockedCount">—</div></div><div class="stat"><div class="label">Остаток трафика</div><div class="value" id="trafficLeftShort">—</div></div></div></div>
     </div>
   </section>
@@ -407,7 +407,7 @@
   </div></section>
 </div>
 <script>
-const state={status:null,health:null,servers:[],serverPings:{},autoTags:[],clients:[],selectedClients:new Map(),clientHistory:null,expandedHistoryClients:new Set(),users:[],connections:[],blocks:[],traffic:null,logs:[],logCategory:"all",activeTab:"overview",serverSources:[],routing:null,security:null,ru:null,ports:null,subscriptionUrl:"",subscriptionInfo:null,subscriptionJson:null,audit:[],maintenance:null,routeDiag:null};
+const state={status:null,health:null,servers:[],serverPings:{},autoTags:[],clients:[],selectedClients:new Map(),clientHistory:null,expandedHistoryClients:new Set(),expandedConnectionGroups:new Set(),expandedSystemConnections:false,users:[],connections:[],blocks:[],traffic:null,logs:[],logCategory:"all",activeTab:"overview",serverSources:[],routing:null,security:null,ru:null,ports:null,subscriptionUrl:"",subscriptionInfo:null,subscriptionJson:null,audit:[],maintenance:null,routeDiag:null};
 function ingressBase(){const p=location.pathname;const m=p.match(/^(.*\/api\/hassio_ingress\/[^/]+)(?:\/.*)?$/);if(m)return m[1];if(p.endsWith('/'))return p.slice(0,-1);return p.substring(0,p.lastIndexOf('/'))||''}
 const BASE=ingressBase();
 async function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
@@ -484,11 +484,24 @@ function renderRouteDiagnostics(){
   const d=state.routeDiag||{};
   if(!d.updated_at){box.innerHTML='<span class="muted">Проверка ещё не выполнялась.</span>';return;}
   const cls=d.status==='ok'?'green':(d.status==='bad'?'red':'yellow');
-  const direct=d.direct_ip||{}, proxy=d.proxy_ip||{}, cur=d.current||{}, vpn=d.vpn||{};
+  const cur=d.current||{}, vpn=d.vpn||{};
   const problems=(d.problems||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
   const recs=(d.recommendations||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
   const rows=(d.route_tests||[]).map(x=>`<tr><td>${esc(x.domain||x.normalized||'—')}</td><td>${pill(routeNameText(x.route),String(x.route).toLowerCase()==='direct'?'gray':'green')}</td><td>${esc(x.reason||x.error||'—')}</td><td>${esc(x.proxy_server||cur.server||'—')}</td></tr>`).join('');
-  box.innerHTML=`<div>${pill(d.status==='ok'?'маршрут нормальный':d.status==='bad'?'есть ошибка':'есть предупреждения',cls)} обновлено: ${fmtTime(d.updated_at)}</div><div class="stats" style="margin-top:8px"><div class="stat"><div class="label">IP напрямую</div><div class="value small">${esc(direct.ip||'—')}</div></div><div class="stat"><div class="label">IP через Proxy</div><div class="value small">${esc(proxy.ip||'—')}</div></div><div class="stat"><div class="label">Активный сервер</div><div class="value small">${esc(cur.server||'—')}</div></div><div class="stat"><div class="label">VPN</div><div class="value">${vpn.connected?'<span class="ok">выбран</span>':'<span class="bad">не выбран</span>'}</div></div></div>${problems?'<div class="bad" style="margin-top:8px"><b>Проблемы:</b><ul>'+problems+'</ul></div>':''}${recs?'<div class="muted" style="margin-top:8px"><b>Что сделать:</b><ul>'+recs+'</ul></div>':''}<table style="margin-top:10px"><thead><tr><th>Домен</th><th>Маршрут</th><th>Причина</th><th>Сервер</th></tr></thead><tbody>${rows||'<tr><td colspan="4">Нет проверок.</td></tr>'}</tbody></table><div class="small muted" style="margin-top:8px">${esc(d.note||'')}</div>`;
+  const mode=d.routing_mode||'—';
+  const statusText=d.status==='ok'?'базовая проверка нормальная':d.status==='bad'?'есть ошибка':'есть предупреждения';
+  box.innerHTML=`<div>${pill(statusText,cls)} <span class="muted">обновлено: ${fmtTime(d.updated_at)}</span></div>
+  <div class="stats" style="margin-top:8px">
+    <div class="stat"><div class="label">Активный сервер</div><div class="value small">${esc(cur.server||'—')}</div></div>
+    <div class="stat"><div class="label">Пинг сервера</div><div class="value small">${cur.delay?esc(cur.delay)+' мс':'—'}</div></div>
+    <div class="stat"><div class="label">Режим маршрутизации</div><div class="value small">${esc(mode)}</div></div>
+    <div class="stat"><div class="label">VPN-сервер</div><div class="value">${vpn.connected?'<span class="ok">выбран</span>':'<span class="bad">не выбран</span>'}</div></div>
+  </div>
+  <div class="small muted" style="margin-top:8px">Контрольные домены ниже показывают, что сделают текущие правила маршрутизации: отправят домен напрямую или через выбранный VPN. Это не тест скорости.</div>
+  ${problems?'<div class="bad" style="margin-top:8px"><b>Проблемы:</b><ul>'+problems+'</ul></div>':''}
+  ${recs?'<div class="muted" style="margin-top:8px"><b>Рекомендации:</b><ul>'+recs+'</ul></div>':''}
+  <table style="margin-top:10px"><thead><tr><th>Контрольный домен</th><th>Маршрут</th><th>Почему так</th><th>Сервер</th></tr></thead><tbody>${rows||'<tr><td colspan="4">Нет проверок.</td></tr>'}</tbody></table>
+  <div class="small muted" style="margin-top:8px">${esc(d.note||'')}</div>`;
 }
 async function runStreamDiagnostic(){
   const url=($('diagStreamUrl')?.value||'').trim();
@@ -501,17 +514,19 @@ function renderStreamDiagnostic(r){
   const tests=r.tests||{};
   const row=(name,title)=>{
     const x=tests[name]||{};
-    const good=x.complete;
+    const expected=Number(x.expected_bytes||0), got=Number(x.downloaded_bytes||0);
+    const good=!!x.complete;
     const status=x.status?('HTTP '+x.status):'—';
-    const size=fmtBytes(x.downloaded_bytes||0);
-    const expected=x.expected_bytes?(' из '+fmtBytes(x.expected_bytes)):'';
+    const size=fmtBytes(got)+(expected?(' из '+fmtBytes(expected)):'');
     const speed=x.speed_bytes_per_sec?fmtBytes(x.speed_bytes_per_sec)+'/с':'—';
     const err=x.error?'<br><span class="bad">'+esc(x.error)+'</span>':'';
-    return `<tr><td>${esc(title)}</td><td>${pill(good?'OK':'обрыв/ошибка',good?'green':'red')}</td><td>${esc(status)}</td><td>${size}${expected}</td><td>${speed}</td><td>${esc(x.duration_seconds||0)} с${err}</td></tr>`;
+    let label=good?'OK':'тест не состоялся/обрыв';
+    if(!good && x.status && got>0)label='скачано не полностью';
+    return `<tr><td>${esc(title)}</td><td>${pill(label,good?'green':'red')}</td><td>${esc(status)}</td><td>${size}</td><td>${speed}</td><td>${esc(x.duration_seconds||0)} с${err}</td></tr>`;
   };
   const problems=(r.problems||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
   const recs=(r.recommendations||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
-  box.innerHTML=`<div><b>${esc(r.conclusion||'Проверка завершена')}</b></div><table style="margin-top:8px"><thead><tr><th>Участок</th><th>Итог</th><th>Статус</th><th>Скачано</th><th>Скорость</th><th>Время/ошибка</th></tr></thead><tbody>${row('auth_gateway','Внешний auth-gateway')}${row('internal_socks','Внутренний VPN-core')}</tbody></table>${problems?'<div class="bad"><b>Проблемы:</b><ul>'+problems+'</ul></div>':''}${recs?'<div class="muted"><b>Что сделать:</b><ul>'+recs+'</ul></div>':''}`;
+  box.innerHTML=`<div><b>${esc(r.conclusion||'Проверка завершена')}</b></div><div class="small muted" style="margin-top:6px">Проверка скачивает URL двумя путями: через внешний auth-gateway и напрямую через внутренний VPN-core. Если сам сайт не отдаёт файл, это отображается как несостоявшийся тест, а не как низкая скорость.</div><table style="margin-top:8px"><thead><tr><th>Участок</th><th>Итог</th><th>Статус</th><th>Скачано</th><th>Скорость</th><th>Время/ошибка</th></tr></thead><tbody>${row('auth_gateway','Внешний auth-gateway')}${row('internal_socks','Внутренний VPN-core')}</tbody></table>${problems?'<div class="bad"><b>Проблемы:</b><ul>'+problems+'</ul></div>':''}${recs?'<div class="muted"><b>Что сделать:</b><ul>'+recs+'</ul></div>':''}`;
 }
 async function loadTelegram(){const d=await api('/api/telegram');state.status=state.status||{};state.status.telegram=d.telegram||{};mergeTelegramPresence();renderTelegram()}
 async function loadServers(){const d=await api('/api/servers');state.servers=d.servers||[];state.serverSources=d.sources||[];state.serverPings=d.pings||{};state.autoTags=d.auto_tags||[];state.subscriptionUrl=d.subscription_url||'';state.subscriptionInfo=d.subscription_info||state.subscriptionInfo;state.subscriptionJson=d.subscription_json||state.subscriptionJson;if($('subUrl')&&!$('subUrl').value)$('subUrl').value=state.subscriptionUrl||'';if($('subscriptionJsonUrl')&&!$('subscriptionJsonUrl').value)$('subscriptionJsonUrl').value=state.subscriptionUrl||'';renderServers();renderServerSources();renderServerSelector();renderSubscriptionInfo();renderSubscriptionJson();if(state.status)renderOverview()}
@@ -577,7 +592,7 @@ function renderOverview(){const s=state.status||{},p=s.power||{},vpn=s.vpn||{},c
 
 function listText(v){return Array.isArray(v)?v.join('\n'):(v||'')}
 function textList(id){return ($(id).value||'').split(/[,;\n]+/).map(x=>x.trim()).filter(Boolean)}
-function renderRouting(){const r=state.routing||{},sum=r.summary||state.status?.routing||{};$('routingMode').value=r.mode||'all_proxy';$('routingSourcesEnabled').textContent=sum.enabled_sources??'—';$('routingSourcesReady').textContent=sum.ready_sources??'—';$('routingManualDomains').textContent=(sum.manual_include_domains||0)+' / excl '+(sum.manual_exclude_domains||0);$('routingManualIps').textContent=(sum.manual_include_ips||0)+' / excl '+(sum.manual_exclude_ips||0);$('routingStatusText').textContent='Последнее обновление списков: '+fmtTime(sum.last_sources_update_at);$('manualIncludeDomains').value=listText(r.manual_include_domains);$('manualExcludeDomains').value=listText(r.manual_exclude_domains);$('manualIncludeIps').value=listText(r.manual_include_ips);$('manualExcludeIps').value=listText(r.manual_exclude_ips);const presets=r.presets||{};const names={youtube:'YouTube',openai:'OpenAI/ChatGPT',instagram_meta:'Instagram/Meta',discord:'Discord',telegram:'Telegram',nintendo:'Nintendo',tiktok:'TikTok',spotify:'Spotify'};$('routingPresets').innerHTML=Object.keys(names).map(k=>`<label class="pill blue"><input type="checkbox" data-preset="${k}" ${presets[k]?'checked':''}> ${names[k]}</label>`).join('');const rows=(r.sources||[]).map(src=>`<tr><td><label><input type="checkbox" data-source="${esc(src.tag)}" ${src.enabled?'checked':''}> <b>${esc(src.name)}</b></label><br><span class="muted">${esc(src.description||'')}</span></td><td>${esc(src.format)} / ${esc(src.kind)}</td><td class="tag">${esc(src.url||'')}</td><td>${src.last_status?pill(src.last_status,src.last_status==='ok'||src.last_status==='remote'?'green':'red'):'—'}<br><span class="muted">${src.last_items?src.last_items+' записей':''}</span><br><span class="bad">${esc(src.last_error||'')}</span></td><td>${fmtTime(src.last_update_at)}</td></tr>`).join('');$('routingSourcesTable').innerHTML=rows?`<table><thead><tr><th>Источник</th><th>Формат</th><th>URL</th><th>Статус</th><th>Обновлён</th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="muted">Источники не настроены.</div>'}
+function renderRouting(){const r=state.routing||{},sum=r.summary||state.status?.routing||{};$('routingMode').value=r.mode||'all_proxy';$('routingSourcesEnabled').textContent=sum.enabled_sources??'—';$('routingSourcesReady').textContent=sum.ready_sources??'—';$('routingManualDomains').textContent=(sum.manual_include_domains||0)+' / excl '+(sum.manual_exclude_domains||0);$('routingManualIps').textContent=(sum.manual_include_ips||0)+' / excl '+(sum.manual_exclude_ips||0);$('routingStatusText').textContent='Последнее обновление списков: '+fmtTime(sum.last_sources_update_at);$('manualIncludeDomains').value=listText(r.manual_include_domains);$('manualExcludeDomains').value=listText(r.manual_exclude_domains);$('manualIncludeIps').value=listText(r.manual_include_ips);$('manualExcludeIps').value=listText(r.manual_exclude_ips);const presets=r.presets||{};const names={youtube:'YouTube',openai:'OpenAI/ChatGPT',instagram_meta:'Instagram/Meta',discord:'Discord',telegram:'Telegram',tiktok:'TikTok',spotify:'Spotify'};$('routingPresets').innerHTML=Object.keys(names).map(k=>`<label class="pill blue"><input type="checkbox" data-preset="${k}" ${presets[k]?'checked':''}> ${names[k]}</label>`).join('');const rows=(r.sources||[]).map(src=>`<tr><td><label><input type="checkbox" data-source="${esc(src.tag)}" ${src.enabled?'checked':''}> <b>${esc(src.name)}</b></label><br><span class="muted">${esc(src.description||'')}</span></td><td>${esc(src.format)} / ${esc(src.kind)}</td><td class="tag">${esc(src.url||'')}</td><td>${src.last_status?pill(src.last_status,src.last_status==='ok'||src.last_status==='remote'?'green':'red'):'—'}<br><span class="muted">${src.last_items?src.last_items+' записей':''}</span><br><span class="bad">${esc(src.last_error||'')}</span></td><td>${fmtTime(src.last_update_at)}</td></tr>`).join('');$('routingSourcesTable').innerHTML=rows?`<table><thead><tr><th>Источник</th><th>Формат</th><th>URL</th><th>Статус</th><th>Обновлён</th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="muted">Источники не настроены.</div>'}
 async function saveRouting(updateSources=false){const r=state.routing||{};r.mode=$('routingMode').value;r.manual_include_domains=textList('manualIncludeDomains');r.manual_exclude_domains=textList('manualExcludeDomains');r.manual_include_ips=textList('manualIncludeIps');r.manual_exclude_ips=textList('manualExcludeIps');r.presets=r.presets||{};document.querySelectorAll('[data-preset]').forEach(x=>r.presets[x.dataset.preset]=x.checked);document.querySelectorAll('[data-source]').forEach(x=>{const s=(r.sources||[]).find(y=>y.tag===x.dataset.source);if(s)s.enabled=x.checked});await post('/api/routing',r);if(updateSources)await post('/api/routing/update_sources',{});await refreshAll();}
 
 function pingText(tag){const p=state.serverPings[tag]||{};return p.delay?p.delay+' мс':(p.error?esc(p.error):'—')}
@@ -872,20 +887,35 @@ function connectionAccess(c){return c?.metadata?.access||c?.access||''}
 function connectionRoute(c){return c?.route_display||c?.metadata?.route_display||(c.chains?c.chains.join(' → '):(c.chain||c.rule||'—'))}
 function connectionRouteWarning(c){return c?.route_warning||c?.metadata?.route_warning||''}
 function isLocalConnectionIp(ip){return ip==='127.0.0.1'||ip==='::1'||ip==='localhost'||String(ip||'').startsWith('127.')}
+function captureExpandedConnections(){
+  const open=new Set();
+  document.querySelectorAll('.conn-group[data-conn-key]').forEach(el=>{if(el.open)open.add(el.dataset.connKey)});
+  state.expandedConnectionGroups=open;
+  const sys=document.querySelector('.system-conn-group[data-system="1"]');
+  if(sys)state.expandedSystemConnections=!!sys.open;
+}
+function bindConnectionToggles(){
+  document.querySelectorAll('.conn-group[data-conn-key]').forEach(el=>{el.addEventListener('toggle',()=>{const key=el.dataset.connKey;if(!key)return;if(el.open)state.expandedConnectionGroups.add(key);else state.expandedConnectionGroups.delete(key);});});
+  const sys=document.querySelector('.system-conn-group[data-system="1"]');
+  if(sys)sys.addEventListener('toggle',()=>{state.expandedSystemConnections=!!sys.open;});
+}
+function isServiceConnection(c){return !!(c?.service_connection||c?.metadata?.service_connection)}
+function connectionGroupKey(g){return String((g.user?g.user+'|':'')+(g.ip||'—'))}
 function renderConnectionGroups(list){
   const groups={};
   for(const c of list){
     const ip=connectionIp(c), user=connectionUser(c), key=(user?user+' / ':'')+ip;
     if(!groups[key])groups[key]={ip,user,items:[],hosts:{},down:0,up:0};
     const g=groups[key]; g.items.push(c);
-    const h=mainHost(connectionHost(c)); if(h&&h!=='—')g.hosts[h]=(g.hosts[h]||0)+1;
+    const h=mainHost(connectionHost(c)); if(h&&h!=='—'&&!String(h).toLowerCase().includes('служебное'))g.hosts[h]=(g.hosts[h]||0)+1;
     g.down+=Number(c.download||c.downloaded||c.down||0); g.up+=Number(c.upload||c.uploaded||c.up||0);
   }
   return Object.values(groups).sort((a,b)=>b.items.length-a.items.length).map(g=>{
     const hosts=Object.entries(g.hosts).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([h,n])=>pill(`${h} ×${n}`,'purple')).join('')||'—';
     const accessTags=[...new Set(g.items.map(connectionAccess).filter(Boolean))].map(x=>pill(x==='trusted_ip_bypass'?'trusted_ip без auth':x,x==='trusted_ip_bypass'?'green':'blue')).join('');
-    const rows=g.items.slice(0,80).map(c=>{const warn=connectionRouteWarning(c);return `<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`}).join('');
-    return `<div class="client-box"><div class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</div><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span></div><details style="margin-top:8px"><summary>Показать подробности</summary><table><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></details></div></div>`;
+    const rows=g.items.slice(0,100).map(c=>{const warn=connectionRouteWarning(c);return `<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`}).join('');
+    const k=connectionGroupKey(g), open=state.expandedConnectionGroups.has(k)?' open':'';
+    return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span></div><table><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
   }).join('');
 }
 function renderSystemConnections(list){
@@ -893,17 +923,20 @@ function renderSystemConnections(list){
   const hosts={}; let down=0, up=0;
   for(const c of list){const h=mainHost(connectionHost(c)); if(h&&h!=='—')hosts[h]=(hosts[h]||0)+1; down+=Number(c.download||c.downloaded||c.down||0); up+=Number(c.upload||c.uploaded||c.up||0);}
   const hostText=Object.entries(hosts).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([h,n])=>pill(`${h} ×${n}`,'gray')).join('')||'—';
-  const rows=list.slice(0,80).map(c=>`<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`).join('');
-  return `<details class="client-box" style="opacity:.82"><summary><b>Служебные локальные соединения add-on</b> ${pill(list.length+' соединений','gray')}</summary><div class="client-body"><div class="muted">Это localhost 127.0.0.1/::1 внутри контейнера. Они не считаются внешними клиентами и вынесены отдельно, чтобы не путать их с реальными подключениями.</div><div style="margin-top:6px">Down: <b>${fmtBytes(down)}</b> · Up: <b>${fmtBytes(up)}</b><br>Назначения: <span class="mini-list">${hostText}</span></div><table style="margin-top:8px"><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+  const rows=list.slice(0,100).map(c=>`<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`).join('');
+  const open=state.expandedSystemConnections?' open':'';
+  return `<details class="client-box system-conn-group" data-system="1" style="opacity:.82"${open}><summary><b>Служебные соединения add-on</b> ${pill(list.length+' соединений','gray')}</summary><div class="client-body"><div class="muted">Это внутренние соединения самого add-on/gateway/localhost. Они вынесены отдельно и не считаются сайтами клиента.</div><div style="margin-top:6px">Down: <b>${fmtBytes(down)}</b> · Up: <b>${fmtBytes(up)}</b><br>Назначения: <span class="mini-list">${hostText}</span></div><table style="margin-top:8px"><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 function renderConnections(){
   const box=$('connectionsGrouped'); if(!box)return;
+  captureExpandedConnections();
   const list=Array.isArray(state.connections)?state.connections:[];
   if(!list.length){box.innerHTML='<div class="muted">Активных соединений нет. Если клиент точно подключен, нажми «Обновить» или проверь External Controller sing-box в диагностике.</div>';return;}
-  const local=list.filter(c=>isLocalConnectionIp(connectionIp(c)));
-  const external=list.filter(c=>!isLocalConnectionIp(connectionIp(c)));
+  const service=list.filter(c=>isLocalConnectionIp(connectionIp(c))||isServiceConnection(c));
+  const external=list.filter(c=>!isLocalConnectionIp(connectionIp(c))&&!isServiceConnection(c));
   const externalHtml=renderConnectionGroups(external)||'<div class="muted">Внешних клиентских соединений сейчас нет.</div>';
-  box.innerHTML=externalHtml+renderSystemConnections(local);
+  box.innerHTML=externalHtml+renderSystemConnections(service);
+  bindConnectionToggles();
 }
 
 function switchControl(id,checked,onchange,labelOn='Включён',labelOff='Выключен'){

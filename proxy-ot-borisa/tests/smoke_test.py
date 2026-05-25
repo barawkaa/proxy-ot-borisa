@@ -464,7 +464,7 @@ finally:
     backend.load_subscription_servers = _old_load_subscription_servers_ts
 
 
-# v1.25.3/1.25.4: auth-gateway routes must show final VPN/DIRECT leg and trusted tag.
+# v1.25.3-v1.25.5: auth-gateway routes must show final VPN/DIRECT leg and trusted tag.
 _old_current_server_info = backend.current_server_info
 _old_get_proxies = backend.get_proxies
 try:
@@ -485,7 +485,7 @@ finally:
 assert "/api/route/diagnostics" in backend_text
 assert "/api/diagnostics/stream_test" in backend_text
 assert "Диагностика Proxy/VPN" in html
-assert "Проверка стабильности потока" in html
+assert "Ручная проверка стабильности загрузки" in html
 assert "trusted_ip без auth" in html
 assert "function runStreamDiagnostic" in html
 
@@ -526,3 +526,7 @@ assert "Кэш rule-set маршрутизации" in html
 assert "SERVER_SOURCES_FILE" in backend_text
 assert "source_id" in backend_text and "source_name" in backend_text
 print(json.dumps({"server_sources_checks": True}, ensure_ascii=False))
+
+# v1.25.5: no product UI/function preset for a service-specific console/game preset.
+assert "nintendo" not in backend_text.lower()
+assert "nintendo" not in html.lower()

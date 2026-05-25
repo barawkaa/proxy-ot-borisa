@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.4"
+APP_VERSION = "1.25.5"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -88,7 +88,7 @@ DATA_REGISTRY = {
     "client_limits": {"path": DATA_DIR / "client_limits.json", "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Лимиты клиентов"},
     "mtproto_activity": {"path": MTG_ACTIVITY_FILE, "backup": True, "maintenance": True, "cleanup": "prune_mtg_activity_file", "contains_secrets": False, "description": "Активность MTProto", "retention_days": 30, "max_records": MTG_ACTIVITY_MAX_RECORDS},
     "network_quality": {"path": NETWORK_QUALITY_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Диагностика задержек"},
-    "route_diagnostics": {"path": ROUTE_DIAGNOSTICS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Диагностика маршрута Proxy/VPN"},
+    "route_diagnostics": {"path": ROUTE_DIAGNOSTICS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Универсальная диагностика маршрутов Proxy/VPN"},
     "migrations": {"path": MIGRATIONS_FILE, "backup": True, "maintenance": True, "cleanup": None, "contains_secrets": False, "description": "Миграции"},
     "last_good_singbox_config": {"path": LAST_GOOD_SINGBOX_CONFIG, "backup": False, "maintenance": True, "cleanup": None, "contains_secrets": True, "description": "Последний рабочий конфиг sing-box"},
 }
@@ -139,7 +139,6 @@ DEFAULT_ROUTING = {
         "instagram_meta": False,
         "discord": False,
         "telegram": False,
-        "nintendo": False,
         "tiktok": False,
         "spotify": False,
     },
@@ -209,7 +208,6 @@ PRESET_DOMAINS = {
     "instagram_meta": ["instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net", "meta.com", "threads.net"],
     "discord": ["discord.com", "discord.gg", "discordapp.com", "discordapp.net", "discord.media"],
     "telegram": ["telegram.org", "t.me", "tdesktop.com"],
-    "nintendo": ["nintendo.com", "nintendo.net", "nintendo-europe.com", "nintendowifi.net"],
     "tiktok": ["tiktok.com", "tiktokcdn.com", "byteoversea.com", "ibyteimg.com"],
     "spotify": ["spotify.com", "scdn.co", "spotifycdn.com", "spoti.fi"],
 }
@@ -4685,6 +4683,21 @@ def gateway_activity_add_bytes(key, upload=0, download=0):
         item["download"] = int(item.get("download") or 0) + max(0, int(download or 0))
 
 
+def gateway_activity_update_destination(key, destination='', service=None):
+    if not key:
+        return
+    dest = str(destination or '').strip()
+    with GATEWAY_ACTIVE_LOCK:
+        item = GATEWAY_ACTIVE.get(key)
+        if not item:
+            return
+        item["last_seen"] = time.time()
+        if dest and dest != 'proxy-gateway':
+            item["destination"] = dest
+        if service:
+            item["service"] = service
+
+
 def gateway_activity_end(key):
     with GATEWAY_ACTIVE_LOCK:
         GATEWAY_ACTIVE.pop(key, None)
@@ -4695,10 +4708,15 @@ def gateway_active_snapshot():
         return [dict(v) for v in GATEWAY_ACTIVE.values()]
 
 
+def is_gateway_service_destination(destination):
+    dest = str(destination or '').strip().lower()
+    return not dest or dest in {'proxy-gateway', 'gateway', 'auth-gateway', 'internal-gateway'}
+
+
 def route_chain_for_destination(destination):
     host = str(destination or "").strip()
-    if not host or host == "proxy-gateway":
-        return {"chains": ["auth-gateway", "Proxy", "маршрут не определён"], "route": "unknown", "final": "unknown", "warning": "Нет назначения для определения маршрута."}
+    if is_gateway_service_destination(host):
+        return {"chains": ["auth-gateway", "служебное соединение add-on"], "route": "internal", "final": "служебное", "warning": "", "service_connection": True}
     try:
         decision = route_test_domain(host)
     except Exception as e:
@@ -4750,20 +4768,23 @@ def gateway_connections_for_ui():
             "route_decision": route_info.get("route"),
             "route_reason": route_info.get("reason"),
             "route_warning": route_info.get("warning"),
+            "service_connection": bool(route_info.get("service_connection")),
             "metadata": {
                 "sourceIP": ip,
-                "destination": dest,
-                "host": dest,
+                "destination": "Служебное соединение add-on" if route_info.get("service_connection") else dest,
+                "host": "Служебное соединение add-on" if route_info.get("service_connection") else dest,
                 "network": "tcp",
                 "type": service,
                 "user": gw.get("auth_user") or access_label,
                 "access": access_label,
                 "gateway": True,
+                "service_connection": bool(route_info.get("service_connection")),
                 "route_display": " → ".join(route_info.get("chains") or ["auth-gateway", "Proxy"]),
                 "route_final": route_info.get("final"),
                 "route_warning": route_info.get("warning"),
             },
             "gateway": True,
+            "service_connection": bool(route_info.get("service_connection")),
             "trusted_bypass": trusted,
             "started_at": gw.get("started_at") or now,
             "last_seen": gw.get("last_seen") or now,
@@ -5058,32 +5079,20 @@ def handle_http_gateway(client, addr):
             gateway_activity_end(activity_key)
 
 
-def socks_auth_exchange(client, ip):
-    greeting = read_exact(client, 2)
-    if greeting[0] != 5:
-        raise OSError('not socks5')
-    methods = read_exact(client, greeting[1])
-    auth_required = bool(load_options().get('socks_auth_enabled')) and not is_trusted_bypass_ip(ip, 'socks')
-    if not auth_required:
-        upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
-        upstream.sendall(greeting + methods)
-        return upstream, ''
-    if 2 not in methods:
-        client.sendall(b'\x05\xff')
-        raise OSError('socks auth method not offered')
-    client.sendall(b'\x05\x02')
-    ver = read_exact(client, 1)
-    if ver != b'\x01':
-        raise OSError('bad socks auth version')
-    ulen = read_exact(client, 1)[0]
-    username = read_exact(client, ulen).decode('utf-8', errors='ignore')
-    plen = read_exact(client, 1)[0]
-    password = read_exact(client, plen).decode('utf-8', errors='ignore')
-    if not check_proxy_credentials('socks', username, password):
-        client.sendall(b'\x01\x01')
-        log('SECURITY', 'PROXY_AUTH_FAILED', 'SOCKS5 proxy auth failed', actor='gateway', action='socks_auth_failed', target=ip, extra={'username': username})
-        raise OSError('socks auth failed')
-    client.sendall(b'\x01\x00')
+def _socks_destination_from_request(req_head, addr_part, port_part):
+    atyp = req_head[3]
+    host = ''
+    if atyp == 1:
+        host = socket.inet_ntop(socket.AF_INET, addr_part)
+    elif atyp == 3:
+        host = addr_part[1:].decode('idna', errors='ignore') if addr_part else ''
+    elif atyp == 4:
+        host = socket.inet_ntop(socket.AF_INET6, addr_part)
+    port = int.from_bytes(port_part, 'big') if port_part else 0
+    return host, port
+
+
+def _read_socks_connect_request(client):
     req_head = read_exact(client, 4)
     if req_head[0] != 5 or req_head[1] != 1:
         client.sendall(b'\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00')
@@ -5100,26 +5109,74 @@ def socks_auth_exchange(client, ip):
         client.sendall(b'\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00')
         raise OSError('bad address type')
     port_part = read_exact(client, 2)
-    req = req_head + addr_part + port_part
+    host, port = _socks_destination_from_request(req_head, addr_part, port_part)
+    return req_head + addr_part + port_part, host, port
+
+
+def _connect_internal_socks_with_raw_request(req):
     upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
-    upstream.sendall(b'\x05\x01\x00')
-    resp = read_exact(upstream, 2)
-    if resp != b'\x05\x00':
-        raise OSError('internal socks rejected no-auth')
-    upstream.sendall(req)
-    resp_head = read_exact(upstream, 4)
-    atyp2 = resp_head[3]
-    if atyp2 == 1:
-        rest = read_exact(upstream, 4 + 2)
-    elif atyp2 == 3:
-        ln = read_exact(upstream, 1)
-        rest = ln + read_exact(upstream, ln[0] + 2)
-    elif atyp2 == 4:
-        rest = read_exact(upstream, 16 + 2)
+    try:
+        upstream.sendall(b'\x05\x01\x00')
+        resp = read_exact(upstream, 2)
+        if resp != b'\x05\x00':
+            raise OSError('internal socks rejected no-auth')
+        upstream.sendall(req)
+        resp_head = read_exact(upstream, 4)
+        atyp2 = resp_head[3]
+        if atyp2 == 1:
+            rest = read_exact(upstream, 4 + 2)
+        elif atyp2 == 3:
+            ln = read_exact(upstream, 1)
+            rest = ln + read_exact(upstream, ln[0] + 2)
+        elif atyp2 == 4:
+            rest = read_exact(upstream, 16 + 2)
+        else:
+            rest = read_exact(upstream, 2)
+        if resp_head[1] != 0:
+            raise OSError(f'internal SOCKS connect failed: {resp_head!r}')
+        return upstream, resp_head + rest
+    except Exception:
+        try:
+            upstream.close()
+        except Exception:
+            pass
+        raise
+
+
+def socks_auth_exchange(client, ip):
+    greeting = read_exact(client, 2)
+    if greeting[0] != 5:
+        raise OSError('not socks5')
+    methods = read_exact(client, greeting[1])
+    trusted = is_trusted_bypass_ip(ip, 'socks')
+    auth_required = bool(load_options().get('socks_auth_enabled')) and not trusted
+    username = ''
+    if auth_required:
+        if 2 not in methods:
+            client.sendall(b'\x05\xff')
+            raise OSError('socks auth method not offered')
+        client.sendall(b'\x05\x02')
+        ver = read_exact(client, 1)
+        if ver != b'\x01':
+            raise OSError('bad socks auth version')
+        ulen = read_exact(client, 1)[0]
+        username = read_exact(client, ulen).decode('utf-8', errors='ignore')
+        plen = read_exact(client, 1)[0]
+        password = read_exact(client, plen).decode('utf-8', errors='ignore')
+        if not check_proxy_credentials('socks', username, password):
+            client.sendall(b'\x01\x01')
+            log('SECURITY', 'PROXY_AUTH_FAILED', 'SOCKS5 proxy auth failed', actor='gateway', action='socks_auth_failed', target=ip, extra={'username': username})
+            raise OSError('socks auth failed')
+        client.sendall(b'\x01\x00')
     else:
-        rest = read_exact(upstream, 2)
-    client.sendall(resp_head + rest)
-    return upstream, username
+        if 0 not in methods:
+            client.sendall(b'\x05\xff')
+            raise OSError('socks no-auth method not offered')
+        client.sendall(b'\x05\x00')
+    req, host, port = _read_socks_connect_request(client)
+    upstream, response = _connect_internal_socks_with_raw_request(req)
+    client.sendall(response)
+    return upstream, username, host, port
 
 
 def handle_socks_gateway(client, addr):
@@ -5127,10 +5184,12 @@ def handle_socks_gateway(client, addr):
     activity_key = None
     try:
         trusted = is_trusted_bypass_ip(ip, 'socks')
-        upstream, auth_user = socks_auth_exchange(client, ip)
-        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user)
+        upstream, auth_user, host, port = socks_auth_exchange(client, ip)
+        destination = f'{host}:{port}' if host and port else (host or 'proxy-gateway')
+        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user, destination=destination)
         relay_pair(client, upstream, activity_key=activity_key)
-    except Exception:
+    except Exception as e:
+        log_exception('GATEWAY', 'SOCKS_ERROR', e, actor='gateway', target=ip)
         try:
             client.close()
         except Exception:
@@ -6076,9 +6135,14 @@ def build_clients(connections):
         route_info = route_chain_for_destination(dest)
         up = int(gw.get('upload') or 0); down = int(gw.get('download') or 0)
         item['upload'] += up; item['download'] += down
-        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': dest, 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'route_warning': route_info.get('warning')})
-        item.setdefault('main_hosts', {})[simplify_host(dest)] = item.setdefault('main_hosts', {}).get(simplify_host(dest), 0) + 1
-        item['hosts'].add(dest)
+        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning')})
+        
+        if route_info.get('service_connection'):
+            item.setdefault('service_connections', 0)
+            item['service_connections'] += 1
+        else:
+            item.setdefault('main_hosts', {})[simplify_host(dest)] = item.setdefault('main_hosts', {}).get(simplify_host(dest), 0) + 1
+            item['hosts'].add(dest)
 
     active_keys = set(grouped.keys())
     try:
@@ -6325,7 +6389,7 @@ def network_quality_report(names=None, limit=12):
 
     Uses sing-box Clash delay endpoint for individual outbounds. This tests the
     HTTP/TCP path through each VLESS/VMess/etc. server to a small 204 URL and is
-    closer to what Nintendo/Telegram/browser traffic feel than a raw ping.
+    closer to what браузера/мессенджеров/обычного трафика traffic feel than a raw ping.
     """
     started = time.time()
     servers = load_servers()
@@ -6373,7 +6437,7 @@ def network_quality_report(names=None, limit=12):
         "direct": tests,
         "proxy_tests": proxy_tests,
         "best": best or {},
-        "note": "Это проверка TCP/HTTP задержки через outbounds sing-box. Она может отличаться от ICMP ping и лучше показывает реальную задержку браузера/Nintendo/Telegram.",
+        "note": "Это проверка TCP/HTTP задержки через outbounds sing-box. Она может отличаться от ICMP ping и лучше показывает реальную задержку браузера/мессенджеров/обычного трафика.",
     }
     write_json(NETWORK_QUALITY_FILE, report)
     return report
@@ -6485,7 +6549,7 @@ def route_diagnostics_report(force=False):
         "routing_mode": routing_mode,
         "problems": problems,
         "recommendations": recommendations,
-        "note": "Проверка показывает финальный маршрут: клиент → auth-gateway → Proxy → VPN/DIRECT. IP через Proxy может совпадать с Raspberry, если текущие правила отправляют домен напрямую. Для спорного сервиса используйте ручную проверку домена и тест стабильности потока.",
+        "note": "Диагностика не измеряет скорость и не подменяет реальные сайты клиента. Она показывает: выбран ли VPN-сервер, какой маршрут получат контрольные домены по текущим правилам и где может обрываться длинная загрузка при ручном тесте URL.",
     }
     write_json(ROUTE_DIAGNOSTICS_FILE, report)
     return report

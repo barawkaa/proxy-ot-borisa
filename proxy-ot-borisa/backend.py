@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.11"
+APP_VERSION = "1.25.12"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4751,11 +4751,16 @@ def gateway_active_snapshot(include_recent=True):
 
 def is_gateway_service_destination(destination):
     dest = str(destination or '').strip().lower()
-    return not dest or dest in {'proxy-gateway', 'gateway', 'auth-gateway', 'internal-gateway'}
+    # Only real internal placeholders are service rows. proxy-gateway is an
+    # unknown external destination from a real client and must stay in the
+    # client card, otherwise the UI loses the client and main sites.
+    return not dest or dest in {'gateway', 'auth-gateway', 'internal-gateway'}
 
 
 def route_chain_for_destination(destination):
     host = str(destination or "").strip()
+    if str(host).strip().lower() == 'proxy-gateway':
+        return {"chains": ["auth-gateway", "Proxy", "назначение не определено"], "route": "unknown", "final": "назначение не определено", "warning": "Клиентское SOCKS5/HTTP-соединение принято, но назначение ещё не определено.", "service_connection": False}
     if is_gateway_service_destination(host):
         return {"chains": ["auth-gateway", "служебное соединение add-on"], "route": "internal", "final": "служебное", "warning": "", "service_connection": True}
     try:
@@ -4876,6 +4881,12 @@ def is_internal_proxy_raw_connection(conn, gateway_hosts=None):
     except Exception:
         internal_src = False
     internal_inbound = "IN-SOCKS5" in inbound.upper() or str(INTERNAL_SOCKS_PROXY_PORT) in inbound
+    # Raw sing-box rows created by the local gateway often contain only the
+    # resolved IP (not the original domain). If synthetic gateway rows exist,
+    # hide these internal hops from the main UI so they do not replace the real
+    # external client card and its main sites.
+    if (internal_src or internal_inbound) and gateway_hosts:
+        return True
     if (internal_src or internal_inbound) and host and host in gateway_hosts:
         return True
     return False
@@ -5344,7 +5355,7 @@ class _Socks5DestinationTap:
         return host, port
 
 
-def _trusted_socks_passthrough(client, ip, greeting, methods):
+def _trusted_socks_passthrough(client, ip, greeting, methods, trusted=True, auth_user=''):
     """Restore the v1.25.2 transparent SOCKS5 path for trusted routers.
 
     v1.25.2 forwarded the SOCKS5 handshake to the internal sing-box SOCKS inbound
@@ -5356,7 +5367,7 @@ def _trusted_socks_passthrough(client, ip, greeting, methods):
     upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
     try:
         upstream.sendall(greeting + methods)
-        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=True, auth_user='', destination='proxy-gateway')
+        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user or '', destination='proxy-gateway')
         tap = _Socks5DestinationTap(activity_key)
         return upstream, '', activity_key, tap
     except Exception:
@@ -5380,9 +5391,8 @@ def socks_auth_exchange(client, ip):
     methods = read_exact(client, greeting[1])
     auth_required = bool(load_options().get('socks_auth_enabled')) and not is_trusted_bypass_ip(ip, 'socks')
     if not auth_required:
-        upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
-        upstream.sendall(greeting + methods)
-        return upstream, ''
+        upstream, auth_user, activity_key, tap = _trusted_socks_passthrough(client, ip, greeting, methods, trusted=is_trusted_bypass_ip(ip, 'socks'), auth_user='')
+        return upstream, auth_user, activity_key, tap
     if 2 not in methods:
         client.sendall(b'\x05\xff')
         raise OSError('socks auth method not offered')
@@ -5435,7 +5445,7 @@ def socks_auth_exchange(client, ip):
         else:
             rest = read_exact(upstream, 2)
         client.sendall(resp_head + rest)
-        return upstream, username
+        return upstream, username, None, None
     except Exception:
         try:
             upstream.close()
@@ -5449,9 +5459,9 @@ def handle_socks_gateway(client, addr):
     activity_key = None
     try:
         trusted = is_trusted_bypass_ip(ip, 'socks')
-        upstream, auth_user = socks_auth_exchange(client, ip)
-        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user)
-        relay_pair(client, upstream, activity_key=activity_key)
+        upstream, auth_user, existing_activity_key, upload_tap = socks_auth_exchange(client, ip)
+        activity_key = existing_activity_key or gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user)
+        relay_pair(client, upstream, activity_key=activity_key, upload_tap=upload_tap)
     except Exception as e:
         log_exception('GATEWAY', 'SOCKS_ERROR', e, actor='gateway', target=ip)
         try:
@@ -6761,6 +6771,52 @@ def proxy_public_ip(timeout=8.0):
         return {"ok": False, "ip": "", "error": str(e)}
 
 
+def diagnostic_route_domains(limit=40):
+    """Return route-test domains from real user routing config, not random examples."""
+    r = load_routing()
+    out = []
+    def add(x):
+        x = normalize_domain(x)
+        if not x or x in out:
+            return
+        out.append(x)
+    for d in r.get('manual_include_domains') or []:
+        add(d)
+    # Include enabled preset representatives only to show why a preset routes traffic.
+    presets = r.get('presets') or {}
+    preset_examples = {
+        'openai': ['chatgpt.com', 'openai.com'],
+        'instagram_meta': ['instagram.com', 'facebook.com', 'cdninstagram.com'],
+        'youtube': ['youtube.com', 'googlevideo.com'],
+        'discord': ['discord.com', 'discordapp.com'],
+        'telegram': ['telegram.org', 't.me'],
+        'tiktok': ['tiktok.com'],
+        'spotify': ['spotify.com'],
+    }
+    for key, enabled in presets.items():
+        if enabled:
+            for d in preset_examples.get(key, []):
+                add(d)
+    for d in r.get('manual_exclude_domains') or []:
+        add(d)
+    if not out:
+        # Last-resort examples when no real rules are configured yet.
+        for d in ['chatgpt.com', 'instagram.com', 'youtube.com']:
+            add(d)
+    return out[:int(limit or 40)]
+
+
+def cached_public_ip_summary():
+    d = read_json(ROUTE_DIAGNOSTICS_FILE, {})
+    direct = (d.get('direct_ip') or {}) if isinstance(d, dict) else {}
+    proxy = (d.get('proxy_ip') or {}) if isinstance(d, dict) else {}
+    return {
+        'server_direct_ip': direct.get('ip') or '',
+        'proxy_test_ip': proxy.get('ip') or '',
+        'updated_at': d.get('updated_at') if isinstance(d, dict) else 0,
+    }
+
+
 def route_diagnostics_report(force=False):
     cached = read_json(ROUTE_DIAGNOSTICS_FILE, {})
     now = time.time()
@@ -6772,12 +6828,7 @@ def route_diagnostics_report(force=False):
     vpn = vpn_status(proxies)
     direct_ip = direct_public_ip()
     proxy_ip = proxy_public_ip()
-    domains = [
-        'api.ipify.org',
-        'ifconfig.me',
-        'www.google.com',
-        'www.cloudflare.com',
-    ]
+    domains = diagnostic_route_domains()
     route_tests = []
     for d in domains:
         try:
@@ -7089,6 +7140,7 @@ def diagnostics_status_report():
             'trusted_cidrs': security.get('trusted_auth_bypass_cidrs') or [],
         },
         'current': cur,
+        'public_ips': cached_public_ip_summary(),
         'routing': routing_summary(),
         'recent_gateway': gateway_active_snapshot(include_recent=True)[-20:],
         'last_error': last_error,
@@ -7503,7 +7555,7 @@ class Handler(BaseHTTPRequestHandler):
                 boot = get_boot_state()
                 options = load_options(); settings = load_settings(); servers = load_servers(); blocked = load_blocked(); proxies = get_proxies(); conns = list(connections_cache.get("items") or []); sec_summary = security_summary(options=options); ru = ((sec_summary.get("country_lists") or {}).get("RU") or {})
                 tg_status = mtg_status()
-                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "startup": boot, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": tg_status, "settings": settings, "power": power_summary(settings, tg_status), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"]), "trusted_auth_bypass_enabled": bool(load_security().get("trusted_auth_bypass_enabled")), "trusted_auth_bypass_cidrs": len(load_security().get("trusted_auth_bypass_cidrs") or [])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "proxies": proxies})
+                return self.send_json({"app": APP_NAME, "version": APP_VERSION, "startup": boot, "singbox_running": bool(singbox_process and singbox_process.poll() is None), "last_error": last_error, "telegram": tg_status, "settings": settings, "power": power_summary(settings, tg_status), "vpn": vpn_status(proxies), "subscription_info": load_subscription_info(), "activity": app_activity(), "options": {"http_proxy_port": options["http_proxy_port"], "socks_proxy_port": options["socks_proxy_port"], "telegram_proxy_port": options.get("telegram_proxy_port"), "socks_auth_enabled": options["socks_auth_enabled"], "http_auth_enabled": options["http_auth_enabled"], "proxy_username": options.get("proxy_username"), "log_level": options.get("log_level", "warn"), "production_mode": options.get("production_mode", "normal")}, "security": sec_summary, "security_status": {"autoban_enabled": bool(load_security().get("autoban_enabled")), "country_filter_enabled": bool(load_security().get("country_filter_enabled")), "ru_cidrs": int(ru.get("count") or 0), "http_auth_enabled": bool(options["http_auth_enabled"]), "socks_auth_enabled": bool(options["socks_auth_enabled"]), "trusted_auth_bypass_enabled": bool(load_security().get("trusted_auth_bypass_enabled")), "trusted_auth_bypass_cidrs": len(load_security().get("trusted_auth_bypass_cidrs") or [])}, "monitor": {"interval_seconds": MONITOR_INTERVAL_SECONDS, "autoban_interval_seconds": AUTOBAN_CHECK_INTERVAL_SECONDS, "connections_updated_at": connections_cache.get("updated_at", 0), "last_autoban_at": connections_cache.get("last_autoban_at", 0)}, "servers_count": len(servers), "blocked_count": len(blocked), "connections_count": len(conns), "current": current_server_info(proxies), "routing": routing_summary(), "public_ips": cached_public_ip_summary(), "client": {"ip": self.headers.get('X-Forwarded-For', '').split(',')[0].strip() or self.headers.get('X-Real-IP', '') or self.client_address[0]}, "proxies": proxies})
             if path == "/api/system/check":
                 return self.send_json(system_check_report())
             if path == "/api/maintenance":

@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.15"
+APP_VERSION = "1.25.16"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -7205,6 +7205,88 @@ def _tcp_port_probe(host, port, timeout=1.5):
         return {'ok': False, 'ms': int((time.time() - started) * 1000), 'error': f'{type(e).__name__}: {e}'}
 
 
+
+def diagnostics_client_watch_report(ip='', since=0, limit=120):
+    """Inspect real incoming gateway activity for a selected client.
+
+    This is intentionally read-only: it never touches HTTP/SOCKS transport. It
+    helps diagnose router/phone/browser scenarios by checking whether requests
+    from a real client reached the add-on and how they were classified.
+    """
+    now = time.time()
+    target_ip = str(ip or '').strip()
+    try:
+        since = float(since or 0)
+    except Exception:
+        since = 0.0
+    try:
+        limit = max(1, min(int(limit or 120), 500))
+    except Exception:
+        limit = 120
+    rows = []
+    for gw in gateway_active_snapshot(include_recent=True):
+        if not isinstance(gw, dict):
+            continue
+        gw_ip = str(gw.get('ip') or '').strip()
+        if target_ip and gw_ip != target_ip:
+            continue
+        ts = float(gw.get('last_seen') or gw.get('started_at') or 0)
+        if since and ts < since:
+            continue
+        dest = gw.get('destination') or 'proxy-gateway'
+        route_info = route_chain_for_destination(dest)
+        up = int(gw.get('upload') or 0)
+        down = int(gw.get('download') or 0)
+        is_unknown = str(dest).strip().lower() == 'proxy-gateway'
+        rows.append({
+            'key': gw.get('key') or '',
+            'ip': gw_ip,
+            'service': gw.get('service') or 'HTTP/SOCKS',
+            'trusted': bool(gw.get('trusted')),
+            'auth_user': gw.get('auth_user') or '',
+            'destination': dest,
+            'destination_known': not is_unknown and not route_info.get('service_connection'),
+            'route_display': ' → '.join(route_info.get('chains') or []),
+            'route': route_info.get('route') or 'unknown',
+            'route_warning': route_info.get('warning') or '',
+            'download': down,
+            'upload': up,
+            'started_at': gw.get('started_at') or 0,
+            'last_seen': gw.get('last_seen') or 0,
+            'recent': bool(gw.get('recent')),
+            'active': not bool(gw.get('recent')),
+        })
+    rows.sort(key=lambda x: float(x.get('last_seen') or x.get('started_at') or 0), reverse=True)
+    rows = rows[:limit]
+    known = [r for r in rows if r.get('destination_known')]
+    unknown = [r for r in rows if not r.get('destination_known')]
+    services = {}
+    routes = {}
+    for r in rows:
+        services[r.get('service') or '—'] = services.get(r.get('service') or '—', 0) + 1
+        routes[r.get('route_display') or '—'] = routes.get(r.get('route_display') or '—', 0) + 1
+    if not rows:
+        conclusion = 'За выбранный период запросов от клиента не найдено. Если сайт открывали сейчас, проблема до add-on: роутер, профиль браузера, DNS/QUIC или внешний маршрут до порта.'
+    elif known:
+        conclusion = 'Запросы от клиента пришли, назначения определены. Смотрите маршрут DIRECT/VPN и ошибки конкретного сайта.'
+    else:
+        conclusion = 'Запросы от клиента пришли, трафик идёт, но назначения не определены. SOCKS5/HTTP работает как транспорт, но телеметрия назначения неполная.'
+    return {
+        'ok': True,
+        'updated_at': now,
+        'client_ip': target_ip,
+        'since': since,
+        'events_count': len(rows),
+        'known_destinations': len(known),
+        'unknown_destinations': len(unknown),
+        'download': sum(int(r.get('download') or 0) for r in rows),
+        'upload': sum(int(r.get('upload') or 0) for r in rows),
+        'services': services,
+        'routes': routes,
+        'events': rows,
+        'conclusion': conclusion,
+    }
+
 def diagnostics_status_report():
     options = load_options()
     security = load_security()
@@ -7669,6 +7751,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(route_diagnostics_report(force=force))
             if path == "/api/diagnostics/status":
                 return self.send_json(diagnostics_status_report())
+            if path == "/api/diagnostics/client_watch":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                return self.send_json(diagnostics_client_watch_report(ip=(qs.get("ip") or [""])[0], since=(qs.get("since") or [0])[0], limit=(qs.get("limit") or [120])[0]))
             if path == "/api/routing/test":
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 return self.send_json(route_test_domain((q.get("q") or [""])[0]))
@@ -7942,6 +8027,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(network_quality_report(names=body.get("names") or None, limit=body.get("limit") or 12))
             if path == "/api/route/diagnostics":
                 return self.send_json(route_diagnostics_report(force=True))
+            if path == "/api/diagnostics/client_watch":
+                return self.send_json(diagnostics_client_watch_report(ip=body.get("ip") or "", since=body.get("since") or 0, limit=body.get("limit") or 120))
             if path == "/api/diagnostics/stream_test":
                 url = str(body.get("url") or "").strip()
                 if not url:

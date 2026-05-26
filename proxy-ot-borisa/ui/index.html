@@ -353,11 +353,12 @@
     <div class="card full"><h2>Диагностика</h2><div class="muted">Единый раздел проверки add-on: состояние портов, IP, trusted bypass, маршруты, URL, скорость, логи и режим диагностики. Рабочие HTTP/SOCKS5-потоки этот раздел не меняет.</div>
       <div class="row"><button class="primary" id="btnDiagRefresh">Обновить диагностику</button><button id="btnDiagCopyReport">Сформировать отчёт для копирования</button></div>
       <textarea id="diagReportText" readonly class="hidden" style="margin-top:10px;min-height:180px" placeholder="Здесь появится отчёт диагностики для ручного копирования"></textarea>
-      <div class="diag-tabs row" style="margin-top:12px"><button class="diag-tab active" data-diag-panel="status">Статус</button><button class="diag-tab" data-diag-panel="route">Маршруты</button><button class="diag-tab" data-diag-panel="url">URL</button><button class="diag-tab" data-diag-panel="speed">Скорость</button><button class="diag-tab" data-diag-panel="logs">Логи и режим</button></div>
+      <div class="diag-tabs row" style="margin-top:12px"><button class="diag-tab active" data-diag-panel="status">Статус</button><button class="diag-tab" data-diag-panel="route">Маршруты</button><button class="diag-tab" data-diag-panel="url">URL</button><button class="diag-tab" data-diag-panel="client">Клиент</button><button class="diag-tab" data-diag-panel="speed">Скорость</button><button class="diag-tab" data-diag-panel="logs">Логи и режим</button></div>
     </div>
     <div class="card full diag-panel" id="diag-panel-status"><h2>Статус системы и входов</h2><div class="muted">Показывает рабочие порты, внешний IP через Proxy, IP Raspberry напрямую, активный VPN-сервер и trusted bypass. IP входа в интерфейс показан отдельно как техническая справка.</div><div id="diagStatusBox" class="support-note" style="margin-top:10px">Загрузка диагностики...</div></div>
     <div class="card full diag-panel" id="diag-panel-route" style="display:none"><h2>Маршруты по реальным правилам</h2><div class="muted">Проверяются домены из ручного списка «Всегда через VPN», включённых пресетов и исключений. Это не тест скорости.</div><div id="routeDiagBox" class="support-note" style="margin-top:10px">Загрузка проверки маршрута...</div><div class="row"><button class="primary" id="btnRouteDiagRefresh">Обновить маршруты</button></div></div>
     <div class="card full diag-panel" id="diag-panel-url" style="display:none"><h2>Проверка маршрута и входов по URL</h2><div class="muted">Проверяет правило маршрутизации, TCP-доступность, HTTP 2081, SOCKS5 2080 и внутренний VPN-core/sing-box.</div><div class="row"><input id="diagUrlInput" placeholder="https://www.example.com или domain.com" style="min-width:420px"><button class="primary" id="btnDiagUrlTest">Проверить URL</button></div><div id="diagUrlResult" class="support-note" style="margin-top:10px">Проверка ещё не запускалась.</div></div>
+    <div class="card full diag-panel" id="diag-panel-client" style="display:none"><h2>Проверка реального клиента</h2><div class="muted">Выбери онлайн-клиента, нажми «Начать наблюдение», затем открой проблемный сайт на этом устройстве/роутере. Add-on покажет, дошёл ли запрос до HTTP/SOCKS gateway, определилось ли назначение и какой маршрут выбран. Проверка только наблюдает и не меняет рабочий трафик.</div><div class="row"><select id="diagClientSelect" style="min-width:320px"><option value="">Онлайн-клиенты ещё не загружены</option></select><button id="btnDiagClientRefresh">Обновить список</button><button class="primary" id="btnDiagClientStart">Начать наблюдение</button><button id="btnDiagClientCheck">Проверить события</button></div><div class="small muted" id="diagClientHint">Сначала выбери клиента и начни наблюдение.</div><div id="diagClientResult" class="support-note" style="margin-top:10px">Проверка ещё не запускалась.</div></div>
     <div class="card full diag-panel" id="diag-panel-speed" style="display:none"><h2>Проверка скорости и длинного потока</h2><div class="muted">Сравнивает HTTP 2081, SOCKS5 2080 и внутренний VPN-core. Если тест остановлен по лимиту объёма/времени, это показано отдельно и не считается ошибкой.</div>
       <div class="support-note"><b>Готовые тестовые ссылки</b><div id="diagSpeedPresets" class="row" style="margin-top:8px"></div></div>
       <div class="row" style="margin-top:10px"><input id="diagStreamUrl" placeholder="Полный URL тестового файла: http://... или https://..." style="min-width:420px"><label>Лимит объёма <select id="diagStreamMaxBytes"><option value="10000000">10 MB</option><option value="50000000">50 MB</option><option value="100000000" selected>100 MB</option><option value="200000000">200 MB</option></select></label><label>Лимит времени <select id="diagStreamTimeout"><option value="10">10 сек</option><option value="30" selected>30 сек</option><option value="60">60 сек</option></select></label><button id="btnDiagStreamTest" class="primary">Проверить скорость</button></div><div id="diagStreamResult" class="small muted">Проверка ещё не запускалась.</div></div>
@@ -410,7 +411,7 @@
   </div></section>
 </div>
 <script>
-const state={status:null,health:null,servers:[],serverPings:{},autoTags:[],clients:[],selectedClients:new Map(),clientHistory:null,expandedHistoryClients:new Set(),expandedConnectionGroups:new Set(),expandedSystemConnections:false,users:[],connections:[],blocks:[],traffic:null,logs:[],logCategory:"all",activeTab:"overview",serverSources:[],routing:null,security:null,ru:null,ports:null,subscriptionUrl:"",subscriptionInfo:null,subscriptionJson:null,audit:[],maintenance:null,routeDiag:null};
+const state={status:null,health:null,servers:[],serverPings:{},autoTags:[],clients:[],selectedClients:new Map(),clientHistory:null,expandedHistoryClients:new Set(),expandedConnectionGroups:new Set(),expandedSystemConnections:false,users:[],connections:[],blocks:[],traffic:null,logs:[],logCategory:"all",activeTab:"overview",serverSources:[],routing:null,security:null,ru:null,ports:null,subscriptionUrl:"",subscriptionInfo:null,subscriptionJson:null,audit:[],maintenance:null,routeDiag:null,diagClientSince:0,diagClientLast:null};
 function ingressBase(){const p=location.pathname;const m=p.match(/^(.*\/api\/hassio_ingress\/[^/]+)(?:\/.*)?$/);if(m)return m[1];if(p.endsWith('/'))return p.slice(0,-1);return p.substring(0,p.lastIndexOf('/'))||''}
 const BASE=ingressBase();
 async function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
@@ -489,6 +490,55 @@ function showDiagPanel(name){
   document.querySelectorAll('.diag-tab').forEach(b=>b.classList.toggle('active',b.dataset.diagPanel===name));
 }
 function bindDiagTabs(){document.querySelectorAll('.diag-tab').forEach(b=>{b.onclick=()=>showDiagPanel(b.dataset.diagPanel||'status')});}
+
+function onlineClientOptions(){
+  return (state.clients||[]).filter(c=>c.status==='online').sort((a,b)=>String(clientDisplayName(a)).localeCompare(String(clientDisplayName(b))));
+}
+function renderDiagClientSelect(){
+  const sel=$('diagClientSelect'); if(!sel)return;
+  const list=onlineClientOptions();
+  if(!list.length){sel.innerHTML='<option value="">Онлайн-клиентов нет</option>';return;}
+  const current=sel.value;
+  sel.innerHTML=list.map(c=>{const ip=clientIpText(c);const name=clientDisplayName(c);const svc=(c.services||[]).join(', ')||'HTTP/SOCKS';return `<option value="${esc(ip)}">${esc(name)} · ${esc(ip)} · ${esc(svc)}</option>`}).join('');
+  if(current&&list.some(c=>clientIpText(c)===current))sel.value=current;
+}
+async function refreshDiagClientList(){
+  await loadClients(true);
+  renderDiagClientSelect();
+  msg('Список онлайн-клиентов обновлён');
+}
+async function startDiagClientWatch(){
+  await loadClients(true);
+  renderDiagClientSelect();
+  const ip=$('diagClientSelect')?.value||'';
+  if(!ip)throw new Error('Выбери онлайн-клиента для проверки');
+  state.diagClientSince=Date.now()/1000;
+  state.diagClientLast=null;
+  $('diagClientHint').textContent=`Наблюдение запущено для ${ip}. Теперь открой проблемный сайт на выбранном устройстве и нажми «Проверить события».`;
+  $('diagClientResult').innerHTML='<div class="muted">Ожидаю входящие HTTP/SOCKS-соединения выбранного клиента...</div>';
+}
+function renderDiagClientResult(r){
+  state.diagClientLast=r;
+  const box=$('diagClientResult'); if(!box)return;
+  if(!r||!r.updated_at){box.innerHTML='<div class="muted">Проверка ещё не запускалась.</div>';return;}
+  const services=Object.entries(r.services||{}).map(([k,v])=>pill(`${k}: ${v}`,'blue')).join('')||'—';
+  const routes=Object.entries(r.routes||{}).slice(0,6).map(([k,v])=>pill(`${k}: ${v}`,'purple')).join('')||'—';
+  const rows=(r.events||[]).slice(0,80).map(e=>{
+    const dest=e.destination_known?e.destination:'назначение не определено';
+    const cls=e.destination_known?'':' class="muted"';
+    return `<tr><td>${esc(e.service||'—')}</td><td>${e.trusted?pill('trusted без auth','green'):pill('auth','blue')}</td><td${cls}>${esc(dest)}</td><td>${esc(e.route_display||'—')}</td><td>${fmtBytes(e.download||0)}</td><td>${fmtBytes(e.upload||0)}</td><td>${e.active?pill('активно','green'):pill('recent','yellow')}</td></tr>`;
+  }).join('');
+  box.innerHTML=`<div><b>${esc(r.conclusion||'—')}</b></div><div class="stats" style="margin-top:10px"><div class="stat"><div class="label">Клиент</div><div class="value small">${esc(r.client_ip||'—')}</div></div><div class="stat"><div class="label">Событий</div><div class="value">${esc(r.events_count||0)}</div></div><div class="stat"><div class="label">Назначения</div><div class="value small">известно ${esc(r.known_destinations||0)} / неизвестно ${esc(r.unknown_destinations||0)}</div></div><div class="stat"><div class="label">Трафик</div><div class="value small">Down ${fmtBytes(r.download||0)} · Up ${fmtBytes(r.upload||0)}</div></div></div><div style="margin-top:10px"><b>Входы:</b> ${services}<br><b>Маршруты:</b> ${routes}</div><table><thead><tr><th>Вход</th><th>Доступ</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th><th>Статус</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">Событий нет. Открой сайт на выбранном устройстве и повтори проверку.</td></tr>'}</tbody></table>`;
+}
+async function checkDiagClientWatch(){
+  const ip=$('diagClientSelect')?.value||'';
+  if(!ip)throw new Error('Выбери онлайн-клиента для проверки');
+  const since=state.diagClientSince||((Date.now()/1000)-60);
+  const r=await post('/api/diagnostics/client_watch',{ip,since,limit:120});
+  renderDiagClientResult(r);
+  msg('Проверка реального клиента обновлена');
+}
+
 function renderSpeedPresets(){
   const box=$('diagSpeedPresets'); if(!box)return;
   const presets=(state.diagnosticsStatus&&state.diagnosticsStatus.speed_presets)||[
@@ -890,7 +940,7 @@ async function saveSecurity(){
 function updateSelectedClientsCount(){if($('selectedClientsCount'))$('selectedClientsCount').textContent='Выбрано: '+state.selectedClients.size;}
 function selectedClientId(c){return String(c.key||c.ip||c.display_ip||'')}
 function toggleClientSelected(id,checked,ip,key){if(checked)state.selectedClients.set(id,{ip,key});else state.selectedClients.delete(id);updateSelectedClientsCount()}
-function renderClients(){const existing=new Set(state.clients.map(selectedClientId));for(const id of Array.from(state.selectedClients.keys())){if(!existing.has(id))state.selectedClients.delete(id)}const online=state.clients.filter(c=>c.status==='online'),offline=state.clients.filter(c=>c.status!=='online'),trusted=state.clients.filter(c=>c.trusted),unknown=state.clients.filter(c=>!c.trusted);$('clientsOnlineBox').innerHTML=online.map(clientCard).join('')||'<div class="muted">Онлайн клиентов нет.</div>';$('clientsUnknownBox').innerHTML=unknown.map(clientCard).join('')||'<div class="muted">Незарегистрированных клиентов нет.</div>';$('clientsTrustedBox').innerHTML=trusted.map(clientCard).join('')||'<div class="muted">Доверенных клиентов нет.</div>';$('clientsOfflineBox').innerHTML=offline.map(clientCard).join('')||'<div class="muted">Оффлайн клиентов нет.</div>';updateSelectedClientsCount()}
+function renderClients(){renderDiagClientSelect();const existing=new Set(state.clients.map(selectedClientId));for(const id of Array.from(state.selectedClients.keys())){if(!existing.has(id))state.selectedClients.delete(id)}const online=state.clients.filter(c=>c.status==='online'),offline=state.clients.filter(c=>c.status!=='online'),trusted=state.clients.filter(c=>c.trusted),unknown=state.clients.filter(c=>!c.trusted);$('clientsOnlineBox').innerHTML=online.map(clientCard).join('')||'<div class="muted">Онлайн клиентов нет.</div>';$('clientsUnknownBox').innerHTML=unknown.map(clientCard).join('')||'<div class="muted">Незарегистрированных клиентов нет.</div>';$('clientsTrustedBox').innerHTML=trusted.map(clientCard).join('')||'<div class="muted">Доверенных клиентов нет.</div>';$('clientsOfflineBox').innerHTML=offline.map(clientCard).join('')||'<div class="muted">Оффлайн клиентов нет.</div>';updateSelectedClientsCount()}
 
 function historyName(x){return x?.registered_name||x?.username||x?.display_ip||x?.ip||x?.key||'—'}
 function historyClientKey(x){return String(x?.key||x?.ip||x?.display_ip||'unknown')}
@@ -970,21 +1020,41 @@ function bindConnectionToggles(){
 }
 function isServiceConnection(c){return !!(c?.service_connection||c?.metadata?.service_connection)}
 function connectionGroupKey(g){return String((g.user?g.user+'|':'')+(g.ip||'—'))}
+function isUnknownProxyDestination(host){const h=String(host||'').trim().toLowerCase();return !h||h==='proxy-gateway'||h==='назначение не определено'||h==='служебное соединение add-on'}
 function renderConnectionGroups(list){
   const groups={};
   for(const c of list){
     const ip=connectionIp(c), user=connectionUser(c), key=(user?user+' / ':'')+ip;
-    if(!groups[key])groups[key]={ip,user,items:[],hosts:{},down:0,up:0};
+    if(!groups[key])groups[key]={ip,user,items:[],hosts:{},unknownCount:0,unknownDown:0,unknownUp:0,down:0,up:0};
     const g=groups[key]; g.items.push(c);
-    const h=mainHost(connectionHost(c)); if(h&&h!=='—'&&!String(h).toLowerCase().includes('служебное'))g.hosts[h]=(g.hosts[h]||0)+1;
-    g.down+=Number(c.download||c.downloaded||c.down||0); g.up+=Number(c.upload||c.uploaded||c.up||0);
+    const rawHost=connectionHost(c);
+    const down=Number(c.download||c.downloaded||c.down||0), up=Number(c.upload||c.uploaded||c.up||0);
+    if(isUnknownProxyDestination(rawHost)){
+      g.unknownCount+=1; g.unknownDown+=down; g.unknownUp+=up;
+    }else{
+      const h=mainHost(rawHost); if(h&&h!=='—'&&!String(h).toLowerCase().includes('служебное'))g.hosts[h]=(g.hosts[h]||0)+1;
+    }
+    g.down+=down; g.up+=up;
   }
   return Object.values(groups).sort((a,b)=>b.items.length-a.items.length).map(g=>{
     const hosts=Object.entries(g.hosts).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([h,n])=>pill(`${h} ×${n}`,'purple')).join('')||'—';
+    const unknownNote=g.unknownCount?`<div class="small muted" style="margin-top:4px">SOCKS5/HTTP без определённого назначения: ${esc(g.unknownCount)} · Down ${fmtBytes(g.unknownDown)} · Up ${fmtBytes(g.unknownUp)}</div>`:'';
     const accessTags=[...new Set(g.items.map(connectionAccess).filter(Boolean))].map(x=>pill(x==='trusted_ip_bypass'?'trusted_ip без auth':x,x==='trusted_ip_bypass'?'green':'blue')).join('');
-    const rows=g.items.slice(0,100).map(c=>{let warn=connectionRouteWarning(c);if(String(warn).includes('Трафик идёт напрямую'))warn='';return `<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`}).join('');
+    const knownRows=[];
+    const unknownAgg={count:0,down:0,up:0,route:''};
+    for(const c of g.items.slice(0,200)){
+      const rawHost=connectionHost(c);
+      const down=Number(c.download||c.downloaded||c.down||0), up=Number(c.upload||c.uploaded||c.up||0);
+      if(isUnknownProxyDestination(rawHost)){
+        unknownAgg.count+=1; unknownAgg.down+=down; unknownAgg.up+=up; if(!unknownAgg.route)unknownAgg.route=connectionRoute(c); continue;
+      }
+      let warn=connectionRouteWarning(c);if(String(warn).includes('Трафик идёт напрямую'))warn='';
+      knownRows.push(`<tr><td>${esc(connectionProto(c))}</td><td>${esc(rawHost)}</td><td>${esc(connectionRoute(c))}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(down)}</td><td>${fmtBytes(up)}</td></tr>`);
+    }
+    if(unknownAgg.count){knownRows.push(`<tr class="muted"><td>tcp</td><td>SOCKS5/HTTP без определённого назначения ×${esc(unknownAgg.count)}</td><td>${esc(unknownAgg.route||'auth-gateway → Proxy')}</td><td>${fmtBytes(unknownAgg.down)}</td><td>${fmtBytes(unknownAgg.up)}</td></tr>`)}
+    const rows=knownRows.join('');
     const k=connectionGroupKey(g), open=state.expandedConnectionGroups.has(k)?' open':'';
-    return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span></div><table><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+    return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span>${unknownNote}</div><table><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">Нет отображаемых клиентских соединений.</td></tr>'}</tbody></table></div></details>`;
   }).join('');
 }
 function renderSystemConnections(list){
@@ -1308,6 +1378,9 @@ if($('btnRouteDiagRefresh'))$('btnRouteDiagRefresh').onclick=()=>runUiAction('П
 if($('btnDiagStreamTest'))$('btnDiagStreamTest').onclick=()=>runUiAction('Проверяю стабильность потока',()=>runStreamDiagnostic(),'Проверка потока завершена');
 if($('btnDiagRefresh'))$('btnDiagRefresh').onclick=()=>runUiAction('Обновляю статус и маршруты диагностики',async()=>{await loadDiagnosticsStatus();await loadRouteDiagnostics(true)},'Статус и маршруты диагностики обновлены');
 if($('btnDiagUrlTest'))$('btnDiagUrlTest').onclick=()=>runUiAction('Проверяю URL',runDiagnosticsUrlTest,'Проверка URL завершена');
+if($('btnDiagClientRefresh'))$('btnDiagClientRefresh').onclick=()=>runUiAction('Обновляю клиентов',refreshDiagClientList,'Список клиентов обновлён');
+if($('btnDiagClientStart'))$('btnDiagClientStart').onclick=()=>runUiAction('Запускаю наблюдение',startDiagClientWatch,'Наблюдение запущено');
+if($('btnDiagClientCheck'))$('btnDiagClientCheck').onclick=()=>runUiAction('Проверяю события клиента',checkDiagClientWatch,'Проверка клиента обновлена');
 if($('btnDiagCopyReport'))$('btnDiagCopyReport').onclick=()=>runUiAction('Копирую отчёт',copyDiagnosticsReport,'Отчёт скопирован');
 $('btnPingAllOverview').onclick=()=>runUiAction('Проверяю пинг всех серверов',pingAll,'Пинг всех серверов обновлён');
 $('btnSystemCheck').onclick=()=>runUiAction('Проверяю систему',async()=>{await loadSystemCheck(true)},'Проверка системы завершена');

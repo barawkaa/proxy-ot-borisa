@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.9"
+APP_VERSION = "1.25.10"
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -5358,24 +5358,22 @@ def _trusted_socks_passthrough(client, ip, greeting, methods):
         raise
 
 def socks_auth_exchange(client, ip):
+    """Stable SOCKS5 gateway exchange.
+
+    The trusted/no-auth path intentionally mirrors the known-good v1.25.2
+    behaviour used by routers: forward the original SOCKS5 greeting to the
+    internal sing-box SOCKS inbound and then relay the session transparently.
+    Destination enrichment must never sit in this hot path.
+    """
     greeting = read_exact(client, 2)
     if greeting[0] != 5:
         raise OSError('not socks5')
     methods = read_exact(client, greeting[1])
-    trusted = is_trusted_bypass_ip(ip, 'socks')
-    auth_required = bool(load_options().get('socks_auth_enabled')) and not trusted
-
-    # Critical compatibility path: trusted routers must use a transparent SOCKS5
-    # passthrough exactly like the stable v1.25.2 implementation. Do not answer the
-    # handshake here and do not recreate the CONNECT request. The internal sing-box
-    # SOCKS inbound will negotiate directly with the client through the relay.
+    auth_required = bool(load_options().get('socks_auth_enabled')) and not is_trusted_bypass_ip(ip, 'socks')
     if not auth_required:
-        if 0 not in methods:
-            client.sendall(b'\x05\xff')
-            raise OSError('socks no-auth method not offered')
-        return _trusted_socks_passthrough(client, ip, greeting, methods)
-
-    username = ''
+        upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
+        upstream.sendall(greeting + methods)
+        return upstream, ''
     if 2 not in methods:
         client.sendall(b'\x05\xff')
         raise OSError('socks auth method not offered')
@@ -5392,33 +5390,59 @@ def socks_auth_exchange(client, ip):
         log('SECURITY', 'PROXY_AUTH_FAILED', 'SOCKS5 proxy auth failed', actor='gateway', action='socks_auth_failed', target=ip, extra={'username': username})
         raise OSError('socks auth failed')
     client.sendall(b'\x01\x00')
-
-    req, host, port = _read_socks_connect_request(client)
-    if not host or not port:
-        try:
-            client.sendall(b'\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00')
-        except Exception:
-            pass
-        raise OSError('socks request without destination')
+    req_head = read_exact(client, 4)
+    if req_head[0] != 5 or req_head[1] != 1:
+        client.sendall(b'\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00')
+        raise OSError('unsupported socks command')
+    atyp = req_head[3]
+    if atyp == 1:
+        addr_part = read_exact(client, 4)
+    elif atyp == 3:
+        ln = read_exact(client, 1)
+        addr_part = ln + read_exact(client, ln[0])
+    elif atyp == 4:
+        addr_part = read_exact(client, 16)
+    else:
+        client.sendall(b'\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00')
+        raise OSError('bad address type')
+    port_part = read_exact(client, 2)
+    req = req_head + addr_part + port_part
+    upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
     try:
-        upstream = socks5_connect_via_internal(host, int(port))
+        upstream.sendall(b'\x05\x01\x00')
+        resp = read_exact(upstream, 2)
+        if resp != b'\x05\x00':
+            raise OSError('internal socks rejected no-auth')
+        upstream.sendall(req)
+        resp_head = read_exact(upstream, 4)
+        atyp2 = resp_head[3]
+        if atyp2 == 1:
+            rest = read_exact(upstream, 4 + 2)
+        elif atyp2 == 3:
+            ln = read_exact(upstream, 1)
+            rest = ln + read_exact(upstream, ln[0] + 2)
+        elif atyp2 == 4:
+            rest = read_exact(upstream, 16 + 2)
+        else:
+            rest = read_exact(upstream, 2)
+        client.sendall(resp_head + rest)
+        return upstream, username
     except Exception:
         try:
-            client.sendall(b'\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00')
+            upstream.close()
         except Exception:
             pass
         raise
-    client.sendall(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
-    activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=False, auth_user=username, destination=f'{host}:{port}')
-    return upstream, username, activity_key, None
 
 
 def handle_socks_gateway(client, addr):
     ip = addr[0]
     activity_key = None
     try:
-        upstream, auth_user, activity_key, upload_tap = socks_auth_exchange(client, ip)
-        relay_pair(client, upstream, activity_key=activity_key, upload_tap=upload_tap)
+        trusted = is_trusted_bypass_ip(ip, 'socks')
+        upstream, auth_user = socks_auth_exchange(client, ip)
+        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user)
+        relay_pair(client, upstream, activity_key=activity_key)
     except Exception as e:
         log_exception('GATEWAY', 'SOCKS_ERROR', e, actor='gateway', target=ip)
         try:

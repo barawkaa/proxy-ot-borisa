@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.20"
+APP_VERSION = "1.25.21"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4879,6 +4879,9 @@ def route_chain_for_destination(destination, context=None):
     if dest_type == 'ip' and is_local_destination_ip(host):
         warn = "Локальный/LAN-адрес. Это не внешний сайт и не VPN-маршрут."
         return {"chains": ["auth-gateway", "Proxy", "LAN / локальный адрес"], "route": "local", "expected_route": "local", "final": "LAN / локальный адрес", "reason": "local_ip", "warning": warn, "destination_type": "ip", "route_certainty": "confirmed_local"}
+    actual_route = _actual_route_for_destination(host, context.get('actual_route_index'))
+    if actual_route:
+        return {**actual_route, "destination_type": dest_type, "expected_route": actual_route.get("route"), "warning": "", "actual_route": True}
     try:
         decision = route_test_domain(host)
     except Exception as e:
@@ -4931,7 +4934,99 @@ def route_chain_for_destination(destination, context=None):
     return {"chains": ["auth-gateway", "Proxy", final], "route": decision.get("route") or "Proxy", "expected_route": decision.get("route") or "Proxy", "final": final, "reason": reason, "warning": warn, "decision": decision, "destination_type": dest_type, "route_certainty": "confirmed"}
 
 
-def gateway_connections_for_ui():
+def _extract_connection_chains(conn):
+    """Return sing-box/clash chain tags for a raw connection row."""
+    meta = (conn or {}).get("metadata") or {}
+    chains = (conn or {}).get("chains") or meta.get("chains") or []
+    if isinstance(chains, str):
+        chains = [x.strip() for x in re.split(r"[>,→]+", chains) if x.strip()]
+    if not isinstance(chains, list):
+        chains = []
+    outbound = (conn or {}).get("outbound") or meta.get("outbound") or meta.get("outboundTag") or ""
+    if outbound and outbound not in chains:
+        chains.append(str(outbound))
+    return [str(x) for x in chains if str(x or '').strip()]
+
+
+def _actual_route_from_raw_connection(conn):
+    """Build factual outbound route info from the raw sing-box connection row.
+
+    Gateway synthetic rows are better for client identity, but sing-box raw rows
+    are the source of truth for the final outbound. This function is deliberately
+    read-only: it never affects HTTP/SOCKS transport, only UI/diagnostics labels.
+    """
+    chains = _extract_connection_chains(conn)
+    low = [c.lower() for c in chains]
+    if any(c == 'direct' or c.endswith('/direct') for c in low):
+        return {"route": "direct", "final": "DIRECT", "chains": ["auth-gateway", "Proxy", "DIRECT"], "reason": "actual_singbox_direct", "route_certainty": "actual_singbox"}
+    # sing-box/Clash often reports chains like [server-tag, Proxy]. Prefer the
+    # concrete server tag when it is visible; otherwise fall back to the selected server.
+    server = ""
+    for c in chains:
+        cu = c.upper()
+        if c and cu not in {"PROXY", "DIRECT", "GLOBAL", "REJECT", "BLOCK"} and not cu.startswith("IN-"):
+            server = c
+            break
+    if not server:
+        try:
+            server = current_server_info(get_proxies()).get("server") or ""
+        except Exception:
+            server = ""
+    if any(c == 'proxy' for c in low) or server:
+        final = "VPN: " + (server or "выбранный сервер")
+        try:
+            cur = current_server_info(get_proxies())
+            if server and cur.get("server") == server and cur.get("delay"):
+                final += f" · {cur.get('delay')} мс"
+        except Exception:
+            pass
+        return {"route": "Proxy", "final": final, "chains": ["auth-gateway", "Proxy", final], "reason": "actual_singbox_proxy", "route_certainty": "actual_singbox"}
+    return None
+
+
+def _raw_actual_route_index(conns):
+    """Index factual sing-box route by destination from hidden raw internal rows."""
+    idx = {}
+    for conn in list(conns or []):
+        try:
+            if not is_internal_proxy_raw_connection(conn):
+                continue
+            meta = conn.get("metadata") or {}
+            host = normalize_endpoint_host(get_host(conn) or meta.get("destination") or meta.get("host") or "")
+            if not host or is_gateway_service_destination(host):
+                continue
+            port = meta.get("destinationPort") or meta.get("destination_port") or conn.get("destinationPort") or conn.get("destination_port") or ""
+            route = _actual_route_from_raw_connection(conn)
+            if not route:
+                continue
+            keys = {host}
+            if port:
+                keys.add(f"{host}:{port}")
+            for k in keys:
+                idx[str(k).lower()] = route
+        except Exception:
+            continue
+    return idx
+
+
+def _actual_route_for_destination(destination, actual_route_index=None):
+    if not actual_route_index:
+        return None
+    raw = str(destination or '').strip().lower()
+    if not raw:
+        return None
+    norm = normalize_endpoint_host(raw)
+    for k in [raw, norm]:
+        if k and k in actual_route_index:
+            return actual_route_index[k]
+    # If destination is domain:port but raw map only has domain, try without port.
+    if ':' in raw:
+        h = normalize_endpoint_host(raw)
+        return actual_route_index.get(h)
+    return None
+
+
+def gateway_connections_for_ui(actual_route_index=None):
     """Synthetic connection rows for the UI.
 
     The auth-gateway relays real clients to internal localhost ports, so sing-box
@@ -4947,7 +5042,8 @@ def gateway_connections_for_ui():
         service = gw.get("service") or "HTTP/SOCKS"
         dest = gw.get("destination") or "proxy-gateway"
         trusted = bool(gw.get("trusted"))
-        route_info = route_chain_for_destination(dest, gw)
+        route_context = {**gw, "actual_route_index": actual_route_index}
+        route_info = route_chain_for_destination(dest, route_context)
         if gw.get("destination_source") == "sni":
             route_info = dict(route_info)
             if not str(route_info.get("route_certainty") or "").startswith("remote_ruleset"):
@@ -4981,6 +5077,7 @@ def gateway_connections_for_ui():
             "original_destination": route_info.get("original_destination") or gw.get("original_destination"),
             "inferred_domain": gw.get("inferred_domain"),
             "expected_route": route_info.get("expected_route"),
+            "actual_route": bool(route_info.get("actual_route")),
             "service_connection": bool(route_info.get("service_connection")),
             "metadata": {
                 "sourceIP": ip,
@@ -5079,7 +5176,8 @@ def mark_internal_service_connection(conn):
 
 
 def connections_for_ui(conns):
-    gateway_rows = gateway_connections_for_ui()
+    actual_route_index = _raw_actual_route_index(conns)
+    gateway_rows = gateway_connections_for_ui(actual_route_index=actual_route_index)
     gateway_hosts = _gateway_destinations_for_dedup()
     raw_rows = []
     for conn in list(conns or []):
@@ -6729,6 +6827,8 @@ def build_clients(connections):
         state = peer.get('state') or ('SECRET_IDENTIFIED' if peer.get('identity_method') == 'telegram_secret' else 'UNKNOWN')
         item['tcp_states'][state] = item['tcp_states'].get(state, 0) + 1
 
+    actual_route_index = _raw_actual_route_index(connections)
+
     for gw in _gateway_snapshot_for_ui():
         ip = gw.get('ip')
         if not ip or ip == '—' or is_loopback_ip(ip):
@@ -6744,14 +6844,15 @@ def build_clients(connections):
             item['trusted_name'] = item.get('trusted_name') or 'trusted_ip_bypass'
         item.setdefault('identities', set()).add('access:trusted_ip_bypass' if gw.get('trusted') else 'access:auth_gateway')
         dest = gw.get('destination') or 'proxy-gateway'
-        route_info = route_chain_for_destination(dest, gw)
+        route_context = {**gw, 'actual_route_index': actual_route_index}
+        route_info = route_chain_for_destination(dest, route_context)
         if route_info.get('service_connection'):
             # Keep service noise out of client cards. It made real clients look
             # like they were visiting "Служебное соединение add-on" instead of sites.
             continue
         up = int(gw.get('upload') or 0); down = int(gw.get('download') or 0)
         item['upload'] += up; item['download'] += down
-        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'destination_source': route_info.get('destination_source') or gw.get('destination_source'), 'original_destination': route_info.get('original_destination') or gw.get('original_destination'), 'inferred_domain': gw.get('inferred_domain'), 'expected_route': route_info.get('expected_route')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'destination_source': route_info.get('destination_source') or gw.get('destination_source'), 'original_destination': route_info.get('original_destination') or gw.get('original_destination'), 'inferred_domain': gw.get('inferred_domain'), 'expected_route': route_info.get('expected_route'), 'recent': bool(gw.get('recent')), 'active': not bool(gw.get('recent'))})
+        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'destination_source': route_info.get('destination_source') or gw.get('destination_source'), 'original_destination': route_info.get('original_destination') or gw.get('original_destination'), 'inferred_domain': gw.get('inferred_domain'), 'expected_route': route_info.get('expected_route'), 'actual_route': bool(route_info.get('actual_route'))}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'destination_source': route_info.get('destination_source') or gw.get('destination_source'), 'original_destination': route_info.get('original_destination') or gw.get('original_destination'), 'inferred_domain': gw.get('inferred_domain'), 'expected_route': route_info.get('expected_route'), 'actual_route': bool(route_info.get('actual_route')), 'recent': bool(gw.get('recent')), 'active': not bool(gw.get('recent'))})
         
         if route_info.get('service_connection'):
             item.setdefault('service_connections', 0)
@@ -7504,6 +7605,10 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
     except Exception:
         limit = 120
     rows = []
+    try:
+        actual_route_index = _raw_actual_route_index(get_monitored_connections(force=True, run_autoban=False))
+    except Exception:
+        actual_route_index = {}
     for gw in gateway_active_snapshot(include_recent=True):
         if not isinstance(gw, dict):
             continue
@@ -7514,7 +7619,8 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
         if since and ts < since:
             continue
         dest = gw.get('destination') or 'proxy-gateway'
-        route_info = route_chain_for_destination(dest, gw)
+        route_context = {**gw, 'actual_route_index': actual_route_index}
+        route_info = route_chain_for_destination(dest, route_context)
         up = int(gw.get('upload') or 0)
         down = int(gw.get('download') or 0)
         is_unknown = str(dest).strip().lower() == 'proxy-gateway'
@@ -7535,6 +7641,7 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
             'original_destination': gw.get('original_destination') or route_info.get('original_destination') or '',
             'inferred_domain': gw.get('inferred_domain') or '',
             'expected_route': route_info.get('expected_route') or route_info.get('route') or 'unknown',
+            'actual_route': bool(route_info.get('actual_route')),
             'download': down,
             'upload': up,
             'started_at': gw.get('started_at') or 0,

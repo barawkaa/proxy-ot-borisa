@@ -651,72 +651,19 @@ try:
 finally:
     backend.gateway_activity_update_destination = _old_update_12518
 
-# v1.26.2: SOCKS5 IP-first gateway must be able to enforce routing by TLS SNI,
-# not only enrich UI after sing-box has already connected to raw IP/direct.
-class _FakeSniClient:
-    def __init__(self, payload):
-        self.payload = payload
-        self.sent = []
-        self.timeout = None
-    def sendall(self, data):
-        self.sent.append(data)
-    def recv(self, size):
-        data, self.payload = self.payload[:size], self.payload[size:]
-        return data
-    def gettimeout(self):
-        return self.timeout
-    def settimeout(self, timeout):
-        self.timeout = timeout
-
-class _FakeUpstream:
-    def __init__(self):
-        self.sent = []
-    def sendall(self, data):
-        self.sent.append(data)
-
-_old_socks5_connect = backend.socks5_connect_via_internal
-_old_update_dest = backend.gateway_activity_update_destination
-_old_route_test = backend.route_test_domain
-try:
-    captured = {}
-    updates = []
-    def _fake_connect(host, port):
-        captured['host'] = host
-        captured['port'] = port
-        captured['upstream'] = _FakeUpstream()
-        return captured['upstream']
-    backend.socks5_connect_via_internal = _fake_connect
-    backend.gateway_activity_update_destination = lambda *args, **kwargs: updates.append((args, kwargs))
-    backend.route_test_domain = lambda host: {"route": "Proxy", "reason": "manual_include_domain", "proxy_server": "SE1-vless"}
-    _req_ip = b'\x05\x01\x00\x01' + bytes([172,64,144,52]) + (443).to_bytes(2, 'big')
-    _client = _FakeSniClient(_fake_client_hello_sni('sdmntprnortheu.oaiusercontent.com'))
-    _up, _sni, _payload = backend._connect_internal_socks_for_sni_or_original(_client, _req_ip, '172.64.144.52', 443, activity_key='gw-sni')
-    assert _sni == 'sdmntprnortheu.oaiusercontent.com', _sni
-    assert captured['host'] == 'sdmntprnortheu.oaiusercontent.com', captured
-    assert captured['port'] == 443, captured
-    assert _client.sent and _client.sent[0].startswith(b'\x05\x00'), _client.sent
-    assert captured['upstream'].sent and captured['upstream'].sent[0].startswith(b'\x16'), captured['upstream'].sent
-    assert any((kw.get('destination_source') == 'sni_enforced') for _args, kw in updates), updates
-finally:
-    backend.socks5_connect_via_internal = _old_socks5_connect
-    backend.gateway_activity_update_destination = _old_update_dest
-    backend.route_test_domain = _old_route_test
-
-print(json.dumps({'sni_enforced_route_checks': True}, ensure_ascii=False))
-
 print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))
 
-# v1.26.2 release/product checks: this release is not only syntax-valid, it must
+# v1.26.1 release/product checks: this release is not only syntax-valid, it must
 # keep public version files aligned and keep the cleaned UI concepts present.
-assert backend.APP_VERSION == "1.26.2", backend.APP_VERSION
+assert backend.APP_VERSION == "1.26.1", backend.APP_VERSION
 _config_version = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
-assert str(_config_version) == "1.26.2", _config_version
+assert str(_config_version) == "1.26.1", _config_version
 _repo_root = ROOT.parent
 _readme = (_repo_root / "README.md").read_text(encoding="utf-8")
 _changelog = (_repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
-assert "Текущая версия: v1.26.2" in _readme
-assert "Текущая версия add-on: **1.26.2**" in _readme
-assert _changelog.lstrip().startswith("## 1.26.2")
+assert "Текущая версия: v1.26.1" in _readme
+assert "Текущая версия add-on: **1.26.1**" in _readme
+assert _changelog.lstrip().startswith("## 1.26.1")
 for stale in ["Текущая версия: v1.25", "Текущая версия add-on: **1.25"]:
     assert stale not in _readme, stale
 assert "function shortRouteNote" in html
@@ -729,8 +676,6 @@ assert "SOCKS5/HTTP без определённого назначения" in h
 assert "Домен определён пассивно по TLS SNI; транспорт SOCKS5 не изменялся" not in html
 assert "фактический маршрут sing-box" not in html
 assert "IP / исходный адрес" in html
-assert "SOCKS_SNI_ROUTE" in backend_text and "sni_enforced" in backend_text
-assert "SNI + enforced route" in backend_text
 
 # URL diagnostics staged reader: HTTP 200 + useful body must not become a false
 # global failure because a CDN closes TLS noisily after response data.

@@ -652,3 +652,27 @@ finally:
     backend.gateway_activity_update_destination = _old_update_12518
 
 print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))
+
+# v1.26.0 release/product checks: this release is not only syntax-valid, it must
+# keep public version files aligned and keep the cleaned UI concepts present.
+assert backend.APP_VERSION == "1.26.0", backend.APP_VERSION
+_config_version = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
+assert str(_config_version) == "1.26.0", _config_version
+_repo_root = ROOT.parent
+_readme = (_repo_root / "README.md").read_text(encoding="utf-8")
+_changelog = (_repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
+assert "Текущая версия: v1.26.0" in _readme
+assert "Текущая версия add-on: **1.26.0**" in _readme
+assert _changelog.lstrip().startswith("## 1.26.0")
+for stale in ["Текущая версия: v1.25", "Текущая версия add-on: **1.25"]:
+    assert stale not in _readme, stale
+assert "function shortRouteNote" in html
+assert "function compactRouteWarning" in html
+assert "function formatSourceIps" in html
+assert "сесс." in html
+assert "Скрыто дублей по IP настоящих клиентов" in html
+assert "Нераспознанные подключения / сканеры" in html
+assert "SOCKS5/HTTP без определённого назначения" in html
+assert "Домен определён пассивно по TLS SNI; транспорт SOCKS5 не изменялся" not in html
+assert "фактический маршрут sing-box" not in html
+assert "IP / исходный адрес" in html

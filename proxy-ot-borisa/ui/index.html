@@ -825,8 +825,8 @@ function clientIsFallbackAttempt(c){
   const zeroTraffic=Number(c.download||0)===0&&Number(c.upload||0)===0&&Number(c.connections_count||0)===0&&Number(c.mtproto_connections||0)===0;
   return !clientIsKnown(c)&&(ids.includes('identity:tcp_peer_fallback')||zeroTraffic);
 }
-function renderUnrecognizedClients(list){
-  if(!list.length)return '<div class="muted">Нераспознанных подключений нет.</div>';
+function renderUnrecognizedClients(list, suppressed=0){
+  if(!list.length)return '<div class="muted">Нераспознанных подключений нет.'+(suppressed?' Скрыто дублей по IP настоящих клиентов: '+suppressed+'.':'')+'</div>';
   const mt=list.filter(c=>(c.services||[]).some(s=>String(s).includes('MTProto'))).length;
   const hs=list.length-mt;
   const zero=list.filter(clientIsFallbackAttempt).length;
@@ -836,7 +836,7 @@ function renderUnrecognizedClients(list){
     const where=[geo.country,geo.region,geo.city].filter(Boolean).join(', ')||'—';
     return `<tr><td>${esc(c.display_ip||c.ip||'—')}</td><td>${(c.services||[]).map(x=>pill(x,'gray')).join('')||'—'}</td><td>${esc(where)}<br><span class="muted small">${esc(geo.asn||geo.isp||'')}</span></td><td>${esc(reason)}</td><td>${fmtTime(c.last_seen)}</td><td>${fmtBytes(c.download||0)} / ${fmtBytes(c.upload||0)}</td><td>${clientActionSelect(c)}</td></tr>`;
   }).join('');
-  return `<details class="client-box" open><summary><b>Нераспознанные подключения</b> ${pill(list.length+' записей','yellow')}</summary><div class="client-body"><div class="muted">Это не полноценные клиенты. Сюда попадают сканеры портов, ошибочные подключения, MTProto TCP-попытки без распознанного secret и HTTP/SOCKS попытки без авторизации/идентификации. Реальные зарегистрированные пользователи и trusted-клиенты остаются в своих разделах.</div><div style="margin-top:8px">MTProto: <b>${mt}</b> · HTTP/SOCKS: <b>${hs}</b> · пустые/без трафика: <b>${zero}</b></div><table style="margin-top:8px"><thead><tr><th>IP</th><th>Сервис</th><th>Гео/ASN</th><th>Причина</th><th>Последняя активность</th><th>Down / Up</th><th>Действие</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+  return `<details class="client-box" open><summary><b>Нераспознанные подключения</b> ${pill(list.length+' записей','yellow')}</summary><div class="client-body"><div class="muted">Это не полноценные клиенты. Сюда попадают сканеры портов, ошибочные подключения, MTProto TCP-попытки без распознанного secret и HTTP/SOCKS попытки без авторизации/идентификации. Реальные зарегистрированные пользователи и trusted-клиенты остаются в своих разделах.</div><div style="margin-top:8px">MTProto: <b>${mt}</b> · HTTP/SOCKS: <b>${hs}</b> · пустые/без трафика: <b>${zero}</b>${suppressed?' · скрыто дублей: <b>'+suppressed+'</b>':''}</div><table style="margin-top:8px"><thead><tr><th>IP</th><th>Сервис</th><th>Гео/ASN</th><th>Причина</th><th>Последняя активность</th><th>Down / Up</th><th>Действие</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 function clientCard(c){
   const ids0=c.identities||[];
@@ -971,13 +971,15 @@ function renderClients(){
   renderDiagClientSelect();
   const existing=new Set(state.clients.map(selectedClientId));
   for(const id of Array.from(state.selectedClients.keys())){if(!existing.has(id))state.selectedClients.delete(id)}
-  const unrecognized=state.clients.filter(c=>!clientIsKnown(c));
   const visible=state.clients.filter(c=>clientIsKnown(c));
+  const knownIpSet=new Set(visible.map(c=>String(c.display_ip||c.ip||'').trim()).filter(Boolean));
+  const unrecognized=state.clients.filter(c=>!clientIsKnown(c)&&!knownIpSet.has(String(c.display_ip||c.ip||'').trim()));
+  const suppressed=state.clients.filter(c=>!clientIsKnown(c)&&knownIpSet.has(String(c.display_ip||c.ip||'').trim())).length;
   const online=visible.filter(c=>c.status==='online');
-  const known=visible.filter(c=>clientIsKnown(c));
+  const known=visible;
   const offline=visible.filter(c=>c.status!=='online');
   $('clientsOnlineBox').innerHTML=online.map(clientCard).join('')||'<div class="muted">Онлайн клиентов нет.</div>';
-  $('clientsUnknownBox').innerHTML=renderUnrecognizedClients(unrecognized);
+  $('clientsUnknownBox').innerHTML=renderUnrecognizedClients(unrecognized, suppressed);
   $('clientsTrustedBox').innerHTML=known.map(clientCard).join('')||'<div class="muted">Зарегистрированных или доверенных клиентов нет.</div>';
   $('clientsOfflineBox').innerHTML=offline.map(clientCard).join('')||'<div class="muted">Оффлайн клиентов нет.</div>';
   updateSelectedClientsCount();
@@ -1067,6 +1069,32 @@ function bindConnectionToggles(){
 function isServiceConnection(c){return !!(c?.service_connection||c?.metadata?.service_connection)}
 function connectionGroupKey(g){return String((g.user?g.user+'|':'')+(g.ip||'—'))}
 function isUnknownProxyDestination(host){const h=String(host||'').trim().toLowerCase();return !h||h==='proxy-gateway'||h==='назначение не определено'||h==='служебное соединение add-on'}
+function shortRouteNote(c){
+  const certainty=connectionRouteCertainty(c);
+  const src=c?.destination_source||c?.metadata?.destination_source||'';
+  if(certainty==='remote_ruleset_sni_inferred')return pill('SNI + Re:filter','green');
+  if(certainty==='sni_inferred'||src==='sni')return pill('SNI','green');
+  if(certainty==='unconfirmed_ip_default')return pill('неподтв.','yellow');
+  if(certainty==='confirmed_local')return pill('LAN','gray');
+  if(connectionActualRoute(c))return pill('sing-box','gray');
+  return '';
+}
+function compactRouteWarning(c){
+  const warn=String(connectionRouteWarning(c)||'');
+  if(!warn)return '';
+  if(warn.includes('Трафик идёт напрямую'))return '';
+  if(warn.includes('Домен определён пассивно'))return '';
+  if(warn.includes('фактический маршрут'))return '';
+  if(warn.includes('Клиент передал IP'))return 'назначение передано как IP; доменное правило не подтверждено';
+  if(warn.includes('Локальный/LAN'))return 'локальный адрес';
+  return warn;
+}
+function formatSourceIps(set){
+  const arr=Array.from(set||[]).filter(Boolean);
+  if(!arr.length)return '—';
+  const shown=arr.slice(0,4).map(x=>`<span class="tag">${esc(x)}</span>`).join('');
+  return shown+(arr.length>4?` <span class="muted small">+${arr.length-4}</span>`:'');
+}
 function renderConnectionGroups(list){
   const groups={};
   for(const c of list){
@@ -1086,25 +1114,39 @@ function renderConnectionGroups(list){
     const hosts=Object.entries(g.hosts).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([h,n])=>pill(`${h} ×${n}`,'purple')).join('')||'—';
     const unknownNote=g.unknownCount?`<div class="small muted" style="margin-top:4px">SOCKS5/HTTP без определённого назначения: ${esc(g.unknownCount)} · Down ${fmtBytes(g.unknownDown)} · Up ${fmtBytes(g.unknownUp)}</div>`:'';
     const accessTags=[...new Set(g.items.map(connectionAccess).filter(Boolean))].map(x=>pill(x==='trusted_ip_bypass'?'trusted_ip без auth':x,x==='trusted_ip_bypass'?'green':'blue')).join('');
-    const knownRows=[];
+    const knownMap={};
     const unknownAgg={count:0,down:0,up:0,route:''};
-    for(const c of g.items.slice(0,200)){
+    for(const c of g.items.slice(0,300)){
       const rawHost=connectionHost(c);
       const down=Number(c.download||c.downloaded||c.down||0), up=Number(c.upload||c.uploaded||c.up||0);
       if(isUnknownProxyDestination(rawHost)){
         unknownAgg.count+=1; unknownAgg.down+=down; unknownAgg.up+=up; if(!unknownAgg.route)unknownAgg.route=connectionRoute(c); continue;
       }
-      let warn=connectionRouteWarning(c);if(String(warn).includes('Трафик идёт напрямую'))warn='';
-      const dtype=connectionDestType(c);
-      const certainty=connectionRouteCertainty(c);
-      const typeLabel=dtype?` ${pill(dtype==='ip'?'IP':(dtype==='domain'?'домен':dtype),dtype==='ip'?'yellow':'blue')}`:'';
-      const src=c?.destination_source||c?.metadata?.destination_source||'';const orig=connectionOriginalDestination(c);const routeNote=certainty==='unconfirmed_ip_default'?'<br><span class="warn small">выход не подтверждён: назначение передано как IP</span>':(certainty==='remote_ruleset_sni_inferred'?'<br><span class="ok small">SNI + Re:filter</span>':(certainty==='sni_inferred'||src==='sni'?'<br><span class="ok small">SNI</span>':''));
-      knownRows.push(`<tr><td>${esc(connectionEntry(c))}<br><span class="muted small">${esc(connectionProto(c))}</span></td><td>${esc(rawHost)}${typeLabel}</td><td>${orig?esc(orig):'—'}</td><td>${esc(connectionRoute(c))}${routeNote}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(down)}</td><td>${fmtBytes(up)}</td></tr>`);
+      const entry=connectionEntry(c)||'—';
+      const proto=connectionProto(c)||'—';
+      const route=connectionRoute(c)||'—';
+      const dtype=connectionDestType(c)||'';
+      const orig=connectionOriginalDestination(c)||'';
+      const note=shortRouteNote(c);
+      const warn=compactRouteWarning(c);
+      const mapKey=[entry,proto,rawHost,route,dtype,note,warn].join('|');
+      if(!knownMap[mapKey])knownMap[mapKey]={entry,proto,rawHost,route,dtype,note,warn,count:0,down:0,up:0,ips:new Set(),active:0,recent:0};
+      const it=knownMap[mapKey];
+      it.count+=1; it.down+=down; it.up+=up;
+      if(orig)it.ips.add(orig);
+      else if(dtype==='ip')it.ips.add(rawHost);
+      if(c.active||c?.metadata?.active)it.active+=1;
+      if(c.recent||c?.metadata?.recent)it.recent+=1;
     }
-    if(unknownAgg.count){knownRows.push(`<tr class="muted"><td>SOCKS5/HTTP<br><span class="muted small">tcp</span></td><td>без определённого назначения ×${esc(unknownAgg.count)}</td><td>—</td><td>${esc(unknownAgg.route||'auth-gateway → Proxy')}</td><td>${fmtBytes(unknownAgg.down)}</td><td>${fmtBytes(unknownAgg.up)}</td></tr>`)}
-    const rows=knownRows.join('');
+    const rows=Object.values(knownMap).sort((a,b)=>b.down+b.up-a.down-a.up).map(it=>{
+      const typeLabel=it.dtype?` ${pill(it.dtype==='ip'?'IP':(it.dtype==='domain'?'домен':it.dtype),it.dtype==='ip'?'yellow':'blue')}`:'';
+      const countLabel=it.count>1?` ${pill(it.count+' сесс.','green')}`:'';
+      const stateLabel=it.active?` ${pill('активно '+it.active,'green')}`:(it.recent?` ${pill('recent '+it.recent,'gray')}`:'');
+      return `<tr><td>${esc(it.entry)}<br><span class="muted small">${esc(it.proto)}</span></td><td>${esc(it.rawHost)}${typeLabel}${countLabel}${stateLabel}</td><td>${formatSourceIps(it.ips)}</td><td>${esc(it.route)}${it.note?'<br>'+it.note:''}${it.warn?'<br><span class="warn small">'+esc(it.warn)+'</span>':''}</td><td>${fmtBytes(it.down)}</td><td>${fmtBytes(it.up)}</td></tr>`;
+    });
+    if(unknownAgg.count){rows.push(`<tr class="muted"><td>SOCKS5/HTTP<br><span class="muted small">tcp</span></td><td>без определённого назначения ×${esc(unknownAgg.count)}</td><td>—</td><td>${esc(unknownAgg.route||'auth-gateway → Proxy')}</td><td>${fmtBytes(unknownAgg.down)}</td><td>${fmtBytes(unknownAgg.up)}</td></tr>`)}
     const k=connectionGroupKey(g), open=state.expandedConnectionGroups.has(k)?' open':'';
-    return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span>${unknownNote}</div><table><thead><tr><th>Вход</th><th>Назначение</th><th>IP / исходный адрес</th><th>Маршрут / фактический выход</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">Нет отображаемых клиентских соединений.</td></tr>'}</tbody></table></div></details>`;
+    return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span>${unknownNote}</div><table><thead><tr><th>Вход</th><th>Назначение</th><th>IP / исходный адрес</th><th>Маршрут / фактический выход</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows.join('')||'<tr><td colspan="6" class="muted">Нет отображаемых клиентских соединений.</td></tr>'}</tbody></table></div></details>`;
   }).join('');
 }
 function renderSystemConnections(list){

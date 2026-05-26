@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.26.1"
+APP_VERSION = "1.26.2"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4887,6 +4887,19 @@ def route_chain_for_destination(destination, context=None):
     except Exception as e:
         return {"chains": ["auth-gateway", "Proxy", "маршрут не определён"], "route": "unknown", "final": "unknown", "warning": str(e), "destination_type": dest_type, "route_certainty": "unknown"}
     route = str(decision.get("route") or "").lower()
+
+    # If a SOCKS5 IP-first connection was later enriched with SNI, the raw
+    # sing-box connection may still be indexed by the original IP. Do not hide a
+    # real DIRECT outbound behind a pretty SNI-derived VPN label; surface the
+    # mismatch so diagnostics show the transport truth.
+    original_destination = context.get('original_destination') or ''
+    source = str(context.get('destination_source') or '')
+    original_actual_route = _actual_route_for_destination(original_destination, context.get('actual_route_index')) if original_destination else None
+    if original_actual_route and source.startswith('sni'):
+        if str(original_actual_route.get('route') or '').lower() == 'direct' and route != 'direct':
+            warn = "SNI-домен требует VPN, но фактический sing-box outbound по исходному IP ушёл DIRECT. Требуется SNI-enforced routing для SOCKS5 IP-first."
+            return {**original_actual_route, "destination_type": dest_type, "expected_route": decision.get("route") or "Proxy", "warning": warn, "actual_route": True, "route_mismatch": True, "decision": decision, "original_destination": original_destination}
+        return {**original_actual_route, "destination_type": dest_type, "expected_route": decision.get("route") or original_actual_route.get("route"), "warning": "", "actual_route": True, "decision": decision, "original_destination": original_destination}
     server = decision.get("proxy_server") or "—"
     delay = decision.get("proxy_delay")
     reason = decision.get("reason") or "default"
@@ -5044,14 +5057,14 @@ def gateway_connections_for_ui(actual_route_index=None):
         trusted = bool(gw.get("trusted"))
         route_context = {**gw, "actual_route_index": actual_route_index}
         route_info = route_chain_for_destination(dest, route_context)
-        if gw.get("destination_source") == "sni":
+        if str(gw.get("destination_source") or "").startswith("sni"):
             route_info = dict(route_info)
             if not str(route_info.get("route_certainty") or "").startswith("remote_ruleset"):
                 route_info["route_certainty"] = "sni_inferred"
             route_info["destination_source"] = "sni"
             route_info["original_destination"] = gw.get("original_destination") or ""
             base_warn = route_info.get("warning") or ""
-            sni_warn = "SNI"
+            sni_warn = "SNI" if gw.get("destination_source") == "sni" else "SNI + enforced route"
             route_info["warning"] = (base_warn + " " + sni_warn).strip()
         if route_info.get("service_connection"):
             # Do not flood the main Connections UI with internal helper rows.
@@ -5590,6 +5603,116 @@ def _connect_internal_socks_with_raw_request(req):
 
 
 
+
+def _socks_success_reply():
+    return b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+
+
+def _socks_host_is_ip(host):
+    try:
+        ipaddress.ip_address(str(host or '').strip('[]'))
+        return True
+    except Exception:
+        return False
+
+
+def _socks_should_delay_for_sni(host, port):
+    """True when a SOCKS5 CONNECT target is IP:443 and TLS SNI can fix routing.
+
+    Router-side selective proxy policies (for example Keenetic DNS routes) often
+    forward SOCKS5 CONNECT requests as IP:443 even when the original site was a
+    routed domain. If the gateway immediately passes that raw IP to sing-box,
+    domain and remote rule-set routing cannot match and the stream may leave as
+    DIRECT. For IP:443 only, the gateway can wait for the first TLS ClientHello,
+    extract SNI, and open the internal SOCKS connection by domain instead.
+    """
+    try:
+        return int(port) == 443 and _socks_host_is_ip(host)
+    except Exception:
+        return False
+
+
+def _recv_initial_tls_probe(client, max_bytes=8192, timeout=2.0):
+    """Read the first client payload after SOCKS success for optional SNI routing.
+
+    The returned bytes are always replayed to the real upstream. Timeout or EOF
+    is not an error here: the gateway falls back to the original IP route.
+    """
+    try:
+        previous_timeout = client.gettimeout()
+    except Exception:
+        previous_timeout = None
+    try:
+        client.settimeout(timeout)
+        try:
+            return client.recv(max_bytes) or b''
+        except socket.timeout:
+            return b''
+    finally:
+        try:
+            client.settimeout(previous_timeout)
+        except Exception:
+            pass
+
+
+def _sni_route_decision(sni):
+    try:
+        return route_test_domain(sni)
+    except Exception as e:
+        return {"route": "unknown", "reason": f"route_test_error:{type(e).__name__}", "error": str(e)}
+
+
+def _connect_internal_socks_for_sni_or_original(client, req, host, port, activity_key=None):
+    """Connect external SOCKS traffic to internal sing-box, enforcing SNI routing.
+
+    Normal SOCKS requests preserve the old behaviour: connect internal SOCKS
+    using the original request and then send the internal success reply to the
+    client. IP:443 requests are different: the gateway sends SOCKS success, reads
+    the first TLS ClientHello, and if SNI is present connects internal SOCKS by
+    that domain. This fixes IP-first router traffic where UI could detect
+    ``*.oaiusercontent.com`` but sing-box had already routed ``172.x.x.x`` as
+    DIRECT.
+    """
+    original_destination = f"{host}:{port}" if host and port else "proxy-gateway"
+    if not _socks_should_delay_for_sni(host, port):
+        upstream, resp = _connect_internal_socks_with_raw_request(req)
+        client.sendall(resp)
+        return upstream, None, b''
+
+    client.sendall(_socks_success_reply())
+    first_payload = _recv_initial_tls_probe(client)
+    sni = _parse_tls_sni_from_client_hello(first_payload) if first_payload else None
+    target_host = host
+    route_decision = None
+    if sni:
+        target_host = sni
+        route_decision = _sni_route_decision(sni)
+        if activity_key:
+            gateway_activity_update_destination(
+                activity_key,
+                f'{sni}:{port}',
+                service='SOCKS5 proxy',
+                destination_source='sni_enforced',
+                original_destination=original_destination,
+                inferred_domain=sni,
+            )
+        log(
+            'GATEWAY',
+            'SOCKS_SNI_ROUTE',
+            f'SOCKS5 IP-first route enforced by SNI {sni}:{port} instead of {original_destination}; decision={route_decision.get("route") if isinstance(route_decision, dict) else "unknown"}',
+            actor='gateway',
+            action='socks_sni_route',
+            target=sni,
+            extra={'original_destination': original_destination, 'sni': sni, 'port': port, 'decision': route_decision},
+        )
+    elif activity_key:
+        gateway_activity_update_destination(activity_key, original_destination, service='SOCKS5 proxy', destination_source='socks5')
+
+    upstream = socks5_connect_via_internal(target_host, port)
+    if first_payload:
+        upstream.sendall(first_payload)
+    return upstream, sni, first_payload
+
 def _parse_tls_sni_from_client_hello(data):
     """Return TLS SNI hostname from a ClientHello buffer, or None.
 
@@ -5794,104 +5917,53 @@ class _Socks5DestinationTap:
         pos += 2
         return host, port, pos
 
-def _trusted_socks_passthrough(client, ip, greeting, methods, trusted=True, auth_user=''):
-    """Restore the v1.25.2 transparent SOCKS5 path for trusted routers.
-
-    v1.25.2 forwarded the SOCKS5 handshake to the internal sing-box SOCKS inbound
-    and relayed bytes unchanged. Later versions parsed/recreated the handshake to
-    improve UI destinations, but that broke some router/SOCKS clients. This path
-    keeps the stable transparent behaviour and adds a passive tap for destination
-    telemetry.
-    """
-    upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
-    try:
-        upstream.sendall(greeting + methods)
-        activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user or '', destination='proxy-gateway')
-        tap = _Socks5DestinationTap(activity_key)
-        return upstream, '', activity_key, tap
-    except Exception:
-        try:
-            upstream.close()
-        except Exception:
-            pass
-        raise
-
 def socks_auth_exchange(client, ip):
-    """Stable SOCKS5 gateway exchange.
+    """SOCKS5 gateway handshake with SNI-aware IP-first routing.
 
-    The trusted/no-auth path intentionally mirrors the known-good v1.25.2
-    behaviour used by routers: forward the original SOCKS5 greeting to the
-    internal sing-box SOCKS inbound and then relay the session transparently.
-    Destination enrichment must never sit in this hot path.
+    Trusted/no-auth and authenticated clients both use one conservative path:
+    parse the standard SOCKS5 CONNECT request, record the original destination,
+    and connect to internal sing-box. For normal destinations the request is
+    forwarded as before. For IP:443 destinations only, the gateway delays the
+    internal connection until the first TLS ClientHello is available; when SNI is
+    present, internal sing-box receives a domain CONNECT and can apply domain,
+    preset and remote rule-set routing instead of defaulting the raw CDN IP to
+    DIRECT.
     """
     greeting = read_exact(client, 2)
     if greeting[0] != 5:
         raise OSError('not socks5')
     methods = read_exact(client, greeting[1])
-    auth_required = bool(load_options().get('socks_auth_enabled')) and not is_trusted_bypass_ip(ip, 'socks')
+    trusted = is_trusted_bypass_ip(ip, 'socks')
+    auth_required = bool(load_options().get('socks_auth_enabled')) and not trusted
+    username = ''
     if not auth_required:
-        upstream, auth_user, activity_key, tap = _trusted_socks_passthrough(client, ip, greeting, methods, trusted=is_trusted_bypass_ip(ip, 'socks'), auth_user='')
-        return upstream, auth_user, activity_key, tap
-    if 2 not in methods:
-        client.sendall(b'\x05\xff')
-        raise OSError('socks auth method not offered')
-    client.sendall(b'\x05\x02')
-    ver = read_exact(client, 1)
-    if ver != b'\x01':
-        raise OSError('bad socks auth version')
-    ulen = read_exact(client, 1)[0]
-    username = read_exact(client, ulen).decode('utf-8', errors='ignore')
-    plen = read_exact(client, 1)[0]
-    password = read_exact(client, plen).decode('utf-8', errors='ignore')
-    if not check_proxy_credentials('socks', username, password):
-        client.sendall(b'\x01\x01')
-        log('SECURITY', 'PROXY_AUTH_FAILED', 'SOCKS5 proxy auth failed', actor='gateway', action='socks_auth_failed', target=ip, extra={'username': username})
-        raise OSError('socks auth failed')
-    client.sendall(b'\x01\x00')
-    req_head = read_exact(client, 4)
-    if req_head[0] != 5 or req_head[1] != 1:
-        client.sendall(b'\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00')
-        raise OSError('unsupported socks command')
-    atyp = req_head[3]
-    if atyp == 1:
-        addr_part = read_exact(client, 4)
-    elif atyp == 3:
-        ln = read_exact(client, 1)
-        addr_part = ln + read_exact(client, ln[0])
-    elif atyp == 4:
-        addr_part = read_exact(client, 16)
+        if 0 not in methods:
+            client.sendall(b'\x05\xff')
+            raise OSError('socks no-auth method not offered')
+        client.sendall(b'\x05\x00')
     else:
-        client.sendall(b'\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00')
-        raise OSError('bad address type')
-    port_part = read_exact(client, 2)
-    req = req_head + addr_part + port_part
-    upstream = socket.create_connection(('127.0.0.1', INTERNAL_SOCKS_PROXY_PORT), timeout=10)
-    try:
-        upstream.sendall(b'\x05\x01\x00')
-        resp = read_exact(upstream, 2)
-        if resp != b'\x05\x00':
-            raise OSError('internal socks rejected no-auth')
-        upstream.sendall(req)
-        resp_head = read_exact(upstream, 4)
-        atyp2 = resp_head[3]
-        if atyp2 == 1:
-            rest = read_exact(upstream, 4 + 2)
-        elif atyp2 == 3:
-            ln = read_exact(upstream, 1)
-            rest = ln + read_exact(upstream, ln[0] + 2)
-        elif atyp2 == 4:
-            rest = read_exact(upstream, 16 + 2)
-        else:
-            rest = read_exact(upstream, 2)
-        client.sendall(resp_head + rest)
-        return upstream, username, None, None
-    except Exception:
-        try:
-            upstream.close()
-        except Exception:
-            pass
-        raise
+        if 2 not in methods:
+            client.sendall(b'\x05\xff')
+            raise OSError('socks auth method not offered')
+        client.sendall(b'\x05\x02')
+        ver = read_exact(client, 1)
+        if ver != b'\x01':
+            raise OSError('bad socks auth version')
+        ulen = read_exact(client, 1)[0]
+        username = read_exact(client, ulen).decode('utf-8', errors='ignore')
+        plen = read_exact(client, 1)[0]
+        password = read_exact(client, plen).decode('utf-8', errors='ignore')
+        if not check_proxy_credentials('socks', username, password):
+            client.sendall(b'\x01\x01')
+            log('SECURITY', 'PROXY_AUTH_FAILED', 'SOCKS5 proxy auth failed', actor='gateway', action='socks_auth_failed', target=ip, extra={'username': username})
+            raise OSError('socks auth failed')
+        client.sendall(b'\x01\x00')
 
+    req, host, port = _read_socks_connect_request(client)
+    destination = f'{host}:{port}' if host and port else 'proxy-gateway'
+    activity_key = gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=username, destination=destination)
+    upstream, sni, _ = _connect_internal_socks_for_sni_or_original(client, req, host, port, activity_key=activity_key)
+    return upstream, username, activity_key, None
 
 def handle_socks_gateway(client, addr):
     ip = addr[0]

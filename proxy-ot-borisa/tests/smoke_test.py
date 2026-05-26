@@ -653,17 +653,17 @@ finally:
 
 print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))
 
-# v1.26.0 release/product checks: this release is not only syntax-valid, it must
+# v1.26.1 release/product checks: this release is not only syntax-valid, it must
 # keep public version files aligned and keep the cleaned UI concepts present.
-assert backend.APP_VERSION == "1.26.0", backend.APP_VERSION
+assert backend.APP_VERSION == "1.26.1", backend.APP_VERSION
 _config_version = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
-assert str(_config_version) == "1.26.0", _config_version
+assert str(_config_version) == "1.26.1", _config_version
 _repo_root = ROOT.parent
 _readme = (_repo_root / "README.md").read_text(encoding="utf-8")
 _changelog = (_repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
-assert "Текущая версия: v1.26.0" in _readme
-assert "Текущая версия add-on: **1.26.0**" in _readme
-assert _changelog.lstrip().startswith("## 1.26.0")
+assert "Текущая версия: v1.26.1" in _readme
+assert "Текущая версия add-on: **1.26.1**" in _readme
+assert _changelog.lstrip().startswith("## 1.26.1")
 for stale in ["Текущая версия: v1.25", "Текущая версия add-on: **1.25"]:
     assert stale not in _readme, stale
 assert "function shortRouteNote" in html
@@ -676,3 +676,38 @@ assert "SOCKS5/HTTP без определённого назначения" in h
 assert "Домен определён пассивно по TLS SNI; транспорт SOCKS5 не изменялся" not in html
 assert "фактический маршрут sing-box" not in html
 assert "IP / исходный адрес" in html
+
+# URL diagnostics staged reader: HTTP 200 + useful body must not become a false
+# global failure because a CDN closes TLS noisily after response data.
+class _FakeDiagSocket:
+    def __init__(self, chunks, error_after=False):
+        self.chunks = list(chunks)
+        self.error_after = error_after
+    def settimeout(self, timeout):
+        self.timeout = timeout
+    def recv(self, size):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.error_after:
+            raise backend.ssl.SSLError('[SSL: RECORD_LAYER_FAILURE] record layer failure')
+        return b''
+
+_chunked_response = (
+    b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/html\r\n\r\n'
+    b'5\r\nhello\r\n0\r\n\r\n'
+)
+_res = backend._read_http_response_stream(_FakeDiagSocket([_chunked_response], error_after=True), max_bytes=1000000, timeout=5)
+assert _res['status'] == 200, _res
+assert _res['downloaded_bytes'] > 0, _res
+assert _res['error'] == '', _res
+assert _res['stop_reason'] == 'chunked_complete', _res
+assert any(x.get('name') == 'HTTP headers' and x.get('status') == 'ok' for x in _res.get('stages') or []), _res
+assert any(x.get('name') == 'HTTP body' and x.get('status') == 'ok' for x in _res.get('stages') or []), _res
+
+_partial_response = b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>ok</html>'
+_res2 = backend._read_http_response_stream(_FakeDiagSocket([_partial_response], error_after=True), max_bytes=1000000, timeout=5)
+assert _res2['status'] == 200, _res2
+assert _res2['downloaded_bytes'] > 0, _res2
+assert _res2['error'] == '', _res2
+assert _res2['stop_reason'] == 'remote_closed_after_response', _res2
+assert _res2.get('close_warning'), _res2

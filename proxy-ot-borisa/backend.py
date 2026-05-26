@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.26.0"
+APP_VERSION = "1.26.1"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -7395,6 +7395,62 @@ def _parse_http_status_and_headers(header_bytes):
     return status, headers, lines[0] if lines else ''
 
 
+
+def _diagnostic_stage(name, status='pending', detail='', ms=None):
+    item = {'name': str(name), 'status': str(status or 'pending')}
+    if detail:
+        item['detail'] = str(detail)
+    if ms is not None:
+        try:
+            item['ms'] = int(ms)
+        except Exception:
+            pass
+    return item
+
+
+def _stage_ok(stages, name, detail='', started=None):
+    ms = None
+    if started is not None:
+        ms = (time.time() - started) * 1000
+    stages.append(_diagnostic_stage(name, 'ok', detail, ms))
+
+
+def _stage_fail(stages, name, detail='', started=None):
+    ms = None
+    if started is not None:
+        ms = (time.time() - started) * 1000
+    stages.append(_diagnostic_stage(name, 'error', detail, ms))
+
+
+def _stage_warn(stages, name, detail='', started=None):
+    ms = None
+    if started is not None:
+        ms = (time.time() - started) * 1000
+    stages.append(_diagnostic_stage(name, 'warn', detail, ms))
+
+
+def _is_tls_close_noise(exc):
+    text = str(exc or '')
+    cls = type(exc).__name__ if exc is not None else ''
+    low = (cls + ' ' + text).lower()
+    return any(x in low for x in [
+        'record_layer_failure',
+        'record layer failure',
+        'unexpected eof',
+        'eof occurred in violation',
+        'ssleoferror',
+        'connection reset by peer',
+        'peer reset',
+    ])
+
+
+def _chunked_complete_tail(tail):
+    if not tail:
+        return False
+    t = tail[-256:].lower()
+    # Common endings for a chunked body, with or without trailer headers.
+    return (b'\r\n0\r\n\r\n' in t) or t.endswith(b'0\r\n\r\n') or (b'\n0\r\n\r\n' in t)
+
 def _classify_stream_result(res):
     status = int(res.get('status') or 0)
     downloaded = int(res.get('downloaded_bytes') or 0)
@@ -7409,12 +7465,14 @@ def _classify_stream_result(res):
         return 'http_error', f'HTTP {status}, файл не отдан'
     if downloaded <= 0:
         return 'no_data', '0 B, тело ответа не получено'
+    if res.get('file_complete'):
+        return 'file_complete', 'ответ получен полностью'
+    if stop_reason in {'chunked_complete', 'remote_closed_after_response'}:
+        return 'ok', 'HTTP-ответ получен, данные прочитаны'
     if expected and expected < 1024 * 1024 and downloaded <= expected:
         return 'short_response', 'короткий ответ, не тест скорости'
     if downloaded < 1024 * 1024:
         return 'too_small', 'скачано меньше 1 MB, тест скорости ненадёжен'
-    if res.get('file_complete'):
-        return 'file_complete', 'файл скачан полностью'
     if stop_reason == 'max_bytes':
         return 'sample_limit', 'скорость измерена, остановлено по лимиту объёма'
     if stop_reason == 'timeout':
@@ -7424,17 +7482,30 @@ def _classify_stream_result(res):
     return 'ok', 'скорость измерена'
 
 
-def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
+def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45, stages=None):
+    """Read an HTTP response for diagnostics without turning a late TLS close into a false failure.
+
+    The URL diagnostics is not a browser. It needs to prove staged availability:
+    response headers, HTTP status and body bytes. Some CDN/Meta endpoints can
+    close TLS in a way Python reports as RECORD_LAYER_FAILURE after useful data
+    has already been delivered. We therefore detect normal HTTP completion
+    (Content-Length or chunked terminator) and, if data was already received,
+    classify late TLS close as close-stage noise rather than failed transport.
+    """
+    stages = stages if stages is not None else []
     started = time.time()
     deadline = started + max(1, int(timeout or 45))
     sock.settimeout(2)
     buf = b''
     error = ''
+    close_warning = ''
     stop_reason = ''
+    header_started = time.time()
     try:
         while b'\r\n\r\n' not in buf and len(buf) < 131072:
             if time.time() >= deadline:
                 stop_reason = 'timeout'
+                _stage_fail(stages, 'HTTP headers', 'timeout before response headers', header_started)
                 break
             chunk = sock.recv(4096)
             if not chunk:
@@ -7442,17 +7513,26 @@ def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
             buf += chunk
     except Exception as e:
         error = f'{type(e).__name__}: {e}'
+        _stage_fail(stages, 'HTTP headers', error, header_started)
     head, sep, rest = buf.partition(b'\r\n\r\n')
     status, headers, status_line = _parse_http_status_and_headers(head)
+    if status:
+        _stage_ok(stages, 'HTTP headers', status_line or f'HTTP {status}', header_started)
+    elif not error:
+        _stage_fail(stages, 'HTTP headers', 'HTTP status not received', header_started)
     expected = None
     try:
         expected = int(headers.get('content-length') or 0) or None
     except Exception:
         expected = None
+    transfer_encoding = str(headers.get('transfer-encoding') or '').lower()
+    is_chunked = 'chunked' in transfer_encoding
     max_bytes = int(max_bytes or 0) or 50_000_000
     body_read = len(rest)
+    body_tail = rest[-256:]
     file_complete = False
     sample_complete = False
+    body_started = time.time()
     if not error and not stop_reason:
         try:
             while body_read < max_bytes:
@@ -7460,6 +7540,11 @@ def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
                     file_complete = True
                     sample_complete = True
                     stop_reason = 'file_complete'
+                    break
+                if is_chunked and _chunked_complete_tail(body_tail):
+                    file_complete = True
+                    sample_complete = True
+                    stop_reason = 'chunked_complete'
                     break
                 if time.time() >= deadline:
                     stop_reason = 'timeout'
@@ -7473,17 +7558,27 @@ def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
                         sample_complete = body_read > 0
                         break
                     continue
+                except Exception as e:
+                    if status and body_read > 0 and _is_tls_close_noise(e):
+                        close_warning = f'{type(e).__name__}: {e}'
+                        stop_reason = 'remote_closed_after_response'
+                        sample_complete = True
+                        break
+                    raise
                 if not chunk:
                     if expected is None:
                         file_complete = body_read > 0
                         sample_complete = body_read > 0
+                        stop_reason = stop_reason or 'remote_closed'
                     elif body_read >= expected:
                         file_complete = True
                         sample_complete = True
+                        stop_reason = 'file_complete'
                     else:
                         stop_reason = 'remote_closed'
                     break
                 body_read += len(chunk)
+                body_tail = (body_tail + chunk)[-256:]
             else:
                 stop_reason = 'max_bytes'
                 sample_complete = body_read > 0
@@ -7494,14 +7589,33 @@ def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
         sample_complete = True
         if not stop_reason:
             stop_reason = 'file_complete'
+    if is_chunked and _chunked_complete_tail(body_tail):
+        file_complete = True
+        sample_complete = True
+        if not stop_reason or stop_reason == 'remote_closed_after_response':
+            stop_reason = 'chunked_complete'
+            close_warning = ''
     if body_read >= max_bytes and not file_complete:
         sample_complete = True
         stop_reason = 'max_bytes'
+    if body_read > 0 and not error:
+        detail = f'{body_read} bytes'
+        if stop_reason:
+            detail += f', stop={stop_reason}'
+        _stage_ok(stages, 'HTTP body', detail, body_started)
+    elif error:
+        _stage_fail(stages, 'HTTP body', error, body_started)
+    else:
+        _stage_warn(stages, 'HTTP body', '0 bytes', body_started)
+    if close_warning:
+        _stage_warn(stages, 'TLS/socket close', 'late close after response data: ' + close_warning)
+    elif status and body_read > 0:
+        _stage_ok(stages, 'TLS/socket close', stop_reason or 'closed')
     duration = max(0.001, time.time() - started)
     res = {
         'status': status,
         'status_line': status_line,
-        'headers': {k: headers.get(k) for k in ['content-length', 'content-type', 'server', 'cache-control', 'accept-ranges'] if headers.get(k)},
+        'headers': {k: headers.get(k) for k in ['content-length', 'content-type', 'server', 'cache-control', 'accept-ranges', 'transfer-encoding'] if headers.get(k)},
         'expected_bytes': expected,
         'downloaded_bytes': body_read,
         'complete': bool(sample_complete),
@@ -7509,8 +7623,10 @@ def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
         'sample_complete': bool(sample_complete),
         'stop_reason': stop_reason or ('error' if error else ''),
         'error': error,
+        'close_warning': close_warning,
         'duration_seconds': round(duration, 3),
         'speed_bytes_per_sec': int(body_read / duration) if duration and body_read else 0,
+        'stages': stages,
     }
     outcome, note = _classify_stream_result(res)
     res['outcome'] = outcome
@@ -7518,44 +7634,56 @@ def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
     res['speed_test_valid'] = outcome in {'file_complete', 'sample_limit', 'time_limit', 'ok'}
     return res
 
-
 def stream_test_via_internal_socks(url, headers=None, max_bytes=50_000_000, timeout=45):
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
         raise ValueError('Введите полный URL http:// или https://')
+    stages = []
     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
     path = urllib.parse.urlunparse(('', '', parsed.path or '/', parsed.params, parsed.query, parsed.fragment))
+    st = time.time()
     sock = socks5_connect_via_internal(parsed.hostname, port)
+    _stage_ok(stages, 'Internal SOCKS connect', f'{parsed.hostname}:{port}', st)
     try:
         if parsed.scheme == 'https':
-            ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=parsed.hostname)
+            st = time.time()
+            try:
+                ctx = ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname=parsed.hostname)
+                _stage_ok(stages, 'TLS handshake', parsed.hostname, st)
+            except Exception as e:
+                _stage_fail(stages, 'TLS handshake', f'{type(e).__name__}: {e}', st)
+                raise
         req_headers = {
             'Host': parsed.hostname if port in {80, 443} else f'{parsed.hostname}:{port}',
-            'User-Agent': f'ProxyOtBorisa/{APP_VERSION} stream-check',
+            'User-Agent': f'ProxyOtBorisa/{APP_VERSION} diagnostics-url',
             'Accept': '*/*',
             'Connection': 'close',
         }
         for k, v in (headers or {}).items():
-            if k and v and k.lower() not in {'host', 'connection'}:
+            if k and v and str(k).lower() not in {'host', 'connection'}:
                 req_headers[str(k)] = str(v)
         req = f'GET {path} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in req_headers.items()) + '\r\n'
+        st = time.time()
         sock.sendall(req.encode('iso-8859-1', errors='ignore'))
-        return _read_http_response_stream(sock, max_bytes=max_bytes, timeout=timeout)
+        _stage_ok(stages, 'HTTP request', 'GET ' + (parsed.path or '/'), st)
+        return _read_http_response_stream(sock, max_bytes=max_bytes, timeout=timeout, stages=stages)
     finally:
         try:
             sock.close()
         except Exception:
             pass
 
-
 def stream_test_via_auth_gateway(url, headers=None, max_bytes=50_000_000, timeout=45):
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
         raise ValueError('Введите полный URL http:// или https://')
+    stages = []
     options = load_options()
     port = int(options.get('http_proxy_port') or 2081)
+    st = time.time()
     sock = socket.create_connection(('127.0.0.1', port), timeout=10)
+    _stage_ok(stages, 'HTTP gateway TCP connect', f'127.0.0.1:{port}', st)
     try:
         proxy_auth = ''
         if options.get('http_auth_enabled'):
@@ -7565,36 +7693,45 @@ def stream_test_via_auth_gateway(url, headers=None, max_bytes=50_000_000, timeou
         host_header = parsed.hostname if target_port in {80, 443} else f'{parsed.hostname}:{target_port}'
         if parsed.scheme == 'https':
             connect_req = f'CONNECT {host_header} HTTP/1.1\r\nHost: {host_header}\r\n{proxy_auth}Proxy-Connection: Keep-Alive\r\n\r\n'
+            st = time.time()
             sock.sendall(connect_req.encode('iso-8859-1', errors='ignore'))
             response = read_until(sock, limit=65536)
-            status, _, _ = _parse_http_status_and_headers(response.split(b'\r\n\r\n', 1)[0])
+            status, _, status_line = _parse_http_status_and_headers(response.split(b'\r\n\r\n', 1)[0])
             if status != 200:
-                return {'status': status, 'downloaded_bytes': 0, 'complete': False, 'error': f'CONNECT failed with HTTP {status}', 'duration_seconds': 0, 'speed_bytes_per_sec': 0}
-            ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=parsed.hostname)
+                _stage_fail(stages, 'HTTP CONNECT', status_line or f'HTTP {status}', st)
+                return {'status': status, 'downloaded_bytes': 0, 'complete': False, 'error': f'CONNECT failed with HTTP {status}', 'duration_seconds': 0, 'speed_bytes_per_sec': 0, 'stages': stages}
+            _stage_ok(stages, 'HTTP CONNECT', status_line or '200 Connection Established', st)
+            st = time.time()
+            try:
+                ctx = ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname=parsed.hostname)
+                _stage_ok(stages, 'TLS handshake', parsed.hostname, st)
+            except Exception as e:
+                _stage_fail(stages, 'TLS handshake', f'{type(e).__name__}: {e}', st)
+                raise
             request_target = urllib.parse.urlunparse(('', '', parsed.path or '/', parsed.params, parsed.query, parsed.fragment))
         else:
             request_target = urllib.parse.urlunparse((parsed.scheme, host_header, parsed.path or '/', parsed.params, parsed.query, parsed.fragment))
         req_headers = {
             'Host': host_header,
-            'User-Agent': f'ProxyOtBorisa/{APP_VERSION} stream-check',
+            'User-Agent': f'ProxyOtBorisa/{APP_VERSION} diagnostics-url',
             'Accept': '*/*',
             'Connection': 'close',
         }
         for k, v in (headers or {}).items():
-            if k and v and k.lower() not in {'host', 'connection', 'proxy-authorization'}:
+            if k and v and str(k).lower() not in {'host', 'connection', 'proxy-authorization'}:
                 req_headers[str(k)] = str(v)
         extra_proxy_auth = proxy_auth if parsed.scheme == 'http' else ''
         req = f'GET {request_target} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in req_headers.items()) + extra_proxy_auth + '\r\n'
+        st = time.time()
         sock.sendall(req.encode('iso-8859-1', errors='ignore'))
-        return _read_http_response_stream(sock, max_bytes=max_bytes, timeout=timeout)
+        _stage_ok(stages, 'HTTP request', 'GET ' + (parsed.path or '/'), st)
+        return _read_http_response_stream(sock, max_bytes=max_bytes, timeout=timeout, stages=stages)
     finally:
         try:
             sock.close()
         except Exception:
             pass
-
-
 
 def _diag_parse_url(value):
     value = str(value or '').strip()
@@ -7817,17 +7954,26 @@ def stream_test_via_public_socks_gateway(url, headers=None, max_bytes=50_000_000
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
         raise ValueError('Введите полный URL http:// или https://')
+    stages = []
     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    st = time.time()
     sock = _socks5_open_via_public_gateway(parsed.hostname, port, timeout=10)
+    _stage_ok(stages, 'SOCKS5 gateway connect', f'{parsed.hostname}:{port}', st)
     try:
         if parsed.scheme == 'https':
-            ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=parsed.hostname)
+            st = time.time()
+            try:
+                ctx = ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname=parsed.hostname)
+                _stage_ok(stages, 'TLS handshake', parsed.hostname, st)
+            except Exception as e:
+                _stage_fail(stages, 'TLS handshake', f'{type(e).__name__}: {e}', st)
+                raise
         request_target = urllib.parse.urlunparse(('', '', parsed.path or '/', parsed.params, parsed.query, parsed.fragment))
         host_header = parsed.hostname if port in {80, 443} else f'{parsed.hostname}:{port}'
         req_headers = {
             'Host': host_header,
-            'User-Agent': f'ProxyOtBorisa/{APP_VERSION} diagnostics-socks',
+            'User-Agent': f'ProxyOtBorisa/{APP_VERSION} diagnostics-url',
             'Accept': '*/*',
             'Connection': 'close',
         }
@@ -7835,14 +7981,15 @@ def stream_test_via_public_socks_gateway(url, headers=None, max_bytes=50_000_000
             if k and v and str(k).lower() not in {'host', 'connection'}:
                 req_headers[str(k)] = str(v)
         req = f'GET {request_target} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in req_headers.items()) + '\r\n'
+        st = time.time()
         sock.sendall(req.encode('iso-8859-1', errors='ignore'))
-        return _read_http_response_stream(sock, max_bytes=max_bytes, timeout=timeout)
+        _stage_ok(stages, 'HTTP request', 'GET ' + (parsed.path or '/'), st)
+        return _read_http_response_stream(sock, max_bytes=max_bytes, timeout=timeout, stages=stages)
     finally:
         try:
             sock.close()
         except Exception:
             pass
-
 
 def diagnostics_url_report(url, headers=None, max_bytes=10_000_000, timeout=25):
     url, parsed = _diag_parse_url(url)
@@ -7877,16 +8024,24 @@ def diagnostics_url_report(url, headers=None, max_bytes=10_000_000, timeout=25):
     h = result['tests'].get('http_2081') or {}
     s5 = result['tests'].get('socks_2080') or {}
     core = result['tests'].get('internal_vpn_core') or {}
-    if h.get('ok') and s5.get('ok'):
-        result['conclusion'] = 'HTTP и SOCKS5 входы отвечают. Если сайт не открывается у клиента, смотрите правила роутера/браузера или конкретный внешний сервис.'
-    elif h.get('ok') and not s5.get('ok'):
+    def _url_ok(x):
+        return bool(x.get('status')) and int(x.get('downloaded_bytes') or 0) > 0 and not x.get('error')
+    def _url_has_http_data(x):
+        return bool(x.get('status')) and int(x.get('downloaded_bytes') or 0) > 0
+    ok_h, ok_s5, ok_core = _url_ok(h), _url_ok(s5), _url_ok(core)
+    if ok_h and ok_s5 and ok_core:
+        result['conclusion'] = 'URL успешно проверен через HTTP 2081, SOCKS5 2080 и внутренний VPN-core: HTTP-ответ и данные получены на всех участках.'
+    elif _url_has_http_data(h) and _url_has_http_data(s5) and _url_has_http_data(core):
+        result['conclusion'] = 'Все участки получили HTTP-ответ и данные, но один из этапов завершился нестандартно. Смотрите детализацию этапов ниже.'
+        result['problems'].append('Есть нестандартное завершение после получения HTTP-ответа; это больше не скрывается общей ошибкой.')
+    elif ok_h and not ok_s5:
         result['conclusion'] = 'HTTP 2081 работает, SOCKS5 2080 даёт ошибку. Проблема в SOCKS5 gateway/relay или его авторизации.'
         result['problems'].append('SOCKS5 отличается от HTTP по результату проверки одного URL.')
         result['recommendations'].append('Проверить trusted/auth SOCKS5, handshake и relay 2080; HTTP 2081 не трогать.')
-    elif not h.get('ok') and core.get('ok'):
+    elif not ok_h and ok_core:
         result['conclusion'] = 'Внутренний VPN-core работает, но внешний gateway даёт ошибку. Проблема на auth-gateway/relay.'
         result['problems'].append('Внешний gateway не смог открыть URL, хотя внутренний proxy смог.')
-    elif not core.get('ok'):
+    elif not ok_core:
         result['conclusion'] = 'URL не проходит даже через внутренний VPN-core. Проблема может быть в выбранной VPN-ноде, маршруте или внешнем сервисе.'
         result['problems'].append('Internal VPN-core/sing-box не дал успешный ответ.')
         result['recommendations'].append('Сменить VPN-сервер или проверить, что домен действительно должен идти через VPN.')

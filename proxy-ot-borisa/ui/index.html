@@ -1294,13 +1294,34 @@ function renderDiagnosticsStatus(){
 
 function renderDiagTestResult(r){
   const tests=r.tests||{};
-  const row=(k,title)=>{const x=tests[k]||{};const good=x.ok&&!x.error;const size=fmtBytes(x.downloaded_bytes||0)+(x.expected_bytes?(' из '+fmtBytes(x.expected_bytes)):'');const sp=x.speed_bytes_per_sec?((Number(x.speed_bytes_per_sec)*8/1000000).toFixed(1)+' Мбит/с'):'—';return `<tr><td><b>${esc(title)}</b></td><td>${good?pill('OK','green'):pill('ошибка','red')}</td><td>${x.status?esc('HTTP '+x.status):'—'}</td><td>${size}</td><td>${sp}</td><td class="small ${x.error?'bad':'muted'}">${esc(x.error||'')}</td></tr>`};
+  const stageLabel={
+    'HTTP gateway TCP connect':'TCP к HTTP 2081',
+    'HTTP CONNECT':'HTTP CONNECT',
+    'SOCKS5 gateway connect':'SOCKS5 2080',
+    'Internal SOCKS connect':'Internal VPN-core',
+    'TLS handshake':'TLS',
+    'HTTP request':'HTTP-запрос',
+    'HTTP headers':'HTTP-ответ',
+    'HTTP body':'Данные',
+    'TLS/socket close':'Закрытие'
+  };
+  const stageHtml=(x)=>{
+    const stages=x.stages||[];
+    if(!stages.length)return '<span class="muted">—</span>';
+    return '<div class="diag-stages">'+stages.map(st=>{
+      const cls=st.status==='ok'?'ok':(st.status==='warn'?'warn':'bad');
+      const name=stageLabel[st.name]||st.name||'этап';
+      const ms=st.ms!=null?' · '+esc(st.ms)+' мс':'';
+      return `<span class="tag ${cls}">${esc(name)}: ${esc(st.status||'—')}${ms}</span>${st.detail?` <span class="small muted">${esc(st.detail)}</span>`:''}`;
+    }).join('<br>')+'</div>';
+  };
+  const row=(k,title)=>{const x=tests[k]||{};const good=x.status&&x.downloaded_bytes>0&&!x.error;const size=fmtBytes(x.downloaded_bytes||0)+(x.expected_bytes?(' из '+fmtBytes(x.expected_bytes)):'');const sp=x.speed_bytes_per_sec?((Number(x.speed_bytes_per_sec)*8/1000000).toFixed(1)+' Мбит/с'):'—';const statusText=good?'OK':(x.status&&x.downloaded_bytes>0?'данные получены':'ошибка');const statusCls=good?'green':(x.status&&x.downloaded_bytes>0?'yellow':'red');return `<tr><td><b>${esc(title)}</b></td><td>${pill(statusText,statusCls)}<div class="small muted">${esc(x.note||x.outcome||'')}</div></td><td>${x.status?esc('HTTP '+x.status):'—'}</td><td>${size}</td><td>${sp}</td><td class="small ${x.error?'bad':'muted'}">${esc(x.error||x.close_warning||'')}</td><td>${stageHtml(x)}</td></tr>`};
   const route=r.route||{};const tcp=r.tcp_direct||{};
   return `<div>${r.conclusion?pill(r.conclusion,(r.problems||[]).length?'yellow':'green'):''} <span class="muted">обновлено: ${fmtTime(r.updated_at)}</span></div>
   <div class="stats" style="margin-top:8px"><div class="stat"><div class="label">Host</div><div class="value small">${esc(r.host||'—')}</div></div><div class="stat"><div class="label">Маршрут по правилам</div><div class="value small">${esc(routeNameText(route.route))}</div></div><div class="stat"><div class="label">Причина</div><div class="value small">${esc(route.reason||'—')}</div></div><div class="stat"><div class="label">TCP напрямую с add-on</div><div class="value small">${tcp.ok?'<span class="ok">OK</span>':'<span class="bad">ошибка</span>'}</div></div></div>
   ${(r.problems||[]).length?'<div class="bad"><b>Проблемы:</b><ul>'+(r.problems||[]).map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>':''}
   ${(r.recommendations||[]).length?'<div class="muted"><b>Что проверить:</b><ul>'+(r.recommendations||[]).map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>':''}
-  <table style="margin-top:10px"><thead><tr><th>Проверка</th><th>Статус</th><th>HTTP</th><th>Размер</th><th>Скорость</th><th>Ошибка</th></tr></thead><tbody>${row('http_2081','HTTP 2081')}${row('socks_2080','SOCKS5 2080')}${row('internal_vpn_core','Internal VPN-core')}</tbody></table>`;
+  <table style="margin-top:10px"><thead><tr><th>Проверка</th><th>Итог</th><th>HTTP</th><th>Размер</th><th>Скорость</th><th>Ошибка/закрытие</th><th>Этапы</th></tr></thead><tbody>${row('http_2081','HTTP 2081')}${row('socks_2080','SOCKS5 2080')}${row('internal_vpn_core','Internal VPN-core')}</tbody></table>`;
 }
 async function runDiagnosticsUrlTest(){
   const url=($('diagUrlInput')?.value||'').trim();

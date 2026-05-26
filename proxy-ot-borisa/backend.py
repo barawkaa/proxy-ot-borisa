@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.18"
+APP_VERSION = "1.25.19"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4821,7 +4821,40 @@ def _destination_host_type(destination):
         return 'domain'
 
 
-def route_chain_for_destination(destination):
+def _enabled_remote_rule_set_sources(kind=None):
+    """Return enabled remote SRS sources that can influence sing-box routing.
+
+    Backend cannot safely parse binary .srs rule-sets in Python, but sing-box uses
+    them at runtime. For gateway/SNI telemetry we mark routes as inferred from
+    active remote rule-sets instead of falling back to a misleading DIRECT label.
+    """
+    try:
+        routing = load_routing()
+        if (routing.get("mode") or "") not in {"blocked_plus_manual", "blocked_only"}:
+            return []
+        out = []
+        for src in routing.get("sources", []) or []:
+            if not src.get("enabled") or src.get("format") != "remote_srs":
+                continue
+            src_kind = str(src.get("kind") or "").lower()
+            if kind and src_kind not in {kind, "mixed"}:
+                continue
+            out.append(src)
+        return out
+    except Exception:
+        return []
+
+
+def _vpn_final_from_decision(decision):
+    server = (decision or {}).get("proxy_server") or "—"
+    delay = (decision or {}).get("proxy_delay")
+    if not server or server in {"—", "direct"}:
+        return "VPN не выбран", "Маршрут требует Proxy/VPN, но активный VPN-сервер не подтверждён."
+    return f"VPN: {server}" + (f" · {delay} мс" if delay else ""), ""
+
+
+def route_chain_for_destination(destination, context=None):
+    context = context or {}
     host = str(destination or "").strip()
     if str(host).strip().lower() == 'proxy-gateway':
         return {"chains": ["auth-gateway", "Proxy", "назначение не определено"], "route": "unknown", "final": "назначение не определено", "warning": "Клиентское SOCKS5/HTTP-соединение принято, но назначение ещё не определено.", "service_connection": False, "destination_type": "unknown", "route_certainty": "unknown"}
@@ -4845,6 +4878,27 @@ def route_chain_for_destination(destination):
         final = "выход не подтверждён"
         warn = "Клиент передал IP-адрес, а не домен. Доменное правило VPN не применялось; фактический выход нужно проверять диагностикой."
         return {"chains": ["auth-gateway", "Proxy", final], "route": "unknown", "expected_route": decision.get("route") or "direct", "final": final, "reason": reason, "warning": warn, "decision": decision, "destination_type": dest_type, "route_certainty": "unconfirmed_ip_default"}
+
+    # SOCKS5 router traffic can arrive as IP first and then be enriched with a
+    # TLS SNI domain. If the add-on runs in blocked_plus_manual/blocked_only and
+    # remote .srs rule-sets are enabled, sing-box may route this domain through
+    # Re:filter even when the Python-side manual/preset check has no explicit
+    # match. Do not present such SNI-derived blocked-list candidates as DIRECT.
+    if (
+        dest_type == 'domain'
+        and route == 'direct'
+        and str(reason).startswith('mode_default')
+        and str(context.get('service') or '').lower().startswith('socks5')
+        and (context.get('destination_source') == 'sni' or context.get('inferred_domain'))
+        and _enabled_remote_rule_set_sources('domain_suffix')
+    ):
+        final, warn = _vpn_final_from_decision(decision)
+        rules = _enabled_remote_rule_set_sources('domain_suffix')
+        src_name = (rules[0].get('name') if rules else '') or 'remote rule-set'
+        sni_warn = f"Домен определён по TLS SNI. В режиме заблокированных ресурсов маршрут сверяется sing-box по удалённому rule-set: {src_name}."
+        if warn:
+            sni_warn = warn + ' ' + sni_warn
+        return {"chains": ["auth-gateway", "Proxy", final], "route": "Proxy", "expected_route": "Proxy", "final": final, "reason": "remote_rule_set_sni_candidate", "warning": sni_warn, "decision": {**decision, "route": "Proxy", "reason": "remote_rule_set_sni_candidate"}, "destination_type": dest_type, "route_certainty": "remote_ruleset_sni_inferred", "remote_rule_set": src_name}
 
     if route == "direct":
         final = "DIRECT"
@@ -4875,10 +4929,11 @@ def gateway_connections_for_ui():
         service = gw.get("service") or "HTTP/SOCKS"
         dest = gw.get("destination") or "proxy-gateway"
         trusted = bool(gw.get("trusted"))
-        route_info = route_chain_for_destination(dest)
+        route_info = route_chain_for_destination(dest, gw)
         if gw.get("destination_source") == "sni":
             route_info = dict(route_info)
-            route_info["route_certainty"] = "sni_inferred"
+            if not str(route_info.get("route_certainty") or "").startswith("remote_ruleset"):
+                route_info["route_certainty"] = "sni_inferred"
             route_info["destination_source"] = "sni"
             route_info["original_destination"] = gw.get("original_destination") or ""
             base_warn = route_info.get("warning") or ""
@@ -6671,7 +6726,7 @@ def build_clients(connections):
             item['trusted_name'] = item.get('trusted_name') or 'trusted_ip_bypass'
         item.setdefault('identities', set()).add('access:trusted_ip_bypass' if gw.get('trusted') else 'access:auth_gateway')
         dest = gw.get('destination') or 'proxy-gateway'
-        route_info = route_chain_for_destination(dest)
+        route_info = route_chain_for_destination(dest, gw)
         if route_info.get('service_connection'):
             # Keep service noise out of client cards. It made real clients look
             # like they were visiting "Служебное соединение add-on" instead of sites.
@@ -7426,7 +7481,7 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
         if since and ts < since:
             continue
         dest = gw.get('destination') or 'proxy-gateway'
-        route_info = route_chain_for_destination(dest)
+        route_info = route_chain_for_destination(dest, gw)
         up = int(gw.get('upload') or 0)
         down = int(gw.get('download') or 0)
         is_unknown = str(dest).strip().lower() == 'proxy-gateway'

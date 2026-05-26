@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.19"
+APP_VERSION = "1.25.20"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4821,6 +4821,21 @@ def _destination_host_type(destination):
         return 'domain'
 
 
+def _destination_ip_address(destination):
+    host = normalize_endpoint_host(destination) or str(destination or '').strip()
+    try:
+        return ipaddress.ip_address(str(host).strip('[]'))
+    except Exception:
+        return None
+
+
+def is_local_destination_ip(destination):
+    addr = _destination_ip_address(destination)
+    if not addr:
+        return False
+    return bool(addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved)
+
+
 def _enabled_remote_rule_set_sources(kind=None):
     """Return enabled remote SRS sources that can influence sing-box routing.
 
@@ -4861,6 +4876,9 @@ def route_chain_for_destination(destination, context=None):
     if is_gateway_service_destination(host):
         return {"chains": ["auth-gateway", "служебное соединение add-on"], "route": "internal", "final": "служебное", "warning": "", "service_connection": True, "destination_type": "service", "route_certainty": "confirmed"}
     dest_type = _destination_host_type(host)
+    if dest_type == 'ip' and is_local_destination_ip(host):
+        warn = "Локальный/LAN-адрес. Это не внешний сайт и не VPN-маршрут."
+        return {"chains": ["auth-gateway", "Proxy", "LAN / локальный адрес"], "route": "local", "expected_route": "local", "final": "LAN / локальный адрес", "reason": "local_ip", "warning": warn, "destination_type": "ip", "route_certainty": "confirmed_local"}
     try:
         decision = route_test_domain(host)
     except Exception as e:
@@ -7060,9 +7078,24 @@ def network_quality_report(names=None, limit=12):
     return report
 
 
+def _sanitize_network_quality_report(data):
+    if not isinstance(data, dict):
+        return {}
+    out = json.loads(json.dumps(data, ensure_ascii=False, default=str))
+    direct = out.get("direct") if isinstance(out.get("direct"), dict) else {}
+    for key, val in list(direct.items()):
+        if not isinstance(val, dict):
+            continue
+        err = str(val.get("error") or "")
+        if "server_version" in err or "internal diagnostic error" in err:
+            val["ok"] = False
+            val["error"] = "устаревший кэш диагностики; запустите проверку задержек заново"
+    return out
+
+
 def load_network_quality_report():
     data = read_json(NETWORK_QUALITY_FILE, {})
-    return data if isinstance(data, dict) else {}
+    return _sanitize_network_quality_report(data)
 
 
 

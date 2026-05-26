@@ -1002,7 +1002,8 @@ function telegramUserStatus(u){
 
 function connectionIp(c){return c?.metadata?.sourceIP||c?.metadata?.source_ip||c?.sourceIP||c?.source_ip||c?.ip||'—'}
 function connectionHost(c){return c?.metadata?.host||c?.metadata?.destinationIP||c?.metadata?.destination_ip||c?.metadata?.destination||c?.host||c?.destination||'—'}
-function connectionProto(c){return c?.metadata?.network||c?.metadata?.type||c?.network||c?.type||'—'}
+function connectionProto(c){return c?.metadata?.network||c?.network||'—'}
+function connectionEntry(c){return c?.metadata?.type||c?.type||c?.metadata?.service||c?.service||connectionProto(c)||'—'}
 function connectionUser(c){return c?.metadata?.user||c?.metadata?.username||c?.user||c?.username||''}
 function connectionAccess(c){return c?.metadata?.access||c?.access||''}
 function connectionRoute(c){return c?.route_display||c?.metadata?.route_display||(c.chains?c.chains.join(' → '):(c.chain||c.rule||'—'))}
@@ -1057,12 +1058,12 @@ function renderConnectionGroups(list){
       const certainty=connectionRouteCertainty(c);
       const typeLabel=dtype?` ${pill(dtype==='ip'?'IP':(dtype==='domain'?'домен':dtype),dtype==='ip'?'yellow':'blue')}`:'';
       const src=c?.destination_source||c?.metadata?.destination_source||'';const orig=c?.original_destination||c?.metadata?.original_destination||'';const routeNote=certainty==='unconfirmed_ip_default'?'<br><span class="warn small">фактический выход не подтверждён: назначение передано как IP</span>':(certainty==='remote_ruleset_sni_inferred'?'<br><span class="ok small">домен определён по TLS SNI; маршрут учтён через remote rule-set'+(orig?' · исходный адрес: '+esc(orig):'')+'</span>':(certainty==='sni_inferred'||src==='sni'?'<br><span class="ok small">домен определён по TLS SNI'+(orig?' · исходный адрес: '+esc(orig):'')+'</span>':''));
-      knownRows.push(`<tr><td>${esc(connectionProto(c))}</td><td>${esc(rawHost)}${typeLabel}</td><td>${esc(connectionRoute(c))}${routeNote}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(down)}</td><td>${fmtBytes(up)}</td></tr>`);
+      knownRows.push(`<tr><td>${esc(connectionEntry(c))}<br><span class="muted small">${esc(connectionProto(c))}</span></td><td>${esc(rawHost)}${typeLabel}</td><td>${esc(connectionRoute(c))}${routeNote}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(down)}</td><td>${fmtBytes(up)}</td></tr>`);
     }
-    if(unknownAgg.count){knownRows.push(`<tr class="muted"><td>tcp</td><td>SOCKS5/HTTP без определённого назначения ×${esc(unknownAgg.count)}</td><td>${esc(unknownAgg.route||'auth-gateway → Proxy')}</td><td>${fmtBytes(unknownAgg.down)}</td><td>${fmtBytes(unknownAgg.up)}</td></tr>`)}
+    if(unknownAgg.count){knownRows.push(`<tr class="muted"><td>SOCKS5/HTTP<br><span class="muted small">tcp</span></td><td>без определённого назначения ×${esc(unknownAgg.count)}</td><td>${esc(unknownAgg.route||'auth-gateway → Proxy')}</td><td>${fmtBytes(unknownAgg.down)}</td><td>${fmtBytes(unknownAgg.up)}</td></tr>`)}
     const rows=knownRows.join('');
     const k=connectionGroupKey(g), open=state.expandedConnectionGroups.has(k)?' open':'';
-    return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span>${unknownNote}</div><table><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут / фактический выход</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">Нет отображаемых клиентских соединений.</td></tr>'}</tbody></table></div></details>`;
+    return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span>${unknownNote}</div><table><thead><tr><th>Вход</th><th>Назначение</th><th>Маршрут / фактический выход</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">Нет отображаемых клиентских соединений.</td></tr>'}</tbody></table></div></details>`;
   }).join('');
 }
 function renderSystemConnections(list){
@@ -1070,9 +1071,9 @@ function renderSystemConnections(list){
   const hosts={}; let down=0, up=0;
   for(const c of list){const h=mainHost(connectionHost(c)); if(h&&h!=='—')hosts[h]=(hosts[h]||0)+1; down+=Number(c.download||c.downloaded||c.down||0); up+=Number(c.upload||c.uploaded||c.up||0);}
   const hostText=Object.entries(hosts).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([h,n])=>pill(`${h} ×${n}`,'gray')).join('')||'—';
-  const rows=list.slice(0,100).map(c=>`<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`).join('');
+  const rows=list.slice(0,100).map(c=>`<tr><td>${esc(connectionEntry(c))}<br><span class="muted small">${esc(connectionProto(c))}</span></td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`).join('');
   const open=state.expandedSystemConnections?' open':'';
-  return `<details class="client-box system-conn-group" data-system="1" style="opacity:.82"${open}><summary><b>Служебные соединения add-on</b> ${pill(list.length+' соединений','gray')}</summary><div class="client-body"><div class="muted">Это внутренние соединения самого add-on/gateway/localhost. Они вынесены отдельно и не считаются сайтами клиента.</div><div style="margin-top:6px">Down: <b>${fmtBytes(down)}</b> · Up: <b>${fmtBytes(up)}</b><br>Назначения: <span class="mini-list">${hostText}</span></div><table style="margin-top:8px"><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут / фактический выход</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+  return `<details class="client-box system-conn-group" data-system="1" style="opacity:.82"${open}><summary><b>Служебные соединения add-on</b> ${pill(list.length+' соединений','gray')}</summary><div class="client-body"><div class="muted">Это внутренние соединения самого add-on/gateway/localhost. Они вынесены отдельно и не считаются сайтами клиента.</div><div style="margin-top:6px">Down: <b>${fmtBytes(down)}</b> · Up: <b>${fmtBytes(up)}</b><br>Назначения: <span class="mini-list">${hostText}</span></div><table style="margin-top:8px"><thead><tr><th>Вход</th><th>Назначение</th><th>Маршрут / фактический выход</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 function renderConnections(){
   const box=$('connectionsGrouped'); if(!box)return;

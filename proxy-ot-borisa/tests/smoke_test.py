@@ -614,3 +614,41 @@ try:
 finally:
     backend.gateway_active_snapshot = _old_snapshot_12517
     backend.route_test_domain = _old_route_test_domain_12517b
+
+# v1.25.18: passive TLS SNI parsing for SOCKS5 IP destinations must be telemetry-only.
+def _fake_client_hello_sni(host: str) -> bytes:
+    host_b = host.encode('ascii')
+    sni_ext_body = len(host_b).to_bytes(2, 'big')  # placeholder not used directly
+    server_name = b'\x00' + len(host_b).to_bytes(2, 'big') + host_b
+    server_name_list = len(server_name).to_bytes(2, 'big') + server_name
+    sni_ext = b'\x00\x00' + len(server_name_list).to_bytes(2, 'big') + server_name_list
+    body = b'\x03\x03' + (b'\x11' * 32) + b'\x00' + (2).to_bytes(2, 'big') + b'\x13\x01' + b'\x01\x00' + len(sni_ext).to_bytes(2, 'big') + sni_ext
+    hs = b'\x01' + len(body).to_bytes(3, 'big') + body
+    return b'\x16\x03\x01' + len(hs).to_bytes(2, 'big') + hs
+
+assert backend._parse_tls_sni_from_client_hello(_fake_client_hello_sni('chatgpt.com')) == 'chatgpt.com'
+assert backend._parse_tls_sni_from_client_hello(b'not tls') is None
+
+_updates_12518 = []
+_old_update_12518 = backend.gateway_activity_update_destination
+try:
+    def _capture_update(key, destination='', service=None, destination_source=None, original_destination=None, inferred_domain=None):
+        _updates_12518.append({
+            'key': key,
+            'destination': destination,
+            'service': service,
+            'destination_source': destination_source,
+            'original_destination': original_destination,
+            'inferred_domain': inferred_domain,
+        })
+    backend.gateway_activity_update_destination = _capture_update
+    tap = backend._Socks5DestinationTap('taptest')
+    # SOCKS5 CONNECT to 172.64.155.209:443 followed by a TLS ClientHello with SNI chatgpt.com.
+    tap(b'\x05\x01\x00\x01' + bytes([172,64,155,209]) + (443).to_bytes(2, 'big'))
+    tap(_fake_client_hello_sni('chatgpt.com'))
+    assert any(u.get('destination') == '172.64.155.209:443' and u.get('destination_source') == 'socks5' for u in _updates_12518), _updates_12518
+    assert any(u.get('destination') == 'chatgpt.com:443' and u.get('destination_source') == 'sni' and u.get('original_destination') == '172.64.155.209:443' for u in _updates_12518), _updates_12518
+finally:
+    backend.gateway_activity_update_destination = _old_update_12518
+
+print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))

@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.17"
+APP_VERSION = "1.25.18"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4732,7 +4732,7 @@ def gateway_activity_add_bytes(key, upload=0, download=0):
         item["download"] = int(item.get("download") or 0) + max(0, int(download or 0))
 
 
-def gateway_activity_update_destination(key, destination='', service=None):
+def gateway_activity_update_destination(key, destination='', service=None, destination_source=None, original_destination=None, inferred_domain=None):
     if not key:
         return
     dest = str(destination or '').strip()
@@ -4741,8 +4741,16 @@ def gateway_activity_update_destination(key, destination='', service=None):
         if not item:
             return
         item["last_seen"] = time.time()
+        if original_destination and not item.get("original_destination"):
+            item["original_destination"] = str(original_destination or '').strip()
         if dest and dest != 'proxy-gateway':
+            if not item.get("original_destination") and item.get("destination") and item.get("destination") != dest and item.get("destination") != 'proxy-gateway':
+                item["original_destination"] = item.get("destination")
             item["destination"] = dest
+        if destination_source:
+            item["destination_source"] = str(destination_source or '').strip()
+        if inferred_domain:
+            item["inferred_domain"] = str(inferred_domain or '').strip()
         if service:
             item["service"] = service
 
@@ -4868,6 +4876,14 @@ def gateway_connections_for_ui():
         dest = gw.get("destination") or "proxy-gateway"
         trusted = bool(gw.get("trusted"))
         route_info = route_chain_for_destination(dest)
+        if gw.get("destination_source") == "sni":
+            route_info = dict(route_info)
+            route_info["route_certainty"] = "sni_inferred"
+            route_info["destination_source"] = "sni"
+            route_info["original_destination"] = gw.get("original_destination") or ""
+            base_warn = route_info.get("warning") or ""
+            sni_warn = "Домен определён пассивно по TLS SNI; транспорт SOCKS5 не изменялся."
+            route_info["warning"] = (base_warn + " " + sni_warn).strip()
         if route_info.get("service_connection"):
             # Do not flood the main Connections UI with internal helper rows.
             # Real client traffic is shown by gateway rows with an external destination;
@@ -4888,6 +4904,9 @@ def gateway_connections_for_ui():
             "route_warning": route_info.get("warning"),
             "destination_type": route_info.get("destination_type"),
             "route_certainty": route_info.get("route_certainty"),
+            "destination_source": route_info.get("destination_source") or gw.get("destination_source"),
+            "original_destination": route_info.get("original_destination") or gw.get("original_destination"),
+            "inferred_domain": gw.get("inferred_domain"),
             "expected_route": route_info.get("expected_route"),
             "service_connection": bool(route_info.get("service_connection")),
             "metadata": {
@@ -4905,6 +4924,9 @@ def gateway_connections_for_ui():
                 "route_warning": route_info.get("warning"),
                 "destination_type": route_info.get("destination_type"),
                 "route_certainty": route_info.get("route_certainty"),
+                "destination_source": route_info.get("destination_source") or gw.get("destination_source"),
+                "original_destination": route_info.get("original_destination") or gw.get("original_destination"),
+                "inferred_domain": gw.get("inferred_domain"),
                 "expected_route": route_info.get("expected_route"),
                 "recent": bool(gw.get("recent")),
                 "active": not bool(gw.get("recent")),
@@ -5370,35 +5392,173 @@ def _connect_internal_socks_with_raw_request(req):
 
 
 
-class _Socks5DestinationTap:
-    """Parse the first SOCKS5 CONNECT request while bytes are transparently relayed.
+def _parse_tls_sni_from_client_hello(data):
+    """Return TLS SNI hostname from a ClientHello buffer, or None.
 
-    This is intentionally non-invasive: it never consumes, rewrites or delays the
-    client stream. Trusted routers (Keenetic and similar) are especially sensitive
-    to SOCKS5 handshake details, so telemetry must observe the stream instead of
-    terminating and recreating the SOCKS session.
+    This parser is deliberately read-only and conservative. It is used only by
+    the SOCKS5 telemetry tap after the SOCKS CONNECT request has already been
+    passed through. Any malformed/partial TLS data must return None and must
+    never affect the live SOCKS5 stream.
+    """
+    try:
+        if not data or len(data) < 5:
+            return None
+        if data[0] != 0x16:  # TLS handshake record
+            return None
+        record_len = int.from_bytes(data[3:5], 'big')
+        if record_len <= 0 or record_len > 16384 + 2048:
+            return None
+        if len(data) < 5 + record_len:
+            return None
+        pos = 5
+        if data[pos] != 0x01:  # ClientHello
+            return None
+        if pos + 4 > len(data):
+            return None
+        hello_len = int.from_bytes(data[pos+1:pos+4], 'big')
+        pos += 4
+        end = min(len(data), pos + hello_len)
+        # client_version + random
+        if pos + 2 + 32 > end:
+            return None
+        pos += 2 + 32
+        if pos + 1 > end:
+            return None
+        session_len = data[pos]
+        pos += 1 + session_len
+        if pos + 2 > end:
+            return None
+        cipher_len = int.from_bytes(data[pos:pos+2], 'big')
+        pos += 2 + cipher_len
+        if pos + 1 > end:
+            return None
+        comp_len = data[pos]
+        pos += 1 + comp_len
+        if pos + 2 > end:
+            return None
+        ext_len = int.from_bytes(data[pos:pos+2], 'big')
+        pos += 2
+        ext_end = min(end, pos + ext_len)
+        while pos + 4 <= ext_end:
+            ext_type = int.from_bytes(data[pos:pos+2], 'big')
+            ext_size = int.from_bytes(data[pos+2:pos+4], 'big')
+            pos += 4
+            if pos + ext_size > ext_end:
+                return None
+            ext = data[pos:pos+ext_size]
+            pos += ext_size
+            if ext_type != 0x0000:  # server_name
+                continue
+            if len(ext) < 2:
+                return None
+            list_len = int.from_bytes(ext[0:2], 'big')
+            ep = 2
+            list_end = min(len(ext), 2 + list_len)
+            while ep + 3 <= list_end:
+                name_type = ext[ep]
+                name_len = int.from_bytes(ext[ep+1:ep+3], 'big')
+                ep += 3
+                if ep + name_len > list_end:
+                    return None
+                raw = ext[ep:ep+name_len]
+                ep += name_len
+                if name_type == 0:
+                    host = _decode_socks_domain(raw).strip().strip('.')
+                    if host and re.match(r'^[A-Za-z0-9*_.-]+$', host) and '.' in host:
+                        return host.lower()
+        return None
+    except Exception:
+        return None
+
+
+class _Socks5DestinationTap:
+    """Passive SOCKS5 destination and TLS SNI telemetry tap.
+
+    The tap observes bytes already being relayed. It must never consume, rewrite,
+    delay or close the SOCKS5 stream. Its only job is to enrich UI/diagnostics:
+    first with the SOCKS CONNECT destination, and for IP:443 destinations with a
+    best-effort TLS SNI hostname when the client sends a normal TLS ClientHello.
     """
     def __init__(self, activity_key):
         self.activity_key = activity_key
         self.buf = b''
-        self.done = False
+        self.socks_done = False
+        self.tls_done = False
+        self.wait_tls = False
+        self.original_destination = ''
+        self.socks_host = ''
+        self.socks_port = 0
+        self.tls_buf = b''
 
     def __call__(self, data):
-        if self.done or not data:
+        if not data:
             return
-        self.buf = (self.buf + data)[:1024]
         try:
-            parsed = self._try_parse(self.buf)
-        except Exception:
-            parsed = None
-        if parsed:
-            host, port = parsed
-            if host and port:
-                gateway_activity_update_destination(self.activity_key, f'{host}:{port}', service='SOCKS5 proxy')
-            self.done = True
+            if not self.socks_done:
+                self.buf = (self.buf + data)[:4096]
+                parsed = self._try_parse_socks(self.buf)
+                if not parsed:
+                    return
+                host, port, consumed = parsed
+                self.socks_done = True
+                self.socks_host = host or ''
+                self.socks_port = int(port or 0)
+                if host and port:
+                    self.original_destination = f'{host}:{port}'
+                    gateway_activity_update_destination(self.activity_key, self.original_destination, service='SOCKS5 proxy', destination_source='socks5')
+                    if self._should_wait_for_sni(host, port):
+                        self.wait_tls = True
+                        rest = self.buf[consumed:]
+                        if rest:
+                            self._feed_tls(rest)
+                    else:
+                        self.tls_done = True
+                return
+            if self.wait_tls and not self.tls_done:
+                self._feed_tls(data)
+        except Exception as tap_error:
+            # Telemetry must never affect the live proxy connection.
+            self.tls_done = True
+            self.wait_tls = False
+            log('GATEWAY', 'SOCKS_TAP_ERROR', f'SOCKS5 passive telemetry failed: {type(tap_error).__name__}: {tap_error}', actor='gateway', action='socks_tap_error')
 
     @staticmethod
-    def _try_parse(buf):
+    def _should_wait_for_sni(host, port):
+        try:
+            if int(port) != 443:
+                return False
+            ipaddress.ip_address(str(host).strip('[]'))
+            return True
+        except Exception:
+            return False
+
+    def _feed_tls(self, data):
+        if self.tls_done or not data:
+            return
+        self.tls_buf = (self.tls_buf + data)[:8192]
+        sni = _parse_tls_sni_from_client_hello(self.tls_buf)
+        if sni:
+            gateway_activity_update_destination(
+                self.activity_key,
+                f'{sni}:{self.socks_port or 443}',
+                service='SOCKS5 proxy',
+                destination_source='sni',
+                original_destination=self.original_destination,
+                inferred_domain=sni,
+            )
+            self.tls_done = True
+            self.wait_tls = False
+            return
+        # Stop waiting if this clearly is not a TLS ClientHello or enough bytes were observed.
+        if self.tls_buf and self.tls_buf[0] != 0x16:
+            self.tls_done = True
+            self.wait_tls = False
+        elif len(self.tls_buf) >= 8192:
+            self.tls_done = True
+            self.wait_tls = False
+
+    @staticmethod
+    def _try_parse_socks(buf):
         if len(buf) < 4:
             return None
         # The upload stream after method negotiation starts with the SOCKS5 request.
@@ -5433,8 +5593,8 @@ class _Socks5DestinationTap:
         else:
             return None
         port = int.from_bytes(buf[pos:pos+2], 'big')
-        return host, port
-
+        pos += 2
+        return host, port, pos
 
 def _trusted_socks_passthrough(client, ip, greeting, methods, trusted=True, auth_user=''):
     """Restore the v1.25.2 transparent SOCKS5 path for trusted routers.
@@ -6518,7 +6678,7 @@ def build_clients(connections):
             continue
         up = int(gw.get('upload') or 0); down = int(gw.get('download') or 0)
         item['upload'] += up; item['download'] += down
-        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'expected_route': route_info.get('expected_route')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'expected_route': route_info.get('expected_route'), 'recent': bool(gw.get('recent')), 'active': not bool(gw.get('recent'))})
+        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'destination_source': route_info.get('destination_source') or gw.get('destination_source'), 'original_destination': route_info.get('original_destination') or gw.get('original_destination'), 'inferred_domain': gw.get('inferred_domain'), 'expected_route': route_info.get('expected_route')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'destination_source': route_info.get('destination_source') or gw.get('destination_source'), 'original_destination': route_info.get('original_destination') or gw.get('original_destination'), 'inferred_domain': gw.get('inferred_domain'), 'expected_route': route_info.get('expected_route'), 'recent': bool(gw.get('recent')), 'active': not bool(gw.get('recent'))})
         
         if route_info.get('service_connection'):
             item.setdefault('service_connections', 0)
@@ -7283,6 +7443,9 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
             'route_warning': route_info.get('warning') or '',
             'destination_type': route_info.get('destination_type') or 'unknown',
             'route_certainty': route_info.get('route_certainty') or 'unknown',
+            'destination_source': gw.get('destination_source') or route_info.get('destination_source') or '',
+            'original_destination': gw.get('original_destination') or route_info.get('original_destination') or '',
+            'inferred_domain': gw.get('inferred_domain') or '',
             'expected_route': route_info.get('expected_route') or route_info.get('route') or 'unknown',
             'download': down,
             'upload': up,
@@ -7297,6 +7460,7 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
     unknown = [r for r in rows if not r.get('destination_known')]
     ip_destinations = [r for r in known if r.get('destination_type') == 'ip']
     unconfirmed_routes = [r for r in rows if r.get('route_certainty') == 'unconfirmed_ip_default']
+    sni_inferred_routes = [r for r in rows if r.get('route_certainty') == 'sni_inferred' or r.get('destination_source') == 'sni']
     services = {}
     routes = {}
     for r in rows:
@@ -7320,6 +7484,7 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
         'unknown_destinations': len(unknown),
         'ip_destinations': len(ip_destinations),
         'unconfirmed_routes': len(unconfirmed_routes),
+        'sni_inferred_routes': len(sni_inferred_routes),
         'download': sum(int(r.get('download') or 0) for r in rows),
         'upload': sum(int(r.get('upload') or 0) for r in rows),
         'services': services,

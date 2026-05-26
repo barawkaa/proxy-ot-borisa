@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.14"
+APP_VERSION = "1.25.15"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4811,7 +4811,10 @@ def route_chain_for_destination(destination):
     reason = decision.get("reason") or "default"
     if route == "direct":
         final = "DIRECT"
-        warn = "Трафик идёт напрямую через Raspberry/провайдера, а не через VPN."
+        # DIRECT is a normal route decision in split-routing mode.
+        # Do not spam each connection row with a long explanation; UI shows
+        # warnings only when a rule expected VPN but the connection went DIRECT.
+        warn = ""
     else:
         if not server or server in {"—", "direct"}:
             final = "VPN не выбран"
@@ -6355,17 +6358,37 @@ def client_history_payload(limit=300):
 
 
 def simplify_host(host):
-    host = str(host or '').strip().lower().strip('.')
-    if not host or host == '—':
+    """Return a human-friendly host for client cards/history.
+
+    Domains are grouped to the main domain, but IP addresses must never be
+    truncated to tails like "253.33". Earlier builds split "1.2.3.4:443" by
+    dots before removing the port and produced broken labels in Основные сайты.
+    """
+    raw = str(host or '').strip().lower().strip('.')
+    if not raw or raw == '—':
         return '—'
+    # Drop URL scheme/path if a full URL accidentally gets here.
+    if '://' in raw:
+        try:
+            raw = urllib.parse.urlparse(raw).hostname or raw
+        except Exception:
+            pass
+    # Strip IPv6 brackets and ports for display grouping.
+    clean = raw
+    if clean.startswith('[') and ']' in clean:
+        clean = clean[1:clean.index(']')]
+    elif clean.count(':') == 1 and clean.rsplit(':', 1)[1].isdigit():
+        clean = clean.rsplit(':', 1)[0]
+    if clean.endswith('.'):
+        clean = clean[:-1]
     try:
-        ipaddress.ip_address(host)
-        return host
+        ipaddress.ip_address(clean)
+        return clean
     except Exception:
         pass
-    parts = host.split('.')
+    parts = clean.split('.')
     if len(parts) <= 2:
-        return host
+        return clean
     two_part_suffixes = {'co.uk', 'com.br', 'com.tr', 'com.au', 'co.jp', 'co.kr'}
     suffix2 = '.'.join(parts[-2:])
     if suffix2 in two_part_suffixes and len(parts) >= 3:
@@ -6680,24 +6703,41 @@ def current_server_info(proxies):
     return {"mode": mode, "server": actual, "delay": delay}
 
 
+
+def friendly_error(e):
+    msg = str(e or '')
+    typ = type(e).__name__
+    low = msg.lower()
+    if isinstance(e, socket.timeout) or 'timed out' in low or 'timeout' in low:
+        return 'timeout'
+    if 'name or service not known' in low or 'temporary failure in name resolution' in low or 'nodename nor servname' in low:
+        return 'DNS error'
+    if 'connection refused' in low:
+        return 'connection refused'
+    if 'connection reset' in low or 'reset by peer' in low:
+        return 'connection reset'
+    if 'server_version' in msg:
+        return 'internal diagnostic error'
+    return f'{typ}: {msg}' if msg else typ
+
 def tcp_connect_latency(host, port=443, timeout=3.0):
     start = time.time()
     try:
         with socket.create_connection((host, int(port)), timeout=timeout):
             return {"ok": True, "ms": int((time.time() - start) * 1000)}
     except Exception as e:
-        return {"ok": False, "error": str(e), "ms": None}
+        return {"ok": False, "error": friendly_error(e), "ms": None}
 
 
 def direct_http_latency(url="https://www.gstatic.com/generate_204", timeout=5.0):
     start = time.time()
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": server_version})
+        req = urllib.request.Request(url, headers={"User-Agent": f"ProxyOtBorisa/{APP_VERSION} latency-check"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             resp.read(1024)
             return {"ok": True, "status": getattr(resp, "status", 0), "ms": int((time.time() - start) * 1000), "url": url}
     except Exception as e:
-        return {"ok": False, "error": str(e), "ms": None, "url": url}
+        return {"ok": False, "error": friendly_error(e), "ms": None, "url": url}
 
 
 def classify_latency(ms):
@@ -7530,7 +7570,7 @@ def get_events(limit=200, category="all"):
     return events[-limit:][::-1]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ProxyOtBorisa/1.22.0"
+    server_version = f"ProxyOtBorisa/{APP_VERSION}"
 
     def log_message(self, fmt, *args):
         return

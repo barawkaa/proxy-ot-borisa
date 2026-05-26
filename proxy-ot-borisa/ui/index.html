@@ -463,7 +463,19 @@ function gbToBytes(g){return Math.round(Number(g||0)*1073741824)} function bytes
 function fmtTime(ts){if(!ts)return'—';return new Date(ts*1000).toLocaleString('ru-RU')} function fmtDur(sec){sec=Math.max(0,Math.floor(Number(sec||0)));if(sec<60)return sec+' сек';if(sec<3600)return Math.floor(sec/60)+' мин';const d=Math.floor(sec/86400),h=Math.floor((sec%86400)/3600),m=Math.floor((sec%3600)/60);return(d?d+' д ':'')+h+' ч '+m+' мин'}
 function pill(text,cls='gray'){return `<span class="pill ${cls}">${esc(text)}</span>`}
 function setBtn(btn,on,label){btn.classList.remove('on','off','partial');btn.classList.add(on===true?'on':on===false?'off':'partial');btn.textContent=label}
-function mainHost(host){host=String(host||'').split(':')[0].toLowerCase();const p=host.split('.');if(p.length<=2)return host;return p.slice(-2).join('.')}
+function mainHost(host){
+  let h=String(host||'').trim().toLowerCase();
+  if(!h||h==='—')return '—';
+  if(h.includes('://')){try{h=new URL(h).hostname||h}catch(e){}}
+  if(h.startsWith('[')&&h.includes(']'))h=h.slice(1,h.indexOf(']'));
+  else if((h.match(/:/g)||[]).length===1 && h.split(':').pop().match(/^\d+$/))h=h.replace(/:\d+$/,'');
+  if(/^\d{1,3}(\.\d{1,3}){3}$/.test(h))return h;
+  const p=h.split('.').filter(Boolean);if(p.length<=2)return h;
+  const suffix2=p.slice(-2).join('.');
+  const twoPart=['co.uk','com.br','com.tr','com.au','co.jp','co.kr'];
+  if(twoPart.includes(suffix2)&&p.length>=3)return p.slice(-3).join('.');
+  return p.slice(-2).join('.');
+}
 function groupConnections(conns){const m={};for(const c of conns){const meta=c.metadata||{};const ip=meta.sourceIP||meta.source_ip||c.source||c.sourceIP||'—';if(ip==='127.0.0.1')continue;if(!m[ip])m[ip]={ip,items:[],hosts:{},down:0,up:0};const h=mainHost(meta.host||meta.domain||meta.destinationIP||c.host||'—');m[ip].hosts[h]=(m[ip].hosts[h]||0)+1;m[ip].down+=Number(c.download||0);m[ip].up+=Number(c.upload||0);m[ip].items.push(c)}return Object.values(m)}
 function setHeaderNote(t){if($('headerSummaryNote'))$('headerSummaryNote').textContent=t||'—'}
 function systemStatusInfo(){const s=state.status||{},boot=s.startup||state.health?.startup||{},cur=s.current||{},vpn=s.vpn||{},tg=s.telegram||{},power=s.power||{};if(s.last_error)return {cls:'bad',text:'ошибка',note:'Ошибка: '+s.last_error};if(boot && boot.app_ready===false)return {cls:'wait',text:'запуск',note:boot.message||'Add-on запускается'};if(!s.singbox_running)return {cls:'wait',text:'запуск',note:'sing-box запускается или перезапускается'};if(vpn.connected&&cur.server&&cur.server!=='—')return {cls:'ok',text:'работает',note:'Сервис работает через '+cur.server+(cur.delay?' · '+cur.delay+' мс':'')};if(s.singbox_running&&(power.http_enabled||power.socks_enabled||tg.running))return {cls:'wait',text:'частично',note:'Сервис запущен, но VPN ещё не подтверждён или идёт проверка'};return {cls:'bad',text:'ошибка',note:'Прокси-сервисы не подтверждены'}}
@@ -736,10 +748,23 @@ function clientIpText(c){const ip=c.display_ip||c.ip||'—';return String(ip).st
 function clientDurationText(c){if(c.status!=='online')return 'завершён';const started=Number(c.session_started||0);const last=Number(c.last_seen||0);const now=Date.now()/1000;let seconds=0;if(started>0){seconds=Math.max(last-started,now-started,0)}return seconds>2?fmtDur(seconds):'активен сейчас'}
 function clientGeoText(c){const geo=c.geo||{};if((geo.source||'').startsWith('telegram_secret'))return 'Гео: недоступно, IP клиента не определён';const parts=[geo.country,geo.region,geo.city].filter(Boolean);return 'Гео: '+esc(parts.join(', ')||'—')}
 function clientPrimaryDestLabel(c){return (c.services||[]).includes('Telegram MTProto')&&!(c.services||[]).some(s=>String(s).includes('HTTP')||String(s).includes('SOCKS'))?'Сервис / назначение':'Основные сайты'}
+function clientServiceBadges(c){
+  const services=(c.services||[]).map(x=>String(x||''));
+  const lower=services.map(x=>x.toLowerCase());
+  const out=[];
+  const hasHttp=lower.some(x=>x.includes('http'));
+  const hasSocks=lower.some(x=>x.includes('socks'));
+  const hasMt=(Number(c.mtproto_connections||0)>0)||lower.some(x=>x.includes('telegram mtproto'));
+  if(hasHttp&&hasSocks)out.push(pill('HTTP/SOCKS','blue'));
+  else if(hasHttp)out.push(pill('HTTP','blue'));
+  else if(hasSocks)out.push(pill('SOCKS5','blue'));
+  if(hasMt)out.push(pill('MTProto','blue'));
+  return out.join('');
+}
 function clientCard(c){
   const ids0=c.identities||[];
   const trustedBypass=ids0.includes('access:trusted_ip_bypass')||(c.services||[]).some(x=>String(x).toLowerCase().includes('trusted'));
-  const labels=[pill(c.status,c.status==='online'?'green':c.status==='recent'?'yellow':'gray'),pill(c.trusted?'зарегистрирован':'незарегистрирован',c.trusted?'green':'red'),trustedBypass?pill('trusted_ip без auth','green'):'',...(c.services||[]).map(x=>pill(x,'blue'))].filter(Boolean).join('');
+  const labels=[pill(c.status,c.status==='online'?'green':c.status==='recent'?'yellow':'gray'),trustedBypass?pill('trusted без auth','green'):'',clientServiceBadges(c)].filter(Boolean).join('');
   const hosts=(c.main_hosts||[]).map(h=>pill(`${h.host} ×${h.count}`,'purple')).join('')||(((c.services||[]).includes('Telegram MTProto'))?pill('Telegram MTProto','purple'):'—');
   const ids=(c.identities||[]).map(x=>pill(x,'gray')).join('')||'<span class="muted">Устройство отдельно не определяется. Для точного разделения нужны разные логины/секреты.</span>';
   const lim=c.traffic_limit||{};
@@ -957,7 +982,7 @@ function renderConnectionGroups(list){
   return Object.values(groups).sort((a,b)=>b.items.length-a.items.length).map(g=>{
     const hosts=Object.entries(g.hosts).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([h,n])=>pill(`${h} ×${n}`,'purple')).join('')||'—';
     const accessTags=[...new Set(g.items.map(connectionAccess).filter(Boolean))].map(x=>pill(x==='trusted_ip_bypass'?'trusted_ip без auth':x,x==='trusted_ip_bypass'?'green':'blue')).join('');
-    const rows=g.items.slice(0,100).map(c=>{const warn=connectionRouteWarning(c);return `<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`}).join('');
+    const rows=g.items.slice(0,100).map(c=>{let warn=connectionRouteWarning(c);if(String(warn).includes('Трафик идёт напрямую'))warn='';return `<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`}).join('');
     const k=connectionGroupKey(g), open=state.expandedConnectionGroups.has(k)?' open':'';
     return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span></div><table><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
   }).join('');

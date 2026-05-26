@@ -584,3 +584,33 @@ print(json.dumps({"server_sources_checks": True}, ensure_ascii=False))
 # v1.25.6: no product UI/function preset for a service-specific console/game preset.
 assert "nintendo" not in backend_text.lower()
 assert "nintendo" not in html.lower()
+
+# v1.25.17: SOCKS5 IP destinations must not be presented as confirmed DIRECT
+# when the default-direct decision only happened because the client passed an IP
+# instead of a domain. Transport is not touched; this is UI/diagnostics certainty.
+_old_route_test_domain_12517 = backend.route_test_domain
+try:
+    backend.route_test_domain = lambda host: {"route":"direct", "reason":"mode_default_direct", "proxy_server":"SE1-vless"}
+    _ip_route = backend.route_chain_for_destination("104.18.32.47:443")
+    assert _ip_route["destination_type"] == "ip", _ip_route
+    assert _ip_route["route_certainty"] == "unconfirmed_ip_default", _ip_route
+    assert _ip_route["chains"][-1] == "выход не подтверждён", _ip_route
+    assert "Клиент передал IP" in _ip_route.get("warning", ""), _ip_route
+    _domain_route = backend.route_chain_for_destination("chatgpt.com:443")
+    assert _domain_route["destination_type"] == "domain", _domain_route
+finally:
+    backend.route_test_domain = _old_route_test_domain_12517
+
+_old_snapshot_12517 = backend.gateway_active_snapshot
+_old_route_test_domain_12517b = backend.route_test_domain
+try:
+    backend.route_test_domain = lambda host: {"route":"direct", "reason":"mode_default_direct", "proxy_server":"SE1-vless"}
+    backend.gateway_active_snapshot = lambda include_recent=True: [{"key":"gwip","ip":"188.143.204.77","service":"SOCKS5 proxy","trusted":True,"destination":"104.18.32.47:443","upload":100,"download":200,"started_at":1,"last_seen":2}]
+    _rows = backend.gateway_connections_for_ui()
+    assert _rows and _rows[0]["destination_type"] == "ip", _rows
+    assert _rows[0]["route_certainty"] == "unconfirmed_ip_default", _rows
+    _watch = backend.diagnostics_client_watch_report(ip="188.143.204.77", since=0)
+    assert _watch["ip_destinations"] == 1 and _watch["unconfirmed_routes"] == 1, _watch
+finally:
+    backend.gateway_active_snapshot = _old_snapshot_12517
+    backend.route_test_domain = _old_route_test_domain_12517b

@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.16"
+APP_VERSION = "1.25.17"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4795,25 +4795,51 @@ def is_gateway_service_destination(destination):
     return not dest or dest in {'gateway', 'auth-gateway', 'internal-gateway'}
 
 
+def _destination_host_type(destination):
+    """Classify a destination without doing DNS.
+
+    For SOCKS5 router traffic the client can pass an IP address instead of a
+    domain. Domain routing rules cannot be safely inferred from such IPs. In
+    that case UI must not claim that the final route is DIRECT just because the
+    rule engine has no matching domain.
+    """
+    host = normalize_endpoint_host(destination) or str(destination or '').strip()
+    if not host or host in {'proxy-gateway', 'назначение не определено', 'служебное соединение add-on'}:
+        return 'unknown'
+    try:
+        ipaddress.ip_address(str(host).strip('[]'))
+        return 'ip'
+    except Exception:
+        return 'domain'
+
+
 def route_chain_for_destination(destination):
     host = str(destination or "").strip()
     if str(host).strip().lower() == 'proxy-gateway':
-        return {"chains": ["auth-gateway", "Proxy", "назначение не определено"], "route": "unknown", "final": "назначение не определено", "warning": "Клиентское SOCKS5/HTTP-соединение принято, но назначение ещё не определено.", "service_connection": False}
+        return {"chains": ["auth-gateway", "Proxy", "назначение не определено"], "route": "unknown", "final": "назначение не определено", "warning": "Клиентское SOCKS5/HTTP-соединение принято, но назначение ещё не определено.", "service_connection": False, "destination_type": "unknown", "route_certainty": "unknown"}
     if is_gateway_service_destination(host):
-        return {"chains": ["auth-gateway", "служебное соединение add-on"], "route": "internal", "final": "служебное", "warning": "", "service_connection": True}
+        return {"chains": ["auth-gateway", "служебное соединение add-on"], "route": "internal", "final": "служебное", "warning": "", "service_connection": True, "destination_type": "service", "route_certainty": "confirmed"}
+    dest_type = _destination_host_type(host)
     try:
         decision = route_test_domain(host)
     except Exception as e:
-        return {"chains": ["auth-gateway", "Proxy", "маршрут не определён"], "route": "unknown", "final": "unknown", "warning": str(e)}
+        return {"chains": ["auth-gateway", "Proxy", "маршрут не определён"], "route": "unknown", "final": "unknown", "warning": str(e), "destination_type": dest_type, "route_certainty": "unknown"}
     route = str(decision.get("route") or "").lower()
     server = decision.get("proxy_server") or "—"
     delay = decision.get("proxy_delay")
     reason = decision.get("reason") or "default"
+
+    # IP destinations from SOCKS5 clients are not enough to prove a domain rule.
+    # Do not label them as factual DIRECT when the decision is merely a default
+    # fallback caused by absence of a domain. The real transport is still working;
+    # the final outbound should be checked by diagnostics/internal core data.
+    if dest_type == 'ip' and route == 'direct' and str(reason).startswith('mode_default'):
+        final = "выход не подтверждён"
+        warn = "Клиент передал IP-адрес, а не домен. Доменное правило VPN не применялось; фактический выход нужно проверять диагностикой."
+        return {"chains": ["auth-gateway", "Proxy", final], "route": "unknown", "expected_route": decision.get("route") or "direct", "final": final, "reason": reason, "warning": warn, "decision": decision, "destination_type": dest_type, "route_certainty": "unconfirmed_ip_default"}
+
     if route == "direct":
         final = "DIRECT"
-        # DIRECT is a normal route decision in split-routing mode.
-        # Do not spam each connection row with a long explanation; UI shows
-        # warnings only when a rule expected VPN but the connection went DIRECT.
         warn = ""
     else:
         if not server or server in {"—", "direct"}:
@@ -4822,7 +4848,7 @@ def route_chain_for_destination(destination):
         else:
             final = f"VPN: {server}" + (f" · {delay} мс" if delay else "")
             warn = ""
-    return {"chains": ["auth-gateway", "Proxy", final], "route": decision.get("route") or "Proxy", "final": final, "reason": reason, "warning": warn, "decision": decision}
+    return {"chains": ["auth-gateway", "Proxy", final], "route": decision.get("route") or "Proxy", "expected_route": decision.get("route") or "Proxy", "final": final, "reason": reason, "warning": warn, "decision": decision, "destination_type": dest_type, "route_certainty": "confirmed"}
 
 
 def gateway_connections_for_ui():
@@ -4860,6 +4886,9 @@ def gateway_connections_for_ui():
             "route_decision": route_info.get("route"),
             "route_reason": route_info.get("reason"),
             "route_warning": route_info.get("warning"),
+            "destination_type": route_info.get("destination_type"),
+            "route_certainty": route_info.get("route_certainty"),
+            "expected_route": route_info.get("expected_route"),
             "service_connection": bool(route_info.get("service_connection")),
             "metadata": {
                 "sourceIP": ip,
@@ -4874,6 +4903,9 @@ def gateway_connections_for_ui():
                 "route_display": " → ".join(route_info.get("chains") or ["auth-gateway", "Proxy"]),
                 "route_final": route_info.get("final"),
                 "route_warning": route_info.get("warning"),
+                "destination_type": route_info.get("destination_type"),
+                "route_certainty": route_info.get("route_certainty"),
+                "expected_route": route_info.get("expected_route"),
                 "recent": bool(gw.get("recent")),
                 "active": not bool(gw.get("recent")),
             },
@@ -6486,7 +6518,7 @@ def build_clients(connections):
             continue
         up = int(gw.get('upload') or 0); down = int(gw.get('download') or 0)
         item['upload'] += up; item['download'] += down
-        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning'), 'recent': bool(gw.get('recent')), 'active': not bool(gw.get('recent'))})
+        item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'expected_route': route_info.get('expected_route')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning'), 'destination_type': route_info.get('destination_type'), 'route_certainty': route_info.get('route_certainty'), 'expected_route': route_info.get('expected_route'), 'recent': bool(gw.get('recent')), 'active': not bool(gw.get('recent'))})
         
         if route_info.get('service_connection'):
             item.setdefault('service_connections', 0)
@@ -7249,6 +7281,9 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
             'route_display': ' → '.join(route_info.get('chains') or []),
             'route': route_info.get('route') or 'unknown',
             'route_warning': route_info.get('warning') or '',
+            'destination_type': route_info.get('destination_type') or 'unknown',
+            'route_certainty': route_info.get('route_certainty') or 'unknown',
+            'expected_route': route_info.get('expected_route') or route_info.get('route') or 'unknown',
             'download': down,
             'upload': up,
             'started_at': gw.get('started_at') or 0,
@@ -7260,6 +7295,8 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
     rows = rows[:limit]
     known = [r for r in rows if r.get('destination_known')]
     unknown = [r for r in rows if not r.get('destination_known')]
+    ip_destinations = [r for r in known if r.get('destination_type') == 'ip']
+    unconfirmed_routes = [r for r in rows if r.get('route_certainty') == 'unconfirmed_ip_default']
     services = {}
     routes = {}
     for r in rows:
@@ -7267,8 +7304,10 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
         routes[r.get('route_display') or '—'] = routes.get(r.get('route_display') or '—', 0) + 1
     if not rows:
         conclusion = 'За выбранный период запросов от клиента не найдено. Если сайт открывали сейчас, проблема до add-on: роутер, профиль браузера, DNS/QUIC или внешний маршрут до порта.'
+    elif unconfirmed_routes:
+        conclusion = 'Запросы от клиента пришли, трафик идёт, но часть SOCKS5-назначений передана как IP. Доменное правило VPN не может быть подтверждено по одному IP, поэтому фактический выход помечен как неподтверждённый.'
     elif known:
-        conclusion = 'Запросы от клиента пришли, назначения определены. Смотрите маршрут DIRECT/VPN и ошибки конкретного сайта.'
+        conclusion = 'Запросы от клиента пришли, назначения определены. Смотрите маршрут, тип назначения и предупреждения конкретного сайта.'
     else:
         conclusion = 'Запросы от клиента пришли, трафик идёт, но назначения не определены. SOCKS5/HTTP работает как транспорт, но телеметрия назначения неполная.'
     return {
@@ -7279,6 +7318,8 @@ def diagnostics_client_watch_report(ip='', since=0, limit=120):
         'events_count': len(rows),
         'known_destinations': len(known),
         'unknown_destinations': len(unknown),
+        'ip_destinations': len(ip_destinations),
+        'unconfirmed_routes': len(unconfirmed_routes),
         'download': sum(int(r.get('download') or 0) for r in rows),
         'upload': sum(int(r.get('upload') or 0) for r in rows),
         'services': services,

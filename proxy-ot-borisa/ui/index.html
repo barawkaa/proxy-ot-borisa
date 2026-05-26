@@ -526,9 +526,11 @@ function renderDiagClientResult(r){
   const rows=(r.events||[]).slice(0,80).map(e=>{
     const dest=e.destination_known?e.destination:'назначение не определено';
     const cls=e.destination_known?'':' class="muted"';
-    return `<tr><td>${esc(e.service||'—')}</td><td>${e.trusted?pill('trusted без auth','green'):pill('auth','blue')}</td><td${cls}>${esc(dest)}</td><td>${esc(e.route_display||'—')}</td><td>${fmtBytes(e.download||0)}</td><td>${fmtBytes(e.upload||0)}</td><td>${e.active?pill('активно','green'):pill('recent','yellow')}</td></tr>`;
+    const dtype=e.destination_type?pill(e.destination_type==='ip'?'IP':(e.destination_type==='domain'?'домен':e.destination_type),e.destination_type==='ip'?'yellow':'blue'):'';
+    const certainty=e.route_certainty==='unconfirmed_ip_default'?'<br><span class="warn small">фактический выход не подтверждён: клиент передал IP, а не домен</span>':'';
+    return `<tr><td>${esc(e.service||'—')}</td><td>${e.trusted?pill('trusted без auth','green'):pill('auth','blue')}</td><td${cls}>${esc(dest)} ${dtype}</td><td>${esc(e.route_display||'—')}${certainty}</td><td>${fmtBytes(e.download||0)}</td><td>${fmtBytes(e.upload||0)}</td><td>${e.active?pill('активно','green'):pill('recent','yellow')}</td></tr>`;
   }).join('');
-  box.innerHTML=`<div><b>${esc(r.conclusion||'—')}</b></div><div class="stats" style="margin-top:10px"><div class="stat"><div class="label">Клиент</div><div class="value small">${esc(r.client_ip||'—')}</div></div><div class="stat"><div class="label">Событий</div><div class="value">${esc(r.events_count||0)}</div></div><div class="stat"><div class="label">Назначения</div><div class="value small">известно ${esc(r.known_destinations||0)} / неизвестно ${esc(r.unknown_destinations||0)}</div></div><div class="stat"><div class="label">Трафик</div><div class="value small">Down ${fmtBytes(r.download||0)} · Up ${fmtBytes(r.upload||0)}</div></div></div><div style="margin-top:10px"><b>Входы:</b> ${services}<br><b>Маршруты:</b> ${routes}</div><table><thead><tr><th>Вход</th><th>Доступ</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th><th>Статус</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">Событий нет. Открой сайт на выбранном устройстве и повтори проверку.</td></tr>'}</tbody></table>`;
+  box.innerHTML=`<div><b>${esc(r.conclusion||'—')}</b></div><div class="stats" style="margin-top:10px"><div class="stat"><div class="label">Клиент</div><div class="value small">${esc(r.client_ip||'—')}</div></div><div class="stat"><div class="label">Событий</div><div class="value">${esc(r.events_count||0)}</div></div><div class="stat"><div class="label">Назначения</div><div class="value small">известно ${esc(r.known_destinations||0)} / неизвестно ${esc(r.unknown_destinations||0)}<br>IP: ${esc(r.ip_destinations||0)} · неподтв. маршрут: ${esc(r.unconfirmed_routes||0)}</div></div><div class="stat"><div class="label">Трафик</div><div class="value small">Down ${fmtBytes(r.download||0)} · Up ${fmtBytes(r.upload||0)}</div></div></div><div style="margin-top:10px"><b>Входы:</b> ${services}<br><b>Маршруты:</b> ${routes}</div><table><thead><tr><th>Вход</th><th>Доступ</th><th>Назначение</th><th>Маршрут / фактический выход</th><th>Down</th><th>Up</th><th>Статус</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">Событий нет. Открой сайт на выбранном устройстве и повтори проверку.</td></tr>'}</tbody></table>`;
 }
 async function checkDiagClientWatch(){
   const ip=$('diagClientSelect')?.value||'';
@@ -1005,6 +1007,8 @@ function connectionUser(c){return c?.metadata?.user||c?.metadata?.username||c?.u
 function connectionAccess(c){return c?.metadata?.access||c?.access||''}
 function connectionRoute(c){return c?.route_display||c?.metadata?.route_display||(c.chains?c.chains.join(' → '):(c.chain||c.rule||'—'))}
 function connectionRouteWarning(c){return c?.route_warning||c?.metadata?.route_warning||''}
+function connectionRouteCertainty(c){return c?.route_certainty||c?.metadata?.route_certainty||''}
+function connectionDestType(c){return c?.destination_type||c?.metadata?.destination_type||''}
 function isLocalConnectionIp(ip){return ip==='127.0.0.1'||ip==='::1'||ip==='localhost'||String(ip||'').startsWith('127.')}
 function captureExpandedConnections(){
   const open=new Set();
@@ -1049,12 +1053,16 @@ function renderConnectionGroups(list){
         unknownAgg.count+=1; unknownAgg.down+=down; unknownAgg.up+=up; if(!unknownAgg.route)unknownAgg.route=connectionRoute(c); continue;
       }
       let warn=connectionRouteWarning(c);if(String(warn).includes('Трафик идёт напрямую'))warn='';
-      knownRows.push(`<tr><td>${esc(connectionProto(c))}</td><td>${esc(rawHost)}</td><td>${esc(connectionRoute(c))}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(down)}</td><td>${fmtBytes(up)}</td></tr>`);
+      const dtype=connectionDestType(c);
+      const certainty=connectionRouteCertainty(c);
+      const typeLabel=dtype?` ${pill(dtype==='ip'?'IP':(dtype==='domain'?'домен':dtype),dtype==='ip'?'yellow':'blue')}`:'';
+      const routeNote=certainty==='unconfirmed_ip_default'?'<br><span class="warn small">фактический выход не подтверждён: назначение передано как IP</span>':'';
+      knownRows.push(`<tr><td>${esc(connectionProto(c))}</td><td>${esc(rawHost)}${typeLabel}</td><td>${esc(connectionRoute(c))}${routeNote}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(down)}</td><td>${fmtBytes(up)}</td></tr>`);
     }
     if(unknownAgg.count){knownRows.push(`<tr class="muted"><td>tcp</td><td>SOCKS5/HTTP без определённого назначения ×${esc(unknownAgg.count)}</td><td>${esc(unknownAgg.route||'auth-gateway → Proxy')}</td><td>${fmtBytes(unknownAgg.down)}</td><td>${fmtBytes(unknownAgg.up)}</td></tr>`)}
     const rows=knownRows.join('');
     const k=connectionGroupKey(g), open=state.expandedConnectionGroups.has(k)?' open':'';
-    return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span>${unknownNote}</div><table><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">Нет отображаемых клиентских соединений.</td></tr>'}</tbody></table></div></details>`;
+    return `<details class="client-box conn-group" data-conn-key="${esc(k)}"${open}><summary class="client-head"><span class="tag">${esc(g.ip)}</span> ${g.user?pill(g.user,'blue'):''} ${accessTags} ${pill(g.items.length+' соединений','green')}</summary><div class="client-body"><div>Down: <b>${fmtBytes(g.down)}</b> · Up: <b>${fmtBytes(g.up)}</b><br>Основные сайты: <span class="mini-list">${hosts}</span>${unknownNote}</div><table><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут / фактический выход</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">Нет отображаемых клиентских соединений.</td></tr>'}</tbody></table></div></details>`;
   }).join('');
 }
 function renderSystemConnections(list){
@@ -1064,7 +1072,7 @@ function renderSystemConnections(list){
   const hostText=Object.entries(hosts).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([h,n])=>pill(`${h} ×${n}`,'gray')).join('')||'—';
   const rows=list.slice(0,100).map(c=>`<tr><td>${esc(connectionProto(c))}</td><td>${esc(connectionHost(c))}</td><td>${esc(connectionRoute(c))}</td><td>${fmtBytes(c.download||c.downloaded||c.down||0)}</td><td>${fmtBytes(c.upload||c.uploaded||c.up||0)}</td></tr>`).join('');
   const open=state.expandedSystemConnections?' open':'';
-  return `<details class="client-box system-conn-group" data-system="1" style="opacity:.82"${open}><summary><b>Служебные соединения add-on</b> ${pill(list.length+' соединений','gray')}</summary><div class="client-body"><div class="muted">Это внутренние соединения самого add-on/gateway/localhost. Они вынесены отдельно и не считаются сайтами клиента.</div><div style="margin-top:6px">Down: <b>${fmtBytes(down)}</b> · Up: <b>${fmtBytes(up)}</b><br>Назначения: <span class="mini-list">${hostText}</span></div><table style="margin-top:8px"><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+  return `<details class="client-box system-conn-group" data-system="1" style="opacity:.82"${open}><summary><b>Служебные соединения add-on</b> ${pill(list.length+' соединений','gray')}</summary><div class="client-body"><div class="muted">Это внутренние соединения самого add-on/gateway/localhost. Они вынесены отдельно и не считаются сайтами клиента.</div><div style="margin-top:6px">Down: <b>${fmtBytes(down)}</b> · Up: <b>${fmtBytes(up)}</b><br>Назначения: <span class="mini-list">${hostText}</span></div><table style="margin-top:8px"><thead><tr><th>Тип</th><th>Назначение</th><th>Маршрут / фактический выход</th><th>Down</th><th>Up</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 function renderConnections(){
   const box=$('connectionsGrouped'); if(!box)return;

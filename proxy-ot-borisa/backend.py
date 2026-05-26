@@ -22,7 +22,16 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.10"
+APP_VERSION = "1.25.11"
+
+DIAGNOSTIC_SPEED_PRESETS = [
+    {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
+    {"id": "selectel_100mb", "title": "Selectel 100 MB", "url": "https://speedtest.selectel.ru/100MB", "size_hint": "100 MB", "kind": "speed"},
+    {"id": "selectel_1gb", "title": "Selectel 1 GB", "url": "https://speedtest.selectel.ru/1GB", "size_hint": "1 GB", "kind": "speed"},
+    {"id": "selectel_10gb", "title": "Selectel 10 GB", "url": "https://speedtest.selectel.ru/10GB", "size_hint": "10 GB", "kind": "speed"},
+    {"id": "hetzner_fsn1_100mb", "title": "Hetzner FSN1 100 MB", "url": "https://fsn1-speed.hetzner.com/100MB.bin", "size_hint": "100 MB", "kind": "fallback"},
+]
+
 DATA_DIR = Path("/data")
 UI_DIR = Path("/app/ui")
 TMP_DIR = Path("/tmp/boris-proxy")
@@ -6826,15 +6835,53 @@ def _parse_http_status_and_headers(header_bytes):
     return status, headers, lines[0] if lines else ''
 
 
+def _classify_stream_result(res):
+    status = int(res.get('status') or 0)
+    downloaded = int(res.get('downloaded_bytes') or 0)
+    expected = res.get('expected_bytes')
+    error = res.get('error') or ''
+    stop_reason = res.get('stop_reason') or ''
+    if error:
+        return 'error', 'ошибка соединения'
+    if not status:
+        return 'no_http', 'нет HTTP-ответа'
+    if status >= 400:
+        return 'http_error', f'HTTP {status}, файл не отдан'
+    if downloaded <= 0:
+        return 'no_data', '0 B, тело ответа не получено'
+    if expected and expected < 1024 * 1024 and downloaded <= expected:
+        return 'short_response', 'короткий ответ, не тест скорости'
+    if downloaded < 1024 * 1024:
+        return 'too_small', 'скачано меньше 1 MB, тест скорости ненадёжен'
+    if res.get('file_complete'):
+        return 'file_complete', 'файл скачан полностью'
+    if stop_reason == 'max_bytes':
+        return 'sample_limit', 'скорость измерена, остановлено по лимиту объёма'
+    if stop_reason == 'timeout':
+        return 'time_limit', 'скорость измерена, остановлено по лимиту времени'
+    if expected and downloaded < expected:
+        return 'incomplete', 'поток оборвался до конца файла'
+    return 'ok', 'скорость измерена'
+
+
 def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
     started = time.time()
-    sock.settimeout(timeout)
+    deadline = started + max(1, int(timeout or 45))
+    sock.settimeout(2)
     buf = b''
-    while b'\r\n\r\n' not in buf and len(buf) < 131072:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        buf += chunk
+    error = ''
+    stop_reason = ''
+    try:
+        while b'\r\n\r\n' not in buf and len(buf) < 131072:
+            if time.time() >= deadline:
+                stop_reason = 'timeout'
+                break
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+    except Exception as e:
+        error = f'{type(e).__name__}: {e}'
     head, sep, rest = buf.partition(b'\r\n\r\n')
     status, headers, status_line = _parse_http_status_and_headers(head)
     expected = None
@@ -6842,35 +6889,74 @@ def _read_http_response_stream(sock, max_bytes=50_000_000, timeout=45):
         expected = int(headers.get('content-length') or 0) or None
     except Exception:
         expected = None
+    max_bytes = int(max_bytes or 0) or 50_000_000
     body_read = len(rest)
-    error = ''
-    complete = False
-    try:
-        while body_read < int(max_bytes or 0):
-            if expected is not None and body_read >= expected:
-                complete = True
-                break
-            chunk = sock.recv(65536)
-            if not chunk:
-                complete = expected is None or body_read >= expected
-                break
-            body_read += len(chunk)
-    except Exception as e:
-        error = f'{type(e).__name__}: {e}'
+    file_complete = False
+    sample_complete = False
+    if not error and not stop_reason:
+        try:
+            while body_read < max_bytes:
+                if expected is not None and body_read >= expected:
+                    file_complete = True
+                    sample_complete = True
+                    stop_reason = 'file_complete'
+                    break
+                if time.time() >= deadline:
+                    stop_reason = 'timeout'
+                    sample_complete = body_read > 0
+                    break
+                try:
+                    chunk = sock.recv(min(65536, max_bytes - body_read))
+                except socket.timeout:
+                    if time.time() >= deadline:
+                        stop_reason = 'timeout'
+                        sample_complete = body_read > 0
+                        break
+                    continue
+                if not chunk:
+                    if expected is None:
+                        file_complete = body_read > 0
+                        sample_complete = body_read > 0
+                    elif body_read >= expected:
+                        file_complete = True
+                        sample_complete = True
+                    else:
+                        stop_reason = 'remote_closed'
+                    break
+                body_read += len(chunk)
+            else:
+                stop_reason = 'max_bytes'
+                sample_complete = body_read > 0
+        except Exception as e:
+            error = f'{type(e).__name__}: {e}'
+    if expected is not None and body_read >= expected:
+        file_complete = True
+        sample_complete = True
+        if not stop_reason:
+            stop_reason = 'file_complete'
+    if body_read >= max_bytes and not file_complete:
+        sample_complete = True
+        stop_reason = 'max_bytes'
     duration = max(0.001, time.time() - started)
-    if expected is not None and body_read >= min(expected, int(max_bytes or expected)):
-        complete = True
-    return {
+    res = {
         'status': status,
         'status_line': status_line,
-        'headers': {k: headers.get(k) for k in ['content-length', 'content-type', 'server', 'cache-control'] if headers.get(k)},
+        'headers': {k: headers.get(k) for k in ['content-length', 'content-type', 'server', 'cache-control', 'accept-ranges'] if headers.get(k)},
         'expected_bytes': expected,
         'downloaded_bytes': body_read,
-        'complete': bool(complete),
+        'complete': bool(sample_complete),
+        'file_complete': bool(file_complete),
+        'sample_complete': bool(sample_complete),
+        'stop_reason': stop_reason or ('error' if error else ''),
         'error': error,
         'duration_seconds': round(duration, 3),
-        'speed_bytes_per_sec': int(body_read / duration) if duration else 0,
+        'speed_bytes_per_sec': int(body_read / duration) if duration and body_read else 0,
     }
+    outcome, note = _classify_stream_result(res)
+    res['outcome'] = outcome
+    res['note'] = note
+    res['speed_test_valid'] = outcome in {'file_complete', 'sample_limit', 'time_limit', 'ok'}
+    return res
 
 
 def stream_test_via_internal_socks(url, headers=None, max_bytes=50_000_000, timeout=45):
@@ -7147,31 +7233,60 @@ def diagnostics_url_report(url, headers=None, max_bytes=10_000_000, timeout=25):
 def stream_diagnostics_report(url, headers=None, max_bytes=50_000_000, timeout=45):
     started = time.time()
     headers = headers or {}
-    result = {'ok': True, 'url': url, 'updated_at': time.time(), 'tests': {}, 'conclusion': '', 'problems': [], 'recommendations': []}
+    max_bytes = int(max_bytes or 50_000_000)
+    timeout = int(timeout or 45)
+    result = {
+        'ok': True,
+        'url': url,
+        'updated_at': time.time(),
+        'max_bytes': max_bytes,
+        'timeout': timeout,
+        'presets': DIAGNOSTIC_SPEED_PRESETS,
+        'tests': {},
+        'conclusion': '',
+        'problems': [],
+        'recommendations': []
+    }
     for name, func in [('http_gateway', stream_test_via_auth_gateway), ('socks_gateway', stream_test_via_public_socks_gateway), ('internal_socks', stream_test_via_internal_socks)]:
         try:
-            result['tests'][name] = {'ok': True, **func(url, headers=headers, max_bytes=max_bytes, timeout=timeout)}
+            res = func(url, headers=headers, max_bytes=max_bytes, timeout=timeout)
+            outcome, note = _classify_stream_result(res)
+            res['outcome'] = outcome
+            res['note'] = note
+            res['speed_test_valid'] = outcome in {'file_complete', 'sample_limit', 'time_limit', 'ok'}
+            res['ok'] = bool(res.get('speed_test_valid'))
+            result['tests'][name] = res
         except Exception as e:
-            result['tests'][name] = {'ok': False, 'error': f'{type(e).__name__}: {e}', 'downloaded_bytes': 0, 'complete': False}
-    ag = result['tests'].get('http_gateway') or {}
-    sg = result['tests'].get('socks_gateway') or {}
-    core = result['tests'].get('internal_socks') or {}
-    if ag.get('complete') and sg.get('complete') and core.get('complete'):
-        result['conclusion'] = 'Длинный поток стабилен через HTTP gateway, SOCKS5 gateway и внутренний VPN-core.'
-    elif ag.get('complete') and not sg.get('complete') and core.get('complete'):
-        result['conclusion'] = 'HTTP и внутренний VPN-core стабильны, проблема появляется на SOCKS5 gateway/relay.'
-        result['problems'].append('SOCKS5 2080 не докачивает поток, хотя HTTP 2081 и внутренний proxy справляются.')
-        result['recommendations'].append('Чинить SOCKS5 handshake/relay, не трогая HTTP 2081.')
-    elif not ag.get('complete') and core.get('complete'):
-        result['conclusion'] = 'Внутренний VPN-core стабилен, обрыв появляется на auth-gateway/relay.'
-        result['problems'].append('Внешний gateway обрывает или не докачивает поток, хотя внутренний proxy справляется.')
-        result['recommendations'].append('Проверьте версию relay/gateway и повторите тест после обновления add-on.')
-    elif not core.get('complete'):
-        result['conclusion'] = 'Поток обрывается уже на внутреннем VPN-core или выбранном VPN-маршруте.'
-        result['problems'].append('Даже внутренний proxy/sing-box не докачивает тестовый файл полностью.')
-        result['recommendations'].append('Смените VPN-сервер/регион и повторите проверку. Если проблема сохраняется на всех нодах — смотреть sing-box/провайдера VPN.')
+            result['tests'][name] = {
+                'ok': False, 'speed_test_valid': False, 'outcome': 'exception',
+                'note': 'исключение во время проверки', 'error': f'{type(e).__name__}: {e}',
+                'downloaded_bytes': 0, 'complete': False, 'file_complete': False, 'speed_bytes_per_sec': 0
+            }
+    tests = result['tests']
+    valid = {k: bool(v.get('speed_test_valid')) for k, v in tests.items()}
+    speeds = {k: int(v.get('speed_bytes_per_sec') or 0) for k, v in tests.items() if v.get('speed_test_valid')}
+    if not any(valid.values()):
+        result['ok'] = False
+        result['conclusion'] = 'Тест скорости не состоялся: ни один участок не получил пригодный для измерения файл.'
+        result['problems'].append('Сервер мог вернуть 0 B, HTTP 403/404, короткую страницу или закрыть соединение.')
+        result['recommendations'].append('Выберите встроенную ссылку Selectel/Hetzner или другой прямой URL файла.')
+    elif all(valid.values()):
+        http = speeds.get('http_gateway', 0); socks = speeds.get('socks_gateway', 0); core = speeds.get('internal_socks', 0)
+        result['conclusion'] = 'Скорость измерена по всем участкам. Сравните HTTP 2081, SOCKS5 2080 и внутренний VPN-core.'
+        if core and socks and socks < core * 0.55:
+            result['problems'].append('SOCKS5 2080 заметно медленнее внутреннего VPN-core.')
+            result['recommendations'].append('Проверить SOCKS5 gateway/relay и нагрузку роутера/клиента.')
+        if core and http and http < core * 0.55:
+            result['problems'].append('HTTP 2081 заметно медленнее внутреннего VPN-core.')
+            result['recommendations'].append('Проверить auth-gateway/relay и CPU Raspberry.')
+        if http and socks and abs(http - socks) / max(http, socks) < 0.25:
+            result['recommendations'].append('HTTP и SOCKS5 близки по скорости; если скорость низкая, вероятнее ограничивает VPN-core/сервер/маршрут.')
     else:
-        result['conclusion'] = 'Результат неоднозначный, повторите тест или укажите другой URL.'
+        result['conclusion'] = 'Тест частично состоялся: часть участков измерена, часть дала ошибку или непригодный ответ.'
+        for k, ok in valid.items():
+            if not ok:
+                result['problems'].append(f'{k}: {tests.get(k, {}).get("note") or tests.get(k, {}).get("error") or "тест не состоялся"}')
+
     result['duration_ms'] = int((time.time() - started) * 1000)
     return result
 

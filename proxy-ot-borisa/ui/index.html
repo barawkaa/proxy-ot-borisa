@@ -348,10 +348,16 @@
   <section id="tab-connections" class="tab"><div class="grid"><div class="card full"><h2>Соединения по клиентам</h2><div class="row"><button id="btnRefreshConnections">Обновить</button><button class="danger" id="btnCloseAll">Закрыть все соединения</button></div><div id="connectionsGrouped">Загрузка...</div></div></div></section>
 
   <section id="tab-diagnostics" class="tab"><div class="grid">
-    <div class="card full"><h2>Диагностика</h2><div class="muted">Инструмент для проверки входов HTTP/SOCKS5, trusted-доступа, маршрута домена, реального соединения и стабильности длинной загрузки. Нужен, чтобы быстро понять: проблема в клиенте, gateway, маршрутизации, VPN-core или внешнем сайте.</div><div class="row"><button class="primary" id="btnDiagRefresh">Обновить статус диагностики</button><button id="btnDiagCopyReport">Скопировать отчёт</button><button onclick="openTab('connections')">Открыть соединения</button><button onclick="openTab('diag')">Открыть логи</button></div><div id="diagStatusBox" class="support-note" style="margin-top:10px">Загрузка диагностики...</div></div>
-    <div class="card full"><h2>Проверка маршрута и входов по URL</h2><div class="muted">Введите проблемный URL или домен. Add-on проверит правило маршрутизации, HTTP 2081, SOCKS5 2080 и внутренний VPN-core/sing-box. Это позволяет сравнить, где именно появляется ошибка.</div><div class="row"><input id="diagUrlInput" placeholder="https://www.example.com или domain.com" style="min-width:420px"><button class="primary" id="btnDiagUrlTest">Проверить URL</button></div><div id="diagUrlResult" class="support-note" style="margin-top:10px">Проверка ещё не запускалась.</div></div>
-    <div class="card full"><h2>Проверка стабильности длинной загрузки</h2><div class="muted">Вставьте прямую ссылку на файл. Диагностика сравнит HTTP gateway, SOCKS5 gateway и внутренний VPN-core. Если сайт не отдаёт файл или обрывает соединение, это будет указано как «тест не состоялся», а не как ложная скорость.</div><div class="row"><input id="diagStreamUrl" placeholder="Полный URL тестового файла: http://... или https://..." style="min-width:420px"><button id="btnDiagStreamTest" class="primary">Проверить поток</button></div><div id="diagStreamResult" class="small muted">Проверка ещё не запускалась.</div></div>
-    <div class="card full"><h2>Проверка маршрутизации контрольных доменов</h2><div class="muted">Показывает, какие домены по текущим правилам пойдут напрямую, а какие через VPN. Это не тест скорости.</div><div id="routeDiagBox" class="support-note" style="margin-top:10px">Загрузка проверки маршрута...</div><div class="row"><button class="primary" id="btnRouteDiagRefresh">Обновить маршруты</button><button onclick="openTab('routing')">Открыть маршрутизацию</button></div></div>
+    <div class="card full"><h2>Диагностика</h2><div class="muted">Единый инструмент проверки add-on: доступность портов, trusted-доступ, маршрутизация, реальный URL, скорость HTTP/SOCKS5/Internal VPN-core и отчёт для разбора проблем.</div>
+      <div class="row"><button class="primary" id="btnDiagRefresh">Обновить статус</button><button id="btnDiagCopyReport">Скопировать отчёт</button><button onclick="openTab('connections')">Соединения</button><button onclick="openTab('diag')">Логи</button></div>
+      <div class="diag-tabs row" style="margin-top:12px"><button class="diag-tab active" data-diag-panel="status">1. Статус</button><button class="diag-tab" data-diag-panel="route">2. Маршруты</button><button class="diag-tab" data-diag-panel="url">3. URL</button><button class="diag-tab" data-diag-panel="speed">4. Скорость</button></div>
+    </div>
+    <div class="card full diag-panel" id="diag-panel-status"><h2>Статус системы и входов</h2><div class="muted">Показывает, слушают ли порты HTTP/SOCKS5/Telegram/Internal, какой сервер выбран и включён ли trusted bypass.</div><div id="diagStatusBox" class="support-note" style="margin-top:10px">Загрузка диагностики...</div></div>
+    <div class="card full diag-panel" id="diag-panel-route" style="display:none"><h2>Проверка маршрутизации контрольных доменов</h2><div class="muted">Показывает, какие домены по текущим правилам пойдут напрямую, а какие через VPN. Это не тест скорости.</div><div id="routeDiagBox" class="support-note" style="margin-top:10px">Загрузка проверки маршрута...</div><div class="row"><button class="primary" id="btnRouteDiagRefresh">Обновить маршруты</button><button onclick="openTab('routing')">Открыть маршрутизацию</button></div></div>
+    <div class="card full diag-panel" id="diag-panel-url" style="display:none"><h2>Проверка маршрута и входов по URL</h2><div class="muted">Проверяет правило маршрутизации, TCP-доступность, HTTP 2081, SOCKS5 2080 и внутренний VPN-core/sing-box. Нужна для ответа: где именно появляется ошибка.</div><div class="row"><input id="diagUrlInput" placeholder="https://www.example.com или domain.com" style="min-width:420px"><button class="primary" id="btnDiagUrlTest">Проверить URL</button></div><div id="diagUrlResult" class="support-note" style="margin-top:10px">Проверка ещё не запускалась.</div></div>
+    <div class="card full diag-panel" id="diag-panel-speed" style="display:none"><h2>Проверка скорости и длинного потока</h2><div class="muted">Сравнивает HTTP 2081, SOCKS5 2080 и внутренний VPN-core. Если тест остановлен по лимиту объёма/времени, это будет указано отдельно — это не ошибка и не «недокачка».</div>
+      <div class="support-note"><b>Готовые тестовые ссылки</b><div id="diagSpeedPresets" class="row" style="margin-top:8px"></div></div>
+      <div class="row" style="margin-top:10px"><input id="diagStreamUrl" placeholder="Полный URL тестового файла: http://... или https://..." style="min-width:420px"><label>Лимит объёма <select id="diagStreamMaxBytes"><option value="10000000">10 MB</option><option value="50000000" selected>50 MB</option><option value="100000000">100 MB</option><option value="200000000">200 MB</option></select></label><label>Лимит времени <select id="diagStreamTimeout"><option value="10">10 сек</option><option value="30" selected>30 сек</option><option value="60">60 сек</option></select></label><button id="btnDiagStreamTest" class="primary">Проверить скорость</button></div><div id="diagStreamResult" class="small muted">Проверка ещё не запускалась.</div></div>
   </div></section>
 
   <section id="tab-traffic" class="tab"><div class="grid">
@@ -477,6 +483,24 @@ async function refreshAll(){try{await Promise.all([loadStatus(),loadServers(),lo
 async function refreshLight(){try{await Promise.all([loadStatus(),loadTraffic(false)]);if(['clients','connections'].includes(state.activeTab)){await loadClients(false);await loadConnections(false)}if(state.activeTab==='telegram')await loadTelegram();if(state.activeTab==='diag'){await loadLogs();await loadNetworkQuality()}if(state.activeTab==='audit')await loadAudit();if(state.activeTab==='maintenance')await loadMaintenance()}catch(e){msg(e.message,true)}}
 async function refreshCurrentTab(force=false){try{if(state.activeTab==='overview'){await loadStatus();}if(state.activeTab==='wizard')await loadSystemCheck(true);if(state.activeTab==='system')await loadSystemCheck(true);if(state.activeTab==='backup'){}if(state.activeTab==='instructions'){}if(state.activeTab==='servers')await loadServers();if(state.activeTab==='routing')await loadRouting();if(state.activeTab==='security')await loadSecurity();if(state.activeTab==='ports')await loadPorts();if(state.activeTab==='clients')await loadClients(force);if(state.activeTab==='history'){await loadClients(force);await loadClientHistory();}if(state.activeTab==='users')await loadUsers();if(state.activeTab==='telegram'){await loadUsers();await loadTelegram();}if(state.activeTab==='connections')await loadConnections(force);if(state.activeTab==='traffic')await loadTraffic(true);if(state.activeTab==='diag'){await loadLogs();await loadNetworkQuality();}if(state.activeTab==='diagnostics'){await loadDiagnosticsStatus();await loadRouteDiagnostics(false);}if(state.activeTab==='audit')await loadAudit();if(state.activeTab==='maintenance')await loadMaintenance()}catch(e){msg(e.message,true)}}
 async function loadStatus(){state.status=await api('/api/status');state.health=state.health||{};state.health.startup=state.status.startup||state.health.startup;state.subscriptionInfo=state.status.subscription_info||state.subscriptionInfo;if($('singboxLogLevel'))$('singboxLogLevel').value=(state.status.options||{}).log_level||'warn';if($('productionMode')){$('productionMode').value=(state.status.options||{}).production_mode||'normal';renderProductionModeHint()}mergeTelegramPresence();renderOverview();renderTelegram();renderSubscriptionInfo();renderHeaderSummary()}
+function showDiagPanel(name){
+  document.querySelectorAll('.diag-panel').forEach(p=>p.style.display=(p.id==='diag-panel-'+name?'':'none'));
+  document.querySelectorAll('.diag-tab').forEach(b=>b.classList.toggle('active',b.dataset.diagPanel===name));
+}
+function bindDiagTabs(){document.querySelectorAll('.diag-tab').forEach(b=>{b.onclick=()=>showDiagPanel(b.dataset.diagPanel||'status')});}
+function renderSpeedPresets(){
+  const box=$('diagSpeedPresets'); if(!box)return;
+  const presets=(state.diagnosticsStatus&&state.diagnosticsStatus.speed_presets)||[
+    {title:'Selectel 10 MB',url:'https://speedtest.selectel.ru/10MB'},
+    {title:'Selectel 100 MB',url:'https://speedtest.selectel.ru/100MB'},
+    {title:'Selectel 1 GB',url:'https://speedtest.selectel.ru/1GB'},
+    {title:'Selectel 10 GB',url:'https://speedtest.selectel.ru/10GB'},
+    {title:'Hetzner FSN1 100 MB',url:'https://fsn1-speed.hetzner.com/100MB.bin'}
+  ];
+  box.innerHTML=presets.map(p=>`<button class="diag-preset" data-url="${esc(p.url)}" title="${esc(p.url)}">${esc(p.title||p.id||p.url)}</button>`).join('');
+  box.querySelectorAll('.diag-preset').forEach(btn=>{btn.onclick=()=>{if($('diagStreamUrl'))$('diagStreamUrl').value=btn.dataset.url||'';showDiagPanel('speed');};});
+}
+
 async function loadRouteDiagnostics(force=false){
   try{
     state.routeDiag=await api('/api/route/diagnostics'+(force?'?force=1':''));
@@ -513,8 +537,20 @@ function renderRouteDiagnostics(){
 async function runStreamDiagnostic(){
   const url=($('diagStreamUrl')?.value||'').trim();
   if(!url)throw new Error('Введите URL для проверки потока');
-  const r=await post('/api/diagnostics/stream_test',{url,max_bytes:50000000,timeout:45});
+  const max_bytes=Number($('diagStreamMaxBytes')?.value||50000000); const timeout=Number($('diagStreamTimeout')?.value||30);
+  const r=await post('/api/diagnostics/stream_test',{url,max_bytes,timeout});
   renderStreamDiagnostic(r);
+}
+function streamOutcomeText(x){
+  const o=x.outcome||'';
+  if(o==='file_complete')return ['файл скачан','green'];
+  if(o==='sample_limit')return ['измерено, лимит объёма','blue'];
+  if(o==='time_limit')return ['измерено, лимит времени','blue'];
+  if(o==='http_error')return ['тест не состоялся','red'];
+  if(o==='short_response'||o==='too_small'||o==='no_data')return ['не файл','yellow'];
+  if(o==='error'||o==='exception')return ['ошибка','red'];
+  if(x.speed_test_valid)return ['измерено','green'];
+  return ['не состоялся','red'];
 }
 function renderStreamDiagnostic(r){
   const box=$('diagStreamResult'); if(!box)return;
@@ -522,19 +558,19 @@ function renderStreamDiagnostic(r){
   const row=(name,title)=>{
     const x=tests[name]||{};
     const expected=Number(x.expected_bytes||0), got=Number(x.downloaded_bytes||0);
-    const good=!!x.complete;
+    const [label,cls]=streamOutcomeText(x);
     const status=x.status?('HTTP '+x.status):'—';
     const size=fmtBytes(got)+(expected?(' из '+fmtBytes(expected)):'');
-    const speed=x.speed_bytes_per_sec?fmtBytes(x.speed_bytes_per_sec)+'/с':'—';
-    const err=x.error?'<br><span class="bad">'+esc(x.error)+'</span>':'';
-    let label=good?'OK':'тест не состоялся/обрыв';
-    if(!good && x.status && got>0)label='скачано не полностью';
-    return `<tr><td>${esc(title)}</td><td>${pill(label,good?'green':'red')}</td><td>${esc(status)}</td><td>${size}</td><td>${speed}</td><td>${esc(x.duration_seconds||0)} с${err}</td></tr>`;
+    const speed=x.speed_bytes_per_sec?((Number(x.speed_bytes_per_sec)*8/1000000).toFixed(1)+' Мбит/с'):'—';
+    const details=[x.note,x.stop_reason?('остановка: '+x.stop_reason):'',x.error].filter(Boolean).join(' · ');
+    return `<tr><td>${esc(title)}</td><td>${pill(label,cls)}</td><td>${esc(status)}</td><td>${size}</td><td><b>${speed}</b></td><td>${esc(x.duration_seconds||0)} с<br><span class="small ${x.error?'bad':'muted'}">${esc(details||'—')}</span></td></tr>`;
   };
   const problems=(r.problems||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
   const recs=(r.recommendations||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
-  box.innerHTML=`<div><b>${esc(r.conclusion||'Проверка завершена')}</b></div><div class="small muted" style="margin-top:6px">Проверка скачивает URL двумя путями: через внешний auth-gateway и напрямую через внутренний VPN-core. Если сам сайт не отдаёт файл, это отображается как несостоявшийся тест, а не как низкая скорость.</div><table style="margin-top:8px"><thead><tr><th>Участок</th><th>Итог</th><th>Статус</th><th>Скачано</th><th>Скорость</th><th>Время/ошибка</th></tr></thead><tbody>${row('http_gateway','HTTP 2081')}${row('socks_gateway','SOCKS5 2080')}${row('internal_socks','Внутренний VPN-core')}</tbody></table>${problems?'<div class="bad"><b>Проблемы:</b><ul>'+problems+'</ul></div>':''}${recs?'<div class="muted"><b>Что сделать:</b><ul>'+recs+'</ul></div>':''}`;
+  const cfg=`Лимит объёма: ${fmtBytes(r.max_bytes||0)} · лимит времени: ${esc(r.timeout||'—')} сек`;
+  box.innerHTML=`<div><b>${esc(r.conclusion||'Проверка завершена')}</b></div><div class="small muted" style="margin-top:6px">${cfg}. Проверка сравнивает внешний HTTP gateway, внешний SOCKS5 gateway и внутренний VPN-core.</div><table style="margin-top:8px"><thead><tr><th>Участок</th><th>Итог</th><th>Статус</th><th>Скачано</th><th>Скорость</th><th>Время/детали</th></tr></thead><tbody>${row('http_gateway','HTTP 2081')}${row('socks_gateway','SOCKS5 2080')}${row('internal_socks','Внутренний VPN-core')}</tbody></table>${problems?'<div class="bad"><b>Проблемы:</b><ul>'+problems+'</ul></div>':''}${recs?'<div class="muted"><b>Что сделать:</b><ul>'+recs+'</ul></div>':''}`;
 }
+
 async function loadTelegram(){const d=await api('/api/telegram');state.status=state.status||{};state.status.telegram=d.telegram||{};mergeTelegramPresence();renderTelegram()}
 async function loadServers(){const d=await api('/api/servers');state.servers=d.servers||[];state.serverSources=d.sources||[];state.serverPings=d.pings||{};state.autoTags=d.auto_tags||[];state.subscriptionUrl=d.subscription_url||'';state.subscriptionInfo=d.subscription_info||state.subscriptionInfo;state.subscriptionJson=d.subscription_json||state.subscriptionJson;if($('subUrl')&&!$('subUrl').value)$('subUrl').value=state.subscriptionUrl||'';if($('subscriptionJsonUrl')&&!$('subscriptionJsonUrl').value)$('subscriptionJsonUrl').value=state.subscriptionUrl||'';renderServers();renderServerSources();renderServerSelector();renderSubscriptionInfo();renderSubscriptionJson();if(state.status)renderOverview()}
 async function loadRouting(){const d=await api('/api/routing');state.routing=d.routing||{};renderRouting()}
@@ -647,6 +683,7 @@ function renderSubscriptionJson(){
   const updated=d.updated_at?fmtTime(d.updated_at):'—';
   if($('subscriptionJsonUrl')&&!$('subscriptionJsonUrl').value)$('subscriptionJsonUrl').value=d.source_url||state.subscriptionUrl||'';
   const err=(d.errors||[]).length?`<div class="bad small" style="margin-top:8px">Ошибки: ${esc((d.errors||[]).slice(0,4).join(' | '))}</div>`:'';
+  renderSpeedPresets();
   box.innerHTML=`<div class="stats"><div class="stat"><div class="label">Источник</div><div class="value small">${esc(d.source_url||state.subscriptionUrl||'—')}</div></div><div class="stat"><div class="label">Серверов в JSON</div><div class="value">${esc(d.count||servers.length||0)}</div></div><div class="stat"><div class="label">Обновлено</div><div class="value small">${updated}</div></div></div>${err}`;
   ta.value=JSON.stringify(servers,null,2);
 }
@@ -1054,6 +1091,7 @@ function renderDiagnosticsStatus(){
   const d=state.diagnosticsStatus||{}, ports=d.ports||{}, checks=d.port_checks||{}, auth=d.auth||{}, cur=d.current||{}, routing=d.routing||{};
   const portRows=Object.entries(ports).map(([k,p])=>{const c=checks[k]||{};return `<tr><td>${esc(k)}</td><td class="tag">${esc(p)}</td><td>${statusPill(c.ok)}</td><td>${c.ms!=null?esc(c.ms)+' мс':'—'}</td><td class="small muted">${esc(c.error||'')}</td></tr>`}).join('');
   const trusted=(auth.trusted_cidrs||[]).map(x=>`<span class="tag">${esc(x)}</span>`).join(' ')||'<span class="muted">не настроены</span>';
+  renderSpeedPresets();
   box.innerHTML=`<div class="stats">
     <div class="stat"><div class="label">Версия</div><div class="value">${esc(d.version||'—')}</div></div>
     <div class="stat"><div class="label">Активный VPN</div><div class="value small">${esc(cur.server||'—')}${cur.delay?' · '+esc(cur.delay)+' мс':''}</div></div>
@@ -1285,7 +1323,7 @@ $('btnSaveRouting').onclick=()=>runUiAction('Сохраняю маршрутиз
 $('btnRouteTest').onclick=()=>runUiAction('Проверяю маршрут',testRoute,'Маршрут проверен');
 $('btnUpdateRoutingSources').onclick=()=>runUiAction('Обновляю списки маршрутизации',async()=>{ $('routingStatusText').textContent='Обновляю источники списков...'; await saveRouting(true); $('routingStatusText').textContent='Списки обновлены: '+new Date().toLocaleString('ru-RU');},'Списки маршрутизации обновлены');
 async function initialLoad(){try{let health=null;for(let i=0;i<20;i++){health=await api('/api/health',{retries:1});state.health=health;renderHeaderSummary();const startup=health.startup||{};if(health.app_ready){setHeaderNote('Backend готов. '+(startup.message||'Сервис готов к работе.'));break;}setHeaderNote((startup.message||'Add-on запускается')+' · повторная проверка через 1.5 сек');await sleep(1500);}await loadStatus();await Promise.allSettled([loadServers(),loadUsers(),loadRouting()]);setHeaderNote('Основные данные загружены. Остальное обновляется в фоне.');Promise.allSettled([loadSecurity(),loadPorts(),loadClients(false),loadClientHistory(),loadBlocks(),loadTraffic(false),loadConnections(false),loadLogs(),loadSystemCheck(false),loadNetworkQuality()]).then(()=>msg('Фоновые данные обновлены')).catch(()=>{});}catch(e){msg('Backend пока недоступен: '+(e.message||e),true);setHeaderNote('Backend временно недоступен. Обнови страницу через несколько секунд.');}}
-initialLoad();setInterval(refreshLight,30000);setInterval(()=>{if(state.activeTab==='traffic')loadTraffic(true);},60000);setInterval(()=>{if(state.activeTab==='telegram')loadTelegram();if(state.activeTab==='connections')loadConnections(false);if(state.activeTab==='clients')loadClients(false);if(state.activeTab==='history'){loadClients(false);loadClientHistory();}},5000);
+bindDiagTabs();renderSpeedPresets();initialLoad();setInterval(refreshLight,30000);setInterval(()=>{if(state.activeTab==='traffic')loadTraffic(true);},60000);setInterval(()=>{if(state.activeTab==='telegram')loadTelegram();if(state.activeTab==='connections')loadConnections(false);if(state.activeTab==='clients')loadClients(false);if(state.activeTab==='history'){loadClients(false);loadClientHistory();}},5000);
 </script>
 </body>
 </html>

@@ -489,9 +489,12 @@ assert "/api/diagnostics/url_test" in backend_text
 assert ">Диагностика</button>" in html
 assert 'id="tab-diagnostics"' in html
 assert "Проверка маршрута и входов по URL" in html
-assert "Проверка стабильности длинной загрузки" in html
+assert "Проверка скорости и длинного потока" in html
 assert "trusted_ip без auth" in html
 assert "function runStreamDiagnostic" in html
+assert "Selectel 100 MB" in html
+assert "diagStreamMaxBytes" in html
+assert "streamOutcomeText" in html
 assert "function runDiagnosticsUrlTest" in html
 
 # v1.25.6: completed gateway HTTP/SOCKS requests stay visible briefly and
@@ -532,8 +535,10 @@ try:
 finally:
     backend.is_trusted_bypass_ip = _old_trusted
 
-# v1.25.8: public SOCKS5 diagnostics and transparent reply are product requirements.
+# v1.25.8-v1.25.11: public SOCKS5 diagnostics, transparent reply and sane speed-test verdicts are product requirements.
 assert "stream_test_via_public_socks_gateway" in backend_text
+assert "DIAGNOSTIC_SPEED_PRESETS" in backend_text
+assert "_classify_stream_result" in backend_text
 assert "diagnostics_url_report" in backend_text
 assert "SOCKS5 2080" in html and "HTTP 2081" in html
 assert "Диагностика Proxy/VPN" not in html

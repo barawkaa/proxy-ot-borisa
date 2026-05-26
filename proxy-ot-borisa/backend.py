@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.21"
+APP_VERSION = "1.25.22"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4916,7 +4916,7 @@ def route_chain_for_destination(destination, context=None):
         final, warn = _vpn_final_from_decision(decision)
         rules = _enabled_remote_rule_set_sources('domain_suffix')
         src_name = (rules[0].get('name') if rules else '') or 'remote rule-set'
-        sni_warn = f"Домен определён по TLS SNI. В режиме заблокированных ресурсов маршрут сверяется sing-box по удалённому rule-set: {src_name}."
+        sni_warn = f"SNI + Re:filter: {src_name}."
         if warn:
             sni_warn = warn + ' ' + sni_warn
         return {"chains": ["auth-gateway", "Proxy", final], "route": "Proxy", "expected_route": "Proxy", "final": final, "reason": "remote_rule_set_sni_candidate", "warning": sni_warn, "decision": {**decision, "route": "Proxy", "reason": "remote_rule_set_sni_candidate"}, "destination_type": dest_type, "route_certainty": "remote_ruleset_sni_inferred", "remote_rule_set": src_name}
@@ -5051,7 +5051,7 @@ def gateway_connections_for_ui(actual_route_index=None):
             route_info["destination_source"] = "sni"
             route_info["original_destination"] = gw.get("original_destination") or ""
             base_warn = route_info.get("warning") or ""
-            sni_warn = "Домен определён пассивно по TLS SNI; транспорт SOCKS5 не изменялся."
+            sni_warn = "SNI"
             route_info["warning"] = (base_warn + " " + sni_warn).strip()
         if route_info.get("service_connection"):
             # Do not flood the main Connections UI with internal helper rows.
@@ -5211,6 +5211,30 @@ def read_until(sock, marker=b'\r\n\r\n', limit=65536):
     return data
 
 
+def classify_socket_close(error):
+    """Classify expected TCP relay/socket shutdowns for readable logs.
+
+    Client browsers, mobile apps, Telegram MTProto and upstream servers routinely
+    close one relay direction before the other. Those events should not flood the
+    user-facing Errors log as scary Python exceptions.
+    """
+    msg = str(error or '').lower()
+    etype = type(error).__name__
+    if isinstance(error, TimeoutError) or 'timed out' in msg or 'timeout' in msg:
+        return {'normal': True, 'reason': 'idle_timeout', 'label': 'idle timeout'}
+    if isinstance(error, ConnectionResetError) or 'connection reset by peer' in msg:
+        return {'normal': True, 'reason': 'peer_reset', 'label': 'peer reset'}
+    if isinstance(error, BrokenPipeError) or 'broken pipe' in msg:
+        return {'normal': True, 'reason': 'peer_closed', 'label': 'peer closed'}
+    if isinstance(error, OSError):
+        err_no = getattr(error, 'errno', None)
+        if err_no == 9 or 'bad file descriptor' in msg:
+            return {'normal': True, 'reason': 'socket_already_closed', 'label': 'socket already closed'}
+        if 'connection closed' in msg or 'transport endpoint is not connected' in msg:
+            return {'normal': True, 'reason': 'connection_closed', 'label': 'connection closed'}
+    return {'normal': False, 'reason': etype, 'label': etype}
+
+
 def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
     """Relay two TCP sockets reliably for long-lived streams.
 
@@ -5260,8 +5284,11 @@ def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
                     else:
                         gateway_activity_add_bytes(activity_key, upload=0, download=len(data))
         except Exception as e:
-            # Long streams may end with peer resets; keep this at debug/noisy-safe level.
-            log('GATEWAY', 'RELAY_END', f'Relay direction {direction} stopped: {type(e).__name__}: {e}', actor='gateway', action='relay_end')
+            close_info = classify_socket_close(e)
+            if close_info.get('normal'):
+                log('GATEWAY', 'RELAY_CLOSE', f"Relay direction {direction}: {close_info.get('label')}", actor='gateway', action='relay_close', extra={'direction': direction, 'reason': close_info.get('reason'), 'error_type': type(e).__name__})
+            else:
+                log('GATEWAY', 'RELAY_ERROR', f'Relay direction {direction} error: {type(e).__name__}: {e}', actor='gateway', action='relay_error', extra={'direction': direction, 'error_type': type(e).__name__})
         finally:
             stop.set()
             shutdown_write(dst)
@@ -5875,7 +5902,11 @@ def handle_socks_gateway(client, addr):
         activity_key = existing_activity_key or gateway_activity_start(ip, 'SOCKS5 proxy', trusted=trusted, auth_user=auth_user)
         relay_pair(client, upstream, activity_key=activity_key, upload_tap=upload_tap)
     except Exception as e:
-        log_exception('GATEWAY', 'SOCKS_ERROR', e, actor='gateway', target=ip)
+        close_info = classify_socket_close(e)
+        if close_info.get('normal'):
+            log('GATEWAY', 'SOCKS_CLOSE', f"SOCKS5 session closed: {close_info.get('label')}", actor='gateway', action='socks_close', target=ip, extra={'reason': close_info.get('reason'), 'error_type': type(e).__name__})
+        else:
+            log_exception('GATEWAY', 'SOCKS_ERROR', e, actor='gateway', target=ip)
         try:
             client.close()
         except Exception:

@@ -215,7 +215,7 @@
     </div>
   </div></section>
 
-  <section id="tab-clients" class="tab"><div class="grid"><div class="card full"><h2>Массовые действия с клиентами</h2><div class="muted">Отметь клиентов галочками и примени действие. Это удобно для очистки сотен старых незарегистрированных клиентов.</div><div class="row"><button id="btnSelectUnknownClients">Выбрать незарегистрированных</button><button id="btnClearSelectedClients">Снять выбор</button><select id="bulkClientAction"><option value="">Действие...</option><option value="delete">Удалить из списка</option><option value="block">Заблокировать IP</option><option value="trust">Добавить в доверенные</option><option value="untrust">Убрать из доверенных</option><option value="disconnect">Отключить активные соединения</option></select><button class="primary" id="btnApplyClientBulk">Применить к выбранным</button></div><div class="small muted" id="selectedClientsCount">Выбрано: 0</div></div><div class="card full"><h2>Клиенты онлайн</h2><div id="clientsOnlineBox">Загрузка...</div></div><div class="card full"><h2>Незарегистрированные клиенты</h2><div id="clientsUnknownBox">Загрузка...</div></div><div class="card full"><h2>Зарегистрированные / доверенные клиенты</h2><div id="clientsTrustedBox">Загрузка...</div></div><div class="card full"><h2>Оффлайн клиенты</h2><div id="clientsOfflineBox">Загрузка...</div></div></div></section>
+  <section id="tab-clients" class="tab"><div class="grid"><div class="card full"><h2>Массовые действия с клиентами</h2><div class="muted">Отметь клиентов галочками и примени действие. Это удобно для очистки сотен старых незарегистрированных клиентов.</div><div class="row"><button id="btnSelectUnknownClients">Выбрать незарегистрированных</button><button id="btnClearSelectedClients">Снять выбор</button><select id="bulkClientAction"><option value="">Действие...</option><option value="delete">Удалить из списка</option><option value="block">Заблокировать IP</option><option value="trust">Добавить в доверенные</option><option value="untrust">Убрать из доверенных</option><option value="disconnect">Отключить активные соединения</option></select><button class="primary" id="btnApplyClientBulk">Применить к выбранным</button></div><div class="small muted" id="selectedClientsCount">Выбрано: 0</div></div><div class="card full"><h2>Клиенты онлайн</h2><div id="clientsOnlineBox">Загрузка...</div></div><div class="card full"><h2>Нераспознанные подключения / сканеры</h2><div class="muted">Это не зарегистрированные пользователи, а неподтверждённые TCP/MTProto/HTTP-SOCKS попытки. Они не удаляются автоматически и не влияют на trusted-доступ.</div><div id="clientsUnknownBox" style="margin-top:8px">Загрузка...</div></div><div class="card full"><h2>Зарегистрированные / доверенные клиенты</h2><div id="clientsTrustedBox">Загрузка...</div></div><div class="card full"><h2>Оффлайн клиенты</h2><div id="clientsOfflineBox">Загрузка...</div></div></div></section>
 
   <section id="tab-history" class="tab"><div class="grid"><div class="card full"><h2>История подключений</h2><div class="row"><button class="primary" id="btnRefreshClientHistory">Обновить историю</button><button class="danger" id="btnClearClientHistory">Очистить историю</button></div><div class="muted" id="clientsHistoryRetention">Фиксируются сессии по клиентам. Журнал автоочищается: последний месяц или 2000 последних сессий.</div><div id="clientsHistoryBox" style="margin-top:10px">Загрузка...</div></div></div></section>
 
@@ -527,7 +527,7 @@ function renderDiagClientResult(r){
     const dest=e.destination_known?e.destination:'назначение не определено';
     const cls=e.destination_known?'':' class="muted"';
     const dtype=e.destination_type?pill(e.destination_type==='ip'?'IP':(e.destination_type==='domain'?'домен':e.destination_type),e.destination_type==='ip'?'yellow':'blue'):'';
-    const certainty=e.route_certainty==='unconfirmed_ip_default'?'<br><span class="warn small">выход не подтверждён: клиент передал IP</span>':(e.route_certainty==='remote_ruleset_sni_inferred'?'<br><span class="ok small">SNI + remote rule-set</span>':(e.route_certainty==='sni_inferred'?'<br><span class="ok small">SNI</span>':(e.actual_route?'<br><span class="ok small">фактический маршрут sing-box</span>':'')));
+    const certainty=e.route_certainty==='unconfirmed_ip_default'?'<br><span class="warn small">выход не подтверждён: клиент передал IP</span>':(e.route_certainty==='remote_ruleset_sni_inferred'?'<br><span class="ok small">SNI + Re:filter</span>':(e.route_certainty==='sni_inferred'?'<br><span class="ok small">SNI</span>':''));
     const orig=e.original_destination||'';
     return `<tr><td>${esc(e.service||'—')}</td><td>${e.trusted?pill('trusted без auth','green'):pill('auth','blue')}</td><td${cls}>${esc(dest)} ${dtype}</td><td>${orig?esc(orig):'—'}</td><td>${esc(e.route_display||'—')}${certainty}</td><td>${fmtBytes(e.download||0)}</td><td>${fmtBytes(e.upload||0)}</td><td>${e.active?pill('активно','green'):pill('recent','yellow')}</td></tr>`;
   }).join('');
@@ -807,12 +807,36 @@ function clientServiceBadges(c){
   const out=[];
   const hasHttp=lower.some(x=>x.includes('http'));
   const hasSocks=lower.some(x=>x.includes('socks'));
-  const hasMt=(Number(c.mtproto_connections||0)>0)||lower.some(x=>x.includes('telegram mtproto'));
+  // In the header show only реально активный MTProto, not historical/service labels.
+  const hasMt=Number(c.mtproto_connections||0)>0;
   if(hasHttp&&hasSocks)out.push(pill('HTTP/SOCKS','blue'));
   else if(hasHttp)out.push(pill('HTTP','blue'));
   else if(hasSocks)out.push(pill('SOCKS5','blue'));
   if(hasMt)out.push(pill('MTProto','blue'));
   return out.join('');
+}
+function clientIdentities(c){return (c.identities||[]).map(x=>String(x||''));}
+function clientIsKnown(c){
+  const ids=clientIdentities(c);
+  return !!(c.trusted||c.registered_user_id||c.registered_name||c.username||c.trusted_name||ids.some(x=>x.startsWith('auth_user:')||x.startsWith('telegram_secret_user:')||x.startsWith('telegram_user:')||x==='access:trusted_ip_bypass'||x==='access:auth_gateway'));
+}
+function clientIsFallbackAttempt(c){
+  const ids=clientIdentities(c);
+  const zeroTraffic=Number(c.download||0)===0&&Number(c.upload||0)===0&&Number(c.connections_count||0)===0&&Number(c.mtproto_connections||0)===0;
+  return !clientIsKnown(c)&&(ids.includes('identity:tcp_peer_fallback')||zeroTraffic);
+}
+function renderUnrecognizedClients(list){
+  if(!list.length)return '<div class="muted">Нераспознанных подключений нет.</div>';
+  const mt=list.filter(c=>(c.services||[]).some(s=>String(s).includes('MTProto'))).length;
+  const hs=list.length-mt;
+  const zero=list.filter(clientIsFallbackAttempt).length;
+  const rows=list.slice(0,80).map(c=>{
+    const reason=clientIdentities(c).includes('identity:tcp_peer_fallback')?'MTProto TCP-попытка, secret не распознан':(Number(c.download||0)+Number(c.upload||0)===0?'пустая попытка/сканер без трафика':'неидентифицированное подключение');
+    const geo=c.geo||{};
+    const where=[geo.country,geo.region,geo.city].filter(Boolean).join(', ')||'—';
+    return `<tr><td>${esc(c.display_ip||c.ip||'—')}</td><td>${(c.services||[]).map(x=>pill(x,'gray')).join('')||'—'}</td><td>${esc(where)}<br><span class="muted small">${esc(geo.asn||geo.isp||'')}</span></td><td>${esc(reason)}</td><td>${fmtTime(c.last_seen)}</td><td>${fmtBytes(c.download||0)} / ${fmtBytes(c.upload||0)}</td><td>${clientActionSelect(c)}</td></tr>`;
+  }).join('');
+  return `<details class="client-box" open><summary><b>Нераспознанные подключения</b> ${pill(list.length+' записей','yellow')}</summary><div class="client-body"><div class="muted">Это не полноценные клиенты. Сюда попадают сканеры портов, ошибочные подключения, MTProto TCP-попытки без распознанного secret и HTTP/SOCKS попытки без авторизации/идентификации. Реальные зарегистрированные пользователи и trusted-клиенты остаются в своих разделах.</div><div style="margin-top:8px">MTProto: <b>${mt}</b> · HTTP/SOCKS: <b>${hs}</b> · пустые/без трафика: <b>${zero}</b></div><table style="margin-top:8px"><thead><tr><th>IP</th><th>Сервис</th><th>Гео/ASN</th><th>Причина</th><th>Последняя активность</th><th>Down / Up</th><th>Действие</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 function clientCard(c){
   const ids0=c.identities||[];
@@ -943,7 +967,21 @@ async function saveSecurity(){
 function updateSelectedClientsCount(){if($('selectedClientsCount'))$('selectedClientsCount').textContent='Выбрано: '+state.selectedClients.size;}
 function selectedClientId(c){return String(c.key||c.ip||c.display_ip||'')}
 function toggleClientSelected(id,checked,ip,key){if(checked)state.selectedClients.set(id,{ip,key});else state.selectedClients.delete(id);updateSelectedClientsCount()}
-function renderClients(){renderDiagClientSelect();const existing=new Set(state.clients.map(selectedClientId));for(const id of Array.from(state.selectedClients.keys())){if(!existing.has(id))state.selectedClients.delete(id)}const online=state.clients.filter(c=>c.status==='online'),offline=state.clients.filter(c=>c.status!=='online'),trusted=state.clients.filter(c=>c.trusted),unknown=state.clients.filter(c=>!c.trusted);$('clientsOnlineBox').innerHTML=online.map(clientCard).join('')||'<div class="muted">Онлайн клиентов нет.</div>';$('clientsUnknownBox').innerHTML=unknown.map(clientCard).join('')||'<div class="muted">Незарегистрированных клиентов нет.</div>';$('clientsTrustedBox').innerHTML=trusted.map(clientCard).join('')||'<div class="muted">Доверенных клиентов нет.</div>';$('clientsOfflineBox').innerHTML=offline.map(clientCard).join('')||'<div class="muted">Оффлайн клиентов нет.</div>';updateSelectedClientsCount()}
+function renderClients(){
+  renderDiagClientSelect();
+  const existing=new Set(state.clients.map(selectedClientId));
+  for(const id of Array.from(state.selectedClients.keys())){if(!existing.has(id))state.selectedClients.delete(id)}
+  const unrecognized=state.clients.filter(c=>!clientIsKnown(c));
+  const visible=state.clients.filter(c=>clientIsKnown(c));
+  const online=visible.filter(c=>c.status==='online');
+  const known=visible.filter(c=>clientIsKnown(c));
+  const offline=visible.filter(c=>c.status!=='online');
+  $('clientsOnlineBox').innerHTML=online.map(clientCard).join('')||'<div class="muted">Онлайн клиентов нет.</div>';
+  $('clientsUnknownBox').innerHTML=renderUnrecognizedClients(unrecognized);
+  $('clientsTrustedBox').innerHTML=known.map(clientCard).join('')||'<div class="muted">Зарегистрированных или доверенных клиентов нет.</div>';
+  $('clientsOfflineBox').innerHTML=offline.map(clientCard).join('')||'<div class="muted">Оффлайн клиентов нет.</div>';
+  updateSelectedClientsCount();
+}
 
 function historyName(x){return x?.registered_name||x?.username||x?.display_ip||x?.ip||x?.key||'—'}
 function historyClientKey(x){return String(x?.key||x?.ip||x?.display_ip||'unknown')}
@@ -1060,7 +1098,7 @@ function renderConnectionGroups(list){
       const dtype=connectionDestType(c);
       const certainty=connectionRouteCertainty(c);
       const typeLabel=dtype?` ${pill(dtype==='ip'?'IP':(dtype==='domain'?'домен':dtype),dtype==='ip'?'yellow':'blue')}`:'';
-      const src=c?.destination_source||c?.metadata?.destination_source||'';const orig=connectionOriginalDestination(c);const routeNote=certainty==='unconfirmed_ip_default'?'<br><span class="warn small">выход не подтверждён: назначение передано как IP</span>':(certainty==='remote_ruleset_sni_inferred'?'<br><span class="ok small">SNI + remote rule-set</span>':(certainty==='sni_inferred'||src==='sni'?'<br><span class="ok small">SNI</span>':(connectionActualRoute(c)?'<br><span class="ok small">фактический маршрут sing-box</span>':'')));
+      const src=c?.destination_source||c?.metadata?.destination_source||'';const orig=connectionOriginalDestination(c);const routeNote=certainty==='unconfirmed_ip_default'?'<br><span class="warn small">выход не подтверждён: назначение передано как IP</span>':(certainty==='remote_ruleset_sni_inferred'?'<br><span class="ok small">SNI + Re:filter</span>':(certainty==='sni_inferred'||src==='sni'?'<br><span class="ok small">SNI</span>':''));
       knownRows.push(`<tr><td>${esc(connectionEntry(c))}<br><span class="muted small">${esc(connectionProto(c))}</span></td><td>${esc(rawHost)}${typeLabel}</td><td>${orig?esc(orig):'—'}</td><td>${esc(connectionRoute(c))}${routeNote}${warn?'<br><span class="bad small">'+esc(warn)+'</span>':''}</td><td>${fmtBytes(down)}</td><td>${fmtBytes(up)}</td></tr>`);
     }
     if(unknownAgg.count){knownRows.push(`<tr class="muted"><td>SOCKS5/HTTP<br><span class="muted small">tcp</span></td><td>без определённого назначения ×${esc(unknownAgg.count)}</td><td>—</td><td>${esc(unknownAgg.route||'auth-gateway → Proxy')}</td><td>${fmtBytes(unknownAgg.down)}</td><td>${fmtBytes(unknownAgg.up)}</td></tr>`)}
@@ -1318,7 +1356,7 @@ async function handleClientAction(sel,key,ip){
 }
 async function blockClientPrompt(ip){$('blockIp').value=ip;document.querySelector('[data-tab="blocks"]').click()}
 async function applyClientBulk(){const action=$('bulkClientAction')?.value;if(!action)throw new Error('Выберите действие');const clients=Array.from(state.selectedClients.values());if(!clients.length)throw new Error('Клиенты не выбраны');if(!confirm(`Применить действие к ${clients.length} клиентам?`))return;await post('/api/clients/bulk',{action,clients});state.selectedClients.clear();await loadClients(true);await loadConnections(true);await loadBlocks();await loadLogs();msg('Массовое действие выполнено')}
-function selectUnknownClients(){for(const c of state.clients.filter(x=>!x.trusted)){state.selectedClients.set(selectedClientId(c),{ip:String(c.ip||c.display_ip||''),key:String(c.key||'')});}renderClients()}
+function selectUnknownClients(){for(const c of state.clients.filter(x=>!clientIsKnown(x))){state.selectedClients.set(selectedClientId(c),{ip:String(c.ip||c.display_ip||''),key:String(c.key||'')});}renderClients()}
 function clearSelectedClients(){state.selectedClients.clear();renderClients()}
 async function trustClient(ip){const name=prompt('Название клиента/устройства',ip);if(!name)return;await post('/api/trusted',{ip,name});await loadClients();await loadLogs()} async function untrustClient(ip){await del('/api/trusted/'+encodeURIComponent(ip));await loadClients();await loadLogs()}
 async function saveClientLimit(key){const el=$('limit-'+key);const gb=Number(el?.value||0);await post('/api/client_limits',{key,monthly_limit_gb:gb});await loadClients(true);await loadLogs();msg(gb>0?'Лимит клиента сохранён':'Лимит клиента отключён')}

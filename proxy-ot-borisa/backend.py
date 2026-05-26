@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.25.12"
+APP_VERSION = "1.25.14"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -1917,11 +1917,48 @@ def normalize_list(value):
     return out
 
 
+def _normalize_domain_item(value):
+    item = str(value or '').strip().lower()
+    if not item:
+        return ''
+    if '://' in item:
+        try:
+            item = urllib.parse.urlparse(item).hostname or item
+        except Exception:
+            item = re.sub(r'^https?://', '', item)
+    item = item.split('/')[0].strip()
+    if item.startswith('*.'):
+        item = item[2:]
+    item = item.lstrip('.').rstrip('.')
+    # Remove host:port for non-IPv6 hostnames.
+    if item.count(':') == 1 and not re.match(r'^[0-9a-f:]+$', item, re.I):
+        item = item.rsplit(':', 1)[0]
+    if re.match(r'^[a-z0-9а-яё_.-]+$', item, re.I) and '.' in item:
+        return item
+    return ''
+
+
+def normalize_domain(value):
+    """Normalize one domain/URL for route diagnostics and manual route edits.
+
+    Wildcards like *.example.com are stored as suffix domains example.com.
+    Schemes, paths and ports are stripped so UI/domain diagnostics behave the
+    same way as route rules.
+    """
+    items = normalize_list([value])
+    if not items:
+        return ''
+    return _normalize_domain_item(items[0])
+
+
 def normalize_domains(value):
     result = []
+    seen = set()
     for item in normalize_list(value):
-        if re.match(r"^[a-z0-9а-яё_.-]+$", item, re.I) and "." in item:
-            result.append(item.lstrip("."))
+        norm = _normalize_domain_item(item)
+        if norm and norm not in seen:
+            result.append(norm)
+            seen.add(norm)
     return result
 
 
@@ -4734,7 +4771,8 @@ def gateway_activity_end(key):
             # Keep completed gateway connections briefly. The UI polling interval can
             # easily miss short HTTP/SOCKS requests after they close, which made real
             # clients disappear while raw internal sing-box rows stayed visible.
-            if item.get("destination") and item.get("destination") != "proxy-gateway" or int(item.get("upload") or 0) or int(item.get("download") or 0):
+            keep_recent = (item.get("destination") and item.get("destination") != "proxy-gateway") or int(item.get("upload") or 0) or int(item.get("download") or 0)
+            if keep_recent:
                 GATEWAY_RECENT[key] = item
         _prune_gateway_recent_locked(now)
 
@@ -4801,6 +4839,11 @@ def gateway_connections_for_ui():
         dest = gw.get("destination") or "proxy-gateway"
         trusted = bool(gw.get("trusted"))
         route_info = route_chain_for_destination(dest)
+        if route_info.get("service_connection"):
+            # Do not flood the main Connections UI with internal helper rows.
+            # Real client traffic is shown by gateway rows with an external destination;
+            # low-level internal hops belong to logs/diagnostics, not to client cards.
+            continue
         access_label = "trusted_ip_bypass" if trusted else "auth_gateway"
         rows.append({
             "id": gw.get("key") or f"gateway-{ip}-{now}",
@@ -4863,11 +4906,14 @@ def _gateway_destinations_for_dedup():
 
 
 def is_internal_proxy_raw_connection(conn, gateway_hosts=None):
-    """True for raw sing-box rows created by our local auth-gateway hop.
+    """True for raw sing-box rows created by the local auth-gateway hop.
 
-    They are useful for low-level debugging but must not replace the real
-    external client in the main Connections/Clients UI. The synthetic gateway
-    rows carry the real source IP, auth/trusted label, destination and route.
+    These rows show the technical local hop (auth-gateway -> internal sing-box)
+    and often expose only an IP address or an outbound name such as
+    ``SE1-vless -> Proxy``. They must never replace the real external client
+    row in Clients/Connections. The real client is represented by synthetic
+    gateway rows that contain source IP, trusted/auth label, destination and
+    route.
     """
     meta = conn.get("metadata") or {}
     src = str(get_source_ip(conn) or "")
@@ -4880,14 +4926,14 @@ def is_internal_proxy_raw_connection(conn, gateway_hosts=None):
         internal_src = addr.is_loopback or addr.is_private or addr.is_link_local
     except Exception:
         internal_src = False
-    internal_inbound = "IN-SOCKS5" in inbound.upper() or str(INTERNAL_SOCKS_PROXY_PORT) in inbound
-    # Raw sing-box rows created by the local gateway often contain only the
-    # resolved IP (not the original domain). If synthetic gateway rows exist,
-    # hide these internal hops from the main UI so they do not replace the real
-    # external client card and its main sites.
-    if (internal_src or internal_inbound) and gateway_hosts:
+    inbound_u = inbound.upper()
+    internal_inbound = "IN-SOCKS5" in inbound_u or str(INTERNAL_SOCKS_PROXY_PORT) in inbound
+    outbound = str(conn.get("outbound") or meta.get("outbound") or meta.get("outboundTag") or "")
+    outbound_u = outbound.upper()
+    local_gateway_hop = internal_src or internal_inbound or ("PROXY" in outbound_u and (src.startswith("127.") or src.startswith("172.") or src.startswith("10.")))
+    if local_gateway_hop:
         return True
-    if (internal_src or internal_inbound) and host and host in gateway_hosts:
+    if host and host in gateway_hosts and (internal_src or internal_inbound):
         return True
     return False
 
@@ -6335,7 +6381,12 @@ def build_clients(connections):
     users_by_id = {str(u.get('id')): u for u in load_proxy_users()}
     grouped = {}
 
+    gateway_hosts_for_clients = _gateway_destinations_for_dedup()
     for conn in connections:
+        if is_internal_proxy_raw_connection(conn, gateway_hosts=gateway_hosts_for_clients):
+            # Raw local auth-gateway -> sing-box hops are technical only.
+            # Client cards are built from gateway activity below.
+            continue
         if is_connection_to_own_mtproto(conn):
             # Transport-only connection to this add-on's MTProto listener.
             # The real Telegram client is identified separately by secret via mtg-multi stats.
@@ -6406,6 +6457,10 @@ def build_clients(connections):
         item.setdefault('identities', set()).add('access:trusted_ip_bypass' if gw.get('trusted') else 'access:auth_gateway')
         dest = gw.get('destination') or 'proxy-gateway'
         route_info = route_chain_for_destination(dest)
+        if route_info.get('service_connection'):
+            # Keep service noise out of client cards. It made real clients look
+            # like they were visiting "Служебное соединение add-on" instead of sites.
+            continue
         up = int(gw.get('upload') or 0); down = int(gw.get('download') or 0)
         item['upload'] += up; item['download'] += down
         item['connections'].append({'metadata': {'sourceIP': ip, 'destination': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'host': ('Служебное соединение add-on' if route_info.get('service_connection') else dest), 'access': 'trusted_ip_bypass' if gw.get('trusted') else 'auth_gateway', 'route_display': ' → '.join(route_info.get('chains') or []), 'route_warning': route_info.get('warning')}, 'upload': up, 'download': down, 'chains': route_info.get('chains') or ['auth-gateway', 'Proxy'], 'trusted_bypass': bool(gw.get('trusted')), 'gateway': True, 'service_connection': bool(route_info.get('service_connection')), 'route_warning': route_info.get('warning'), 'recent': bool(gw.get('recent')), 'active': not bool(gw.get('recent'))})
@@ -6414,8 +6469,10 @@ def build_clients(connections):
             item.setdefault('service_connections', 0)
             item['service_connections'] += 1
         else:
-            item.setdefault('main_hosts', {})[simplify_host(dest)] = item.setdefault('main_hosts', {}).get(simplify_host(dest), 0) + 1
-            item['hosts'].add(dest)
+            simple = simplify_host(dest)
+            if simple and simple not in {'proxy-gateway', 'назначение не определено', 'служебное соединение add-on'}:
+                item.setdefault('main_hosts', {})[simple] = item.setdefault('main_hosts', {}).get(simple, 0) + 1
+                item['hosts'].add(dest)
 
     active_keys = set(grouped.keys())
     try:
@@ -6863,7 +6920,7 @@ def route_diagnostics_report(force=False):
         "routing_mode": routing_mode,
         "problems": problems,
         "recommendations": recommendations,
-        "note": "Диагностика не измеряет скорость и не подменяет реальные сайты клиента. Она показывает: выбран ли VPN-сервер, какой маршрут получат контрольные домены по текущим правилам и где может обрываться длинная загрузка при ручном тесте URL.",
+        "note": "Диагностика не измеряет скорость и не подменяет реальные сайты клиента. Она показывает: выбран ли VPN-сервер, какой маршрут получат домены из реальных правил и где может обрываться длинная загрузка при ручном тесте URL.",
     }
     write_json(ROUTE_DIAGNOSTICS_FILE, report)
     return report
@@ -7142,6 +7199,7 @@ def diagnostics_status_report():
         'current': cur,
         'public_ips': cached_public_ip_summary(),
         'routing': routing_summary(),
+        'speed_presets': DIAGNOSTIC_SPEED_PRESETS,
         'recent_gateway': gateway_active_snapshot(include_recent=True)[-20:],
         'last_error': last_error,
     }

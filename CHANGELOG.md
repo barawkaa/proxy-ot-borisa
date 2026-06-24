@@ -1,10 +1,21 @@
-## 2.0.2
+# Changelog
+
+## v3.0.0 — split-routing stability baseline
+
+- Выполнен отказ от серии быстрых экспериментальных патчей v2.0.0–v2.0.2 как от релизной линии.
+- База сохранена максимально близко к рабочей транспортной логике: внешний SOCKS5 gateway не переписывает TLS/SNI и не содержит экспериментальный SOCKS_SNI_ROUTE.
+- Добавлено автоматическое расширение OpenAI/ChatGPT доменного набора: если пользователь вручную добавил любой базовый домен ChatGPT/OpenAI или включил OpenAI preset, backend добавляет полный критичный набор доменов для ChatGPT, загрузок файлов, WebSocket, Statsig, WorkOS, Intercom, Cloudflare challenge, Sentry и Datadog.
+- Исправлена практическая проблема из логов: `api.oaistatsig.com` больше не уходит DIRECT при выборочной маршрутизации ChatGPT, если OpenAI/ChatGPT присутствует в правилах.
+- Сохранена нормализация Hiddify/Clash/Xray uTLS fingerprints (`helloChrome_120` → `chrome`, `HelloFirefox_Auto` → `firefox`) до генерации runtime `sing-box.json`.
+- Dockerfile оставлен без `sing-box:latest`, чтобы не ловить внезапную несовместимость формата конфигурации.
+
+## 3.0.0
 
 - Восстановлен внешний SOCKS5 hot path от рабочей v1.26.1: relay, handshake и прозрачная передача через внутренний sing-box не переписываются.
 - Убраны изменения v2.0.0/v2.0.1, которые могли ломать SOCKS5 через Keenetic: native sniffing на внутреннем SOCKS inbound и новый relay half-close не используются.
 - Исправлена совместимость подписок Hiddify/Clash/Xray: `helloChrome_120`, `HelloFirefox_Auto` и похожие значения нормализуются до допустимых uTLS fingerprint sing-box.
 - Dockerfile закрепляет sing-box на `ghcr.io/sagernet/sing-box:v1.12.12`, чтобы не получить несовместимость с sing-box 1.13+ и legacy inbound fields.
-- Версия собрана как восстановительная релизная ветка 2.0.2 от v1.26.1, без продолжения невалидных сборок v1.26.2–v2.0.1.
+- Версия собрана как восстановительная релизная ветка 3.0.0 от v1.26.1, без продолжения невалидных сборок v1.26.2–v2.0.1.
 
 ## 1.26.1
 

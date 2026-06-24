@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "2.0.2"
+APP_VERSION = "3.0.0"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -211,9 +211,90 @@ DEFAULT_ROUTING = {
     ]
 }
 
+# OpenAI/ChatGPT is not a single hostname. Modern ChatGPT uses chatgpt.com,
+# websocket/API hosts, Cloudflare challenge hosts, upload buckets under
+# oaiusercontent.com and Statsig/WorkOS/Intercom support endpoints. A partial
+# split-route list makes the page look half-open and breaks file upload.
+# Keep this list centralized and auto-expand it whenever the user adds any
+# core OpenAI domain manually or enables the OpenAI preset.
+OPENAI_CORE_DOMAINS = {
+    "chatgpt.com",
+    "chat.openai.com",
+    "openai.com",
+    "api.openai.com",
+    "auth.openai.com",
+    "auth0.openai.com",
+    "oaistatic.com",
+    "oaiusercontent.com",
+}
+
+OPENAI_REQUIRED_DOMAINS = [
+    "chatgpt.com",
+    "chat.openai.com",
+    "desktop.chat.openai.com",
+    "android.chat.openai.com",
+    "ios.chat.openai.com",
+    "ws.chatgpt.com",
+    "ab.chatgpt.com",
+    "tcr9i.chat.openai.com",
+    "openai.com",
+    "api.openai.com",
+    "auth.openai.com",
+    "setup.auth.openai.com",
+    "auth0.openai.com",
+    "oaistatic.com",
+    "cdn.oaistatic.com",
+    "oaiusercontent.com",
+    "files.oaiusercontent.com",
+    "featuregates.org",
+    "featureassets.org",
+    "prodregistryv2.org",
+    "statsig.com",
+    "statsigapi.net",
+    "events.statsigapi.net",
+    "oaistatsig.com",
+    "api.oaistatsig.com",
+    "intercom.io",
+    "intercomcdn.com",
+    "js.intercomcdn.com",
+    "ct.sendgrid.net",
+    "cdn.openaimerge.com",
+    "workos.com",
+    "cdn.workos.com",
+    "setup.workos.com",
+    "forwarder.workos.com",
+    "workoscdn.com",
+    "images.workoscdn.com",
+    "workos.imgix.net",
+    "challenges.cloudflare.com",
+    "js.stripe.com",
+    "o207216.ingest.sentry.io",
+    "o33249.ingest.sentry.io",
+    "browser-intake-datadoghq.com",
+    "rum.browser-intake-datadoghq.com",
+]
+
+def _domain_suffix_match(domain, suffix):
+    d = str(domain or "").strip(". ").lower()
+    s = str(suffix or "").strip(". ").lower()
+    return bool(d and s and (d == s or d.endswith("." + s)))
+
+def _contains_openai_domain(domains):
+    for domain in domains or []:
+        for core in OPENAI_CORE_DOMAINS:
+            if _domain_suffix_match(domain, core) or _domain_suffix_match(core, domain):
+                return True
+    return False
+
+def expand_critical_domain_bundle(domains):
+    expanded = list(domains or [])
+    if _contains_openai_domain(expanded):
+        expanded.extend(OPENAI_REQUIRED_DOMAINS)
+    return sorted(set(normalize_domains(expanded)))
+
 PRESET_DOMAINS = {
     "youtube": ["youtube.com", "youtu.be", "googlevideo.com", "ytimg.com", "youtubei.googleapis.com", "ggpht.com"],
-    "openai": ["openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", "auth0.openai.com"],
+    "openai": OPENAI_REQUIRED_DOMAINS,
     "instagram_meta": ["instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net", "meta.com", "threads.net"],
     "discord": ["discord.com", "discord.gg", "discordapp.com", "discordapp.net", "discord.media"],
     "telegram": ["telegram.org", "t.me", "tdesktop.com"],
@@ -2063,7 +2144,7 @@ def build_manual_routing_rules(routing):
     for preset, enabled in (routing.get("presets") or {}).items():
         if enabled:
             include_domains.extend(PRESET_DOMAINS.get(preset, []))
-    include_domains = sorted(set(include_domains))
+    include_domains = expand_critical_domain_bundle(include_domains)
     include_ips = sorted(set(include_ips))
     exclude_domains = sorted(set(exclude_domains))
     exclude_ips = sorted(set(exclude_ips))

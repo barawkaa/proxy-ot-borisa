@@ -652,7 +652,7 @@ finally:
     backend.gateway_activity_update_destination = _old_update_12518
 
 
-# v2.0.2 recovery checks: keep stable v1.26.1 SOCKS hot path, but protect runtime
+# v3.0.0 recovery checks: keep stable v1.26.1 SOCKS hot path, but protect runtime
 # from unsupported subscription fingerprints and floating sing-box latest.
 assert backend.normalize_utls_fingerprint("helloChrome_120") == "chrome"
 assert backend.normalize_utls_fingerprint("HelloFirefox_Auto") == "firefox"
@@ -675,15 +675,15 @@ print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))
 
 # v1.26.1 release/product checks: this release is not only syntax-valid, it must
 # keep public version files aligned and keep the cleaned UI concepts present.
-assert backend.APP_VERSION == "2.0.2", backend.APP_VERSION
+assert backend.APP_VERSION == "3.0.0", backend.APP_VERSION
 _config_version = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
-assert str(_config_version) == "2.0.2", _config_version
+assert str(_config_version) == "3.0.0", _config_version
 _repo_root = ROOT.parent
 _readme = (_repo_root / "README.md").read_text(encoding="utf-8")
 _changelog = (_repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
-assert "Текущая версия: v2.0.2" in _readme
-assert "Текущая версия add-on: **2.0.2**" in _readme
-assert _changelog.lstrip().startswith("## 2.0.2")
+assert "Текущая версия: v3.0.0" in _readme
+assert "Текущая версия add-on: **3.0.0**" in _readme
+assert _changelog.lstrip().startswith("# Changelog\n\n## v3.0.0") or _changelog.lstrip().startswith("## v3.0.0")
 for stale in ["Текущая версия: v1.25", "Текущая версия add-on: **1.25"]:
     assert stale not in _readme, stale
 assert "function shortRouteNote" in html
@@ -731,3 +731,32 @@ assert _res2['downloaded_bytes'] > 0, _res2
 assert _res2['error'] == '', _res2
 assert _res2['stop_reason'] == 'remote_closed_after_response', _res2
 assert _res2.get('close_warning'), _res2
+
+# v3.0.0: ChatGPT/OpenAI split-routing must expand to all critical support
+# domains. The log-driven regression is api.oaistatsig.com: it must not be
+# allowed to fall through DIRECT when chatgpt.com/openai.com is in the VPN set.
+_min_openai = backend.build_manual_routing_rules({
+    "manual_include_domains": ["chatgpt.com"],
+    "manual_include_ips": [],
+    "manual_exclude_domains": [],
+    "manual_exclude_ips": [],
+    "presets": {},
+})[0]
+for _required_domain in [
+    "api.oaistatsig.com",
+    "oaistatsig.com",
+    "ws.chatgpt.com",
+    "oaiusercontent.com",
+    "files.oaiusercontent.com",
+    "challenges.cloudflare.com",
+    "rum.browser-intake-datadoghq.com",
+]:
+    assert _required_domain in _min_openai, (_required_domain, _min_openai)
+_openai_preset = backend.build_manual_routing_rules({
+    "manual_include_domains": [],
+    "manual_include_ips": [],
+    "manual_exclude_domains": [],
+    "manual_exclude_ips": [],
+    "presets": {"openai": True},
+})[0]
+assert "api.oaistatsig.com" in _openai_preset and "ws.chatgpt.com" in _openai_preset, _openai_preset

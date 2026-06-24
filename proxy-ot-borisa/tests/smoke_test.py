@@ -255,10 +255,10 @@ finally:
     shutil.rmtree(_tmp_data, ignore_errors=True)
 
 
-# Trusted auth bypass regression checks. Trusted access must be implemented on
-# the standard HTTP/SOCKS ports through the local auth gateway. sing-box itself
-# must listen only on internal localhost ports and must not receive application-
-# only trusted_* settings or extra trusted external ports.
+# Trusted auth bypass regression checks. v4 uses sing-box-first transport: the
+# standard HTTP/SOCKS ports are owned directly by sing-box, while Python no longer
+# relays TCP streams. In trusted-bypass mode these inbounds do not carry users;
+# access is restricted by early source_ip_cidr block rules.
 _tmp_data2 = pathlib.Path(tempfile.mkdtemp())
 _old_data_dir2 = backend.DATA_DIR
 _old_sources_file2 = backend.SERVER_SOURCES_FILE
@@ -300,12 +300,16 @@ try:
     inbound_tags = {i.get("tag"): i for i in cfg.get("inbounds", []) if isinstance(i, dict)}
     assert "IN-HTTP-TRUSTED-2085" not in inbound_tags, inbound_tags
     assert "IN-SOCKS5-TRUSTED-2086" not in inbound_tags, inbound_tags
-    assert inbound_tags["IN-HTTP-2081"].get("listen") == "127.0.0.1"
-    assert inbound_tags["IN-HTTP-2081"].get("listen_port") == backend.INTERNAL_HTTP_PROXY_PORT
-    assert inbound_tags["IN-SOCKS5-2080"].get("listen") == "127.0.0.1"
-    assert inbound_tags["IN-SOCKS5-2080"].get("listen_port") == backend.INTERNAL_SOCKS_PROXY_PORT
+    assert inbound_tags["IN-HTTP-2081"].get("listen") == "0.0.0.0"
+    assert inbound_tags["IN-HTTP-2081"].get("listen_port") == 2081
+    assert inbound_tags["IN-SOCKS5-2080"].get("listen") == "0.0.0.0"
+    assert inbound_tags["IN-SOCKS5-2080"].get("listen_port") == 2080
+    assert inbound_tags["IN-HTTP-INTERNAL-12080"].get("listen") == "127.0.0.1"
+    assert inbound_tags["IN-SOCKS5-INTERNAL-12081"].get("listen") == "127.0.0.1"
     assert "users" not in inbound_tags["IN-HTTP-2081"], inbound_tags["IN-HTTP-2081"]
     assert "users" not in inbound_tags["IN-SOCKS5-2080"], inbound_tags["IN-SOCKS5-2080"]
+    rules_dump = json.dumps(cfg.get("route", {}).get("rules", []), ensure_ascii=False)
+    assert '"source_ip_cidr"' in rules_dump and '192.168.1.35/32' in rules_dump and '"invert": true' in rules_dump, rules_dump
     dumped = json.dumps(cfg, ensure_ascii=False)
     for forbidden in ["trusted_auth_bypass_enabled", "trusted_auth_bypass_cidrs", "trusted_auth_bypass_http", "trusted_auth_bypass_socks", "trusted_http_proxy_port", "trusted_socks_proxy_port"]:
         assert forbidden not in dumped, forbidden
@@ -652,8 +656,8 @@ finally:
     backend.gateway_activity_update_destination = _old_update_12518
 
 
-# v3.0.0 recovery checks: keep stable v1.26.1 SOCKS hot path, but protect runtime
-# from unsupported subscription fingerprints and floating sing-box latest.
+# v4.0.0 sing-box-first checks: HTTP/SOCKS public ports are owned by sing-box;
+# Python must not start the old TCP relay, while subscription/runtime compatibility stays protected.
 assert backend.normalize_utls_fingerprint("helloChrome_120") == "chrome"
 assert backend.normalize_utls_fingerprint("HelloFirefox_Auto") == "firefox"
 _test_server = {"type":"vless","tag":"T","server":"example.com","server_port":443,"uuid":"00000000-0000-0000-0000-000000000000","tls":{"enabled":True,"server_name":"example.com","utls":{"enabled":True,"fingerprint":"helloChrome_120"}}}
@@ -666,24 +670,27 @@ assert "sing-box:latest" not in _docker
 assert "ghcr.io/sagernet/sing-box:v1.12.12" in _docker
 _backend_text = BACKEND.read_text(encoding="utf-8")
 assert "SOCKS_SNI_ROUTE" not in _backend_text
-for _inb in _cfg.get("inbounds", []):
-    if _inb.get("tag", "").startswith("IN-SOCKS5-"):
-        assert "sniff" not in _inb
-        assert "sniff_override_destination" not in _inb
+_inbound_map = {i.get("tag"): i for i in _cfg.get("inbounds", []) if isinstance(i, dict)}
+assert _inbound_map["IN-SOCKS5-2080"].get("listen") == "0.0.0.0"
+assert _inbound_map["IN-HTTP-2081"].get("listen") == "0.0.0.0"
+assert _inbound_map["IN-SOCKS5-INTERNAL-12081"].get("listen") == "127.0.0.1"
+assert _inbound_map["IN-HTTP-INTERNAL-12080"].get("listen") == "127.0.0.1"
+assert _inbound_map["IN-SOCKS5-2080"].get("sniff") is True
+assert "DIRECT_TRANSPORT" in _backend_text
 
 print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))
 
 # v1.26.1 release/product checks: this release is not only syntax-valid, it must
 # keep public version files aligned and keep the cleaned UI concepts present.
-assert backend.APP_VERSION == "3.0.0", backend.APP_VERSION
+assert backend.APP_VERSION == "4.0.0", backend.APP_VERSION
 _config_version = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
-assert str(_config_version) == "3.0.0", _config_version
+assert str(_config_version) == "4.0.0", _config_version
 _repo_root = ROOT.parent
 _readme = (_repo_root / "README.md").read_text(encoding="utf-8")
 _changelog = (_repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
-assert "Текущая версия: v3.0.0" in _readme
-assert "Текущая версия add-on: **3.0.0**" in _readme
-assert _changelog.lstrip().startswith("# Changelog\n\n## v3.0.0") or _changelog.lstrip().startswith("## v3.0.0")
+assert "Текущая версия: v4.0.0" in _readme
+assert "Текущая версия add-on: **4.0.0**" in _readme
+assert _changelog.lstrip().startswith("# Changelog\n\n## v4.0.0") or _changelog.lstrip().startswith("## v4.0.0")
 for stale in ["Текущая версия: v1.25", "Текущая версия add-on: **1.25"]:
     assert stale not in _readme, stale
 assert "function shortRouteNote" in html

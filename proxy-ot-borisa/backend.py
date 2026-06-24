@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "3.0.0"
+APP_VERSION = "4.0.0"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -4669,6 +4669,8 @@ def make_singbox_config():
     socks_port = int(options["socks_proxy_port"])
     socks_tag = f"IN-SOCKS5-{socks_port}"
     http_tag = f"IN-HTTP-{http_port}"
+    socks_internal_tag = f"IN-SOCKS5-INTERNAL-{INTERNAL_SOCKS_PROXY_PORT}"
+    http_internal_tag = f"IN-HTTP-INTERNAL-{INTERNAL_HTTP_PROXY_PORT}"
     mtg_upstream_tag = f"IN-MTG-UPSTREAM-{MTG_UPSTREAM_SOCKS_PORT}"
     users = load_proxy_users()
     socks_auth = []
@@ -4686,14 +4688,28 @@ def make_singbox_config():
             if u.get("enabled", True) and u.get("http_enabled", True)
         ]
     security = load_security()
-    # External HTTP/SOCKS ports are served by the local auth gateway. sing-box only
-    # listens on localhost without auth. The gateway decides per source IP whether
-    # a client may bypass auth or must authenticate normally.
+
+    # v4 architecture: sing-box owns the real transport ports directly.
+    # Python no longer implements HTTP/SOCKS relays, because the old gateway was
+    # the source of SOCKS5 protocol corruption (for example: unsupported command 5).
+    # Internal localhost inbounds are kept only for diagnostics/MTProto helpers.
+    socks_direct_mode = bool(security.get("trusted_auth_bypass_enabled") and security.get("trusted_auth_bypass_socks", True) and security.get("trusted_auth_bypass_cidrs"))
+    http_direct_mode = bool(security.get("trusted_auth_bypass_enabled") and security.get("trusted_auth_bypass_http", True) and security.get("trusted_auth_bypass_cidrs"))
+
+    external_socks_inbound = {"type": "socks", "tag": socks_tag, "listen": "0.0.0.0", "listen_port": socks_port, "sniff": True, "sniff_override_destination": False}
+    external_http_inbound = {"type": "http", "tag": http_tag, "listen": "0.0.0.0", "listen_port": http_port, "sniff": True, "sniff_override_destination": False}
+    if options.get("socks_auth_enabled") and socks_auth and not socks_direct_mode:
+        external_socks_inbound["users"] = socks_auth
+    if options.get("http_auth_enabled") and http_auth and not http_direct_mode:
+        external_http_inbound["users"] = http_auth
+
     inbounds = [
-        {"type": "socks", "tag": socks_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_SOCKS_PROXY_PORT},
-        {"type": "http", "tag": http_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_HTTP_PROXY_PORT},
+        external_socks_inbound,
+        external_http_inbound,
+        {"type": "socks", "tag": socks_internal_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_SOCKS_PROXY_PORT, "sniff": True, "sniff_override_destination": False},
+        {"type": "http", "tag": http_internal_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_HTTP_PROXY_PORT, "sniff": True, "sniff_override_destination": False},
+        {"type": "socks", "tag": mtg_upstream_tag, "listen": "127.0.0.1", "listen_port": MTG_UPSTREAM_SOCKS_PORT, "sniff": True, "sniff_override_destination": False},
     ]
-    inbounds.append({"type": "socks", "tag": mtg_upstream_tag, "listen": "127.0.0.1", "listen_port": MTG_UPSTREAM_SOCKS_PORT})
     proxy_selector = {
         "type": "selector",
         "tag": "Proxy",
@@ -4747,11 +4763,24 @@ def make_singbox_config():
             # Всё остальное блокируется до обычной маршрутизации.
             rules.append({"source_ip_cidr": allowed_source_cidrs, "invert": True, "outbound": "block"})
 
-    # Power switches: if a port is disabled, block it before any routing logic.
+    socks_inbound_tags = [socks_tag, socks_internal_tag]
+    http_inbound_tags = [http_tag, http_internal_tag]
+
+    # Direct trusted mode: sing-box listens on the real port with no Python relay.
+    # Because SOCKS5/HTTP auth and source-IP auth-bypass cannot be mixed on one
+    # sing-box inbound, trusted bypass mode is implemented as trusted-only access:
+    # loopback/private/trusted CIDRs may use the port; other sources are blocked.
+    trusted_direct_cidrs = normalize_cidr_list(list(PRIVATE_SOURCE_CIDRS) + list(security.get("trusted_auth_bypass_cidrs") or []))
+    if socks_direct_mode and trusted_direct_cidrs:
+        rules.append({"inbound": [socks_tag], "source_ip_cidr": trusted_direct_cidrs, "invert": True, "outbound": "block"})
+    if http_direct_mode and trusted_direct_cidrs:
+        rules.append({"inbound": [http_tag], "source_ip_cidr": trusted_direct_cidrs, "invert": True, "outbound": "block"})
+
+    # Power switches: if a service is disabled, block both external and internal inbounds.
     if not settings.get("socks_enabled", True):
-        rules.append({"inbound": [socks_tag], "outbound": "block"})
+        rules.append({"inbound": socks_inbound_tags, "outbound": "block"})
     if not settings.get("http_enabled", True):
-        rules.append({"inbound": [http_tag], "outbound": "block"})
+        rules.append({"inbound": http_inbound_tags, "outbound": "block"})
 
     # Telegram MTProto must always use VPN path; otherwise Raspberry would reach Telegram directly from RU.
     rules.append({"inbound": [mtg_upstream_tag], "outbound": "Proxy"})
@@ -6092,17 +6121,22 @@ def _gateway_loop(service, listen_port, handler):
 
 
 def start_auth_gateways():
+    """v4: HTTP/SOCKS transport ports are owned by sing-box directly.
+
+    The old Python auth gateway remains in the file only for diagnostics and
+    rollback analysis, but it is not started. This removes the Python TCP relay
+    from the critical SOCKS5 path used by Keenetic and browsers.
+    """
     stop_auth_gateways()
     AUTH_GATEWAY_STOP.clear()
     options = load_options()
-    for service, port, handler in [('http', int(options.get('http_proxy_port')), handle_http_gateway), ('socks', int(options.get('socks_proxy_port')), handle_socks_gateway)]:
-        ok, reason = _port_is_free(port)
-        if not ok:
-            raise RuntimeError(f"Не удалось открыть внешний {service.upper()} порт {port}: {reason}")
-        th = threading.Thread(target=_gateway_loop, args=(service, port, handler), name=f'{service}-auth-gateway', daemon=True)
-        th.start()
-        AUTH_GATEWAY_THREADS.append(th)
-        time.sleep(0.05)
+    log(
+        'GATEWAY',
+        'DIRECT_TRANSPORT',
+        f"HTTP/SOCKS direct transport enabled: sing-box listens on 0.0.0.0:{int(options.get('http_proxy_port'))}/{int(options.get('socks_proxy_port'))}; Python relay is disabled",
+        actor='system',
+        action='direct_transport',
+    )
     time.sleep(0.2)
 
 

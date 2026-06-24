@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "1.26.4"
+APP_VERSION = "2.0.0"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -2930,54 +2930,77 @@ APP_SERVER_META_KEYS = {
     "servers_count",
 }
 
+# sing-box accepts a small set of uTLS fingerprints. Subscriptions from
+# Hiddify/Clash/Xray often provide values like helloChrome_120 or
+# HelloFirefox_Auto. Those values must never reach sing-box.json: sing-box
+# fails hard on unknown fingerprints and the whole proxy core does not start.
+SINGBOX_UTLS_FINGERPRINTS = {
+    "chrome", "firefox", "safari", "ios", "android", "edge",
+    "360", "qq", "random", "randomized",
+}
 
 def normalize_utls_fingerprint(value):
-    """Return a sing-box compatible uTLS fingerprint.
-
-    Some subscription providers and clients store Xray/Hiddify/Clash-style
-    fingerprints such as ``helloChrome_120`` or ``HelloFirefox_Auto``. The
-    sing-box build inside the Home Assistant add-on may reject those provider
-    tokens during boot. Normalize them before writing sing-box.json so a single
-    refreshed subscription cannot stop the whole proxy core.
-    """
     raw = str(value or "").strip()
     if not raw:
         return "chrome"
-    key = re.sub(r"[^a-z0-9]+", "", raw.lower())
-    allowed = {"chrome", "firefox", "safari", "ios", "android", "edge", "qq", "random", "randomized"}
-    if key in allowed:
-        return key
-    if key in {"randomizedalpn", "randomizednoalpn"}:
-        return "randomized"
-    if "chrome" in key or "chromium" in key:
+    lowered = raw.lower().strip()
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    if lowered in SINGBOX_UTLS_FINGERPRINTS:
+        return lowered
+    if compact in SINGBOX_UTLS_FINGERPRINTS:
+        return compact
+    if compact.startswith("hellochrome") or compact.startswith("chrome"):
         return "chrome"
-    if "firefox" in key:
+    if compact.startswith("hellofirefox") or compact.startswith("firefox"):
         return "firefox"
-    if "safari" in key:
+    if compact.startswith("hellosafari") or compact.startswith("safari"):
         return "safari"
-    if "ios" in key or "iphone" in key or "ipad" in key:
+    if compact.startswith("helloios") or compact.startswith("ios"):
         return "ios"
-    if "android" in key:
+    if compact.startswith("helloandroid") or compact.startswith("android"):
         return "android"
-    if "edge" in key:
+    if compact.startswith("helloedge") or compact.startswith("edge"):
         return "edge"
-    if key.startswith("qq") or "qqbrowser" in key:
-        return "qq"
-    if "random" in key:
-        return "randomized" if "randomized" in key else "random"
+    if "randomized" in compact:
+        return "randomized"
+    if compact.startswith("random"):
+        return "random"
+    # Safe fallback: better to start with a conservative browser fingerprint
+    # than to pass an unsupported provider-specific value into sing-box.
     return "chrome"
 
-
-def normalize_server_utls_fingerprint(server):
-    """Normalize nested tls.utls.fingerprint in a sing-box outbound copy."""
-    if not isinstance(server, dict):
-        return server
-    tls = server.get("tls")
+def normalize_server_runtime_compat(server):
+    item = dict(server or {})
+    tls = item.get("tls")
     if isinstance(tls, dict):
+        tls = dict(tls)
         utls = tls.get("utls")
-        if isinstance(utls, dict) and utls.get("enabled", True):
-            utls["fingerprint"] = normalize_utls_fingerprint(utls.get("fingerprint") or "chrome")
-    return server
+        if isinstance(utls, dict):
+            utls = dict(utls)
+            utls["fingerprint"] = normalize_utls_fingerprint(utls.get("fingerprint") or utls.get("fp"))
+            utls.pop("fp", None)
+            tls["utls"] = utls
+        elif tls.get("enabled") and item.get("type") in {"vless", "trojan", "vmess"}:
+            tls["utls"] = {"enabled": True, "fingerprint": "chrome"}
+        item["tls"] = tls
+    return item
+
+def find_unsupported_utls_fingerprints(obj):
+    found = []
+    def walk(value, path=""):
+        if isinstance(value, dict):
+            if "utls" in value and isinstance(value.get("utls"), dict):
+                fp = str(value["utls"].get("fingerprint") or "").strip()
+                normalized = normalize_utls_fingerprint(fp)
+                if fp and (fp.lower() not in SINGBOX_UTLS_FINGERPRINTS or normalized != fp.lower()):
+                    found.append({"path": path + ".utls.fingerprint", "value": fp, "normalized": normalized})
+            for k, v in value.items():
+                walk(v, f"{path}.{k}" if path else str(k))
+        elif isinstance(value, list):
+            for i, v in enumerate(value):
+                walk(v, f"{path}[{i}]")
+    walk(obj)
+    return found
 
 def server_to_singbox_outbound(server):
     """Return a clean sing-box outbound object.
@@ -2986,14 +3009,14 @@ def server_to_singbox_outbound(server):
     sing-box rejects unknown outbound fields, so these keys must never be
     written into /tmp/boris-proxy/sing-box.json.
     """
-    item = dict(server)
+    item = normalize_server_runtime_compat(server)
     # Keep this list deliberately broad: these are application metadata keys,
     # not sing-box outbound schema fields. If any of them reaches
     # /tmp/boris-proxy/sing-box.json, sing-box can refuse to start with
     # "json: unknown field ...".
     for key in APP_SERVER_META_KEYS:
         item.pop(key, None)
-    return normalize_server_utls_fingerprint(item)
+    return item
 
 
 
@@ -4091,8 +4114,8 @@ def parse_clash_yaml_vless(text):
         tls_enabled = bool(item.get("tls") is True or str(item.get("tls")).lower() == "true" or item.get("servername") or item.get("sni") or item.get("reality-opts") or item.get("reality_opts"))
         if tls_enabled:
             server_name = item.get("servername") or item.get("sni") or item.get("server_name") or server
-            fp = item.get("client-fingerprint") or item.get("fingerprint") or item.get("fp") or "chrome"
-            tls = {"enabled": True, "server_name": str(server_name), "utls": {"enabled": True, "fingerprint": normalize_utls_fingerprint(fp)}}
+            fp = normalize_utls_fingerprint(item.get("client-fingerprint") or item.get("fingerprint") or item.get("fp") or "chrome")
+            tls = {"enabled": True, "server_name": str(server_name), "utls": {"enabled": True, "fingerprint": fp}}
             ro = item.get("reality-opts") or item.get("reality_opts") or {}
             if isinstance(ro, dict):
                 pk = ro.get("public-key") or ro.get("public_key") or ro.get("pbk")
@@ -4278,14 +4301,14 @@ def parse_vless_uri(uri, index=0):
         outbound["flow"] = flow
     security = (q.get("security") or "").lower()
     sni = q.get("sni") or q.get("serverName") or q.get("peer") or server
-    fp = q.get("fp") or q.get("fingerprint") or "chrome"
+    fp = normalize_utls_fingerprint(q.get("fp") or q.get("fingerprint") or "chrome")
     pbk = q.get("pbk") or q.get("publicKey") or q.get("public_key")
     sid = q.get("sid") or q.get("shortId") or q.get("short_id") or ""
     if security in ["tls", "reality"] or pbk:
         tls = {
             "enabled": True,
             "server_name": sni,
-            "utls": {"enabled": True, "fingerprint": normalize_utls_fingerprint(fp)},
+            "utls": {"enabled": True, "fingerprint": fp},
         }
         if security == "reality" or pbk:
             tls["reality"] = {"enabled": True, "public_key": pbk or "", "short_id": sid}
@@ -4320,8 +4343,8 @@ def parse_trojan_uri(uri, index=0):
     security = (q.get("security") or "tls").lower()
     if security != "none":
         sni = q.get("sni") or q.get("serverName") or q.get("peer") or server
-        fp = q.get("fp") or q.get("fingerprint") or "chrome"
-        outbound["tls"] = {"enabled": True, "server_name": sni, "utls": {"enabled": True, "fingerprint": normalize_utls_fingerprint(fp)}}
+        fp = normalize_utls_fingerprint(q.get("fp") or q.get("fingerprint") or "chrome")
+        outbound["tls"] = {"enabled": True, "server_name": sni, "utls": {"enabled": True, "fingerprint": fp}}
     transport_type = (q.get("type") or q.get("transport") or "tcp").lower()
     if transport_type == "ws":
         transport = {"type": "ws"}
@@ -4552,7 +4575,7 @@ def selector_outbounds(servers):
     return ["direct"]
 
 
-def make_singbox_config(internal_socks_sniff=True):
+def make_singbox_config():
     options = load_options()
     settings = load_settings()
     routing = load_routing()
@@ -4586,15 +4609,19 @@ def make_singbox_config(internal_socks_sniff=True):
     # External HTTP/SOCKS ports are served by the local auth gateway. sing-box only
     # listens on localhost without auth. The gateway decides per source IP whether
     # a client may bypass auth or must authenticate normally.
-    internal_socks_inbound = {"type": "socks", "tag": socks_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_SOCKS_PROXY_PORT}
-    if internal_socks_sniff:
-        # Keep the external Python SOCKS5 gateway transparent. The gateway must
-        # not pre-read/rewrite TLS data because that already broke router clients.
-        # Native sing-box sniffing is the safe place to recover SNI for IP-first
-        # SOCKS5 connections from Keenetic and apply domain/Re:filter rules.
-        internal_socks_inbound.update({"sniff": True, "sniff_override_destination": False, "sniff_timeout": "1s"})
     inbounds = [
-        internal_socks_inbound,
+        {
+            "type": "socks",
+            "tag": socks_tag,
+            "listen": "127.0.0.1",
+            "listen_port": INTERNAL_SOCKS_PROXY_PORT,
+            # Native sing-box sniffing is safer than Python pre-reading the TLS
+            # stream. It helps IP-first SOCKS clients such as Keenetic route
+            # HTTPS by SNI, while the external SOCKS5 gateway remains transparent.
+            "sniff": True,
+            "sniff_override_destination": True,
+            "sniff_timeout": "300ms",
+        },
         {"type": "http", "tag": http_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_HTTP_PROXY_PORT},
     ]
     inbounds.append({"type": "socks", "tag": mtg_upstream_tag, "listen": "127.0.0.1", "listen_port": MTG_UPSTREAM_SOCKS_PORT})
@@ -6060,6 +6087,9 @@ def stop_singbox():
 
 def validate_generated_singbox_config(cfg=None):
     cfg = cfg or make_singbox_config()
+    unsupported = find_unsupported_utls_fingerprints(cfg)
+    if unsupported:
+        raise RuntimeError("Unsupported uTLS fingerprint reached sing-box config: " + json.dumps(unsupported, ensure_ascii=False))
     tmp = TMP_DIR / f"sing-box.check.{os.getpid()}.{secrets.token_hex(4)}.json"
     write_json(tmp, cfg)
     try:
@@ -6079,38 +6109,12 @@ def validate_generated_singbox_config(cfg=None):
             pass
 
 
-
-def _is_singbox_sniff_compat_error(error_text):
-    text = str(error_text or "").lower()
-    return (
-        "sniff" in text
-        and ("unknown field" in text or "unknown" in text or "unsupported" in text or "json:" in text)
-    )
-
-
-def build_valid_singbox_config():
-    """Build and validate runtime sing-box config with safe sniff fallback.
-
-    Preferred config enables native sniffing on the internal SOCKS inbound so
-    IP-first router traffic can be routed by TLS SNI. If the bundled sing-box
-    build ever rejects those fields, fall back to the known-good v1.26.1 style
-    config without touching the external SOCKS5 relay.
-    """
-    cfg = make_singbox_config(internal_socks_sniff=True)
-    try:
-        validate_generated_singbox_config(cfg)
-        return cfg
-    except RuntimeError as e:
-        if not _is_singbox_sniff_compat_error(str(e)):
-            raise
-        log("SING_BOX", "SNI_SNIFF_FALLBACK", "sing-box build rejected native sniff options; starting without internal SOCKS sniffing", actor="system", action="singbox_sniff_fallback", extra={"error": str(e)[-500:]})
-        fallback = make_singbox_config(internal_socks_sniff=False)
-        validate_generated_singbox_config(fallback)
-        return fallback
-
 def start_singbox(prechecked_config=None):
     global singbox_process, last_error, SINGBOX_STARTED_AT
-    cfg = prechecked_config or build_valid_singbox_config()
+    cfg = prechecked_config or make_singbox_config()
+    unsupported = find_unsupported_utls_fingerprints(cfg)
+    if unsupported:
+        raise RuntimeError("Unsupported uTLS fingerprint reached runtime config: " + json.dumps(unsupported, ensure_ascii=False))
     write_config(SINGBOX_CONFIG, cfg)
     log("SING_BOX", "START", f"Starting sing-box with {SINGBOX_CONFIG}")
     singbox_process = subprocess.Popen([SINGBOX_BIN, "run", "-c", str(SINGBOX_CONFIG)], stdout=sys.stdout, stderr=sys.stderr)
@@ -6132,12 +6136,13 @@ def start_singbox(prechecked_config=None):
 
 def validate_singbox_config():
     """Generate and validate config without replacing the running process."""
-    return validate_generated_singbox_config(build_valid_singbox_config())
+    return validate_generated_singbox_config(make_singbox_config())
 
 
 def restart_singbox():
     with lock:
-        new_cfg = build_valid_singbox_config()
+        new_cfg = make_singbox_config()
+        validate_generated_singbox_config(new_cfg)
         old_cfg = None
         if SINGBOX_CONFIG.exists():
             old_cfg = read_json(SINGBOX_CONFIG, None)

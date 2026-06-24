@@ -1,7 +1,9 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base-python:latest
+ARG SING_BOX_IMAGE=ghcr.io/sagernet/sing-box:v1.12.12
+ARG MTG_IMAGE=ghcr.io/dolonet/mtg-multi:latest
 
-FROM ghcr.io/sagernet/sing-box:latest AS singbox
-FROM ghcr.io/dolonet/mtg-multi:latest AS mtg
+FROM ${SING_BOX_IMAGE} AS singbox
+FROM ${MTG_IMAGE} AS mtg
 
 FROM ${BUILD_FROM}
 

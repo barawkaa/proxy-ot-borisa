@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Product checks for v4 sing-box-first transport.
+"""Product checks for v4.0.2 sing-box-first transport.
 
-These tests intentionally verify architecture, not only syntax:
+These tests verify the architecture and the regression that broke v4.0.0-v4.0.1:
 - public HTTP/SOCKS ports are sing-box inbounds on 0.0.0.0;
 - Python auth gateway does not bind or relay those ports;
-- trusted bypass is enforced by sing-box source CIDR block rules;
-- internal localhost inbounds remain available for diagnostics.
+- generated route rules do NOT contain broad source-IP invert block rules for real
+  HTTP/SOCKS direct-transport ports, because those rules blocked the trusted router
+  (188.143.204.77) and sent every destination to outbound/block;
+- manual source blocklist still works for explicit blocked CIDRs.
 """
 import json
 import pathlib
@@ -47,15 +49,17 @@ try:
     sec["trusted_auth_bypass_enabled"] = True
     sec["trusted_auth_bypass_http"] = True
     sec["trusted_auth_bypass_socks"] = True
-    # Regression for v4.0.0: direct sing-box transport blocked a trusted
-    # Keenetic because only security.trusted_auth_bypass_cidrs was considered.
-    # In real use the router may be stored in trusted_clients.json instead.
     sec["trusted_auth_bypass_cidrs"] = []
     sec["country_filter_enabled"] = True
     sec["allowed_countries"] = ["RU"]
     sec["custom_allowed_cidrs"] = []
+    sec["custom_denied_cidrs"] = []
     backend.save_security(sec)
     backend.save_trusted({"188.143.204.77": {"name": "Keenetic", "trusted": True}})
+    # Regression: previous test runs / broken builds could leave an autoban for
+    # the router in /data/blocked_ips.json. make_singbox_config must purge
+    # autobans for trusted clients before converting blocklist into route rules.
+    backend.save_blocked([{"cidr": "188.143.204.77/32", "ip": "188.143.204.77", "source": "autoban", "created_at": 1}])
 
     src = backend.upsert_server_source("manual", "Manual", "manual")
     servers = backend.annotate_servers_with_source([{
@@ -81,19 +85,21 @@ try:
 
     rules = cfg.get("route", {}).get("rules", [])
     rules_text = json.dumps(rules, ensure_ascii=False)
-    assert "188.143.204.77/32" in rules_text, rules_text
-    assert '"invert": true' in rules_text, rules_text
-    assert '"outbound": "block"' in rules_text, rules_text
 
-    allowed = backend.allowed_source_cidrs_from_security(sec)
-    trusted_transport = backend.trusted_source_cidrs_for_transport(sec)
-    assert "188.143.204.77/32" in trusted_transport, trusted_transport
-    assert "188.143.204.77/32" in allowed, allowed
-    # If this fails, the trusted public router can be matched by the global
-    # country/unknown-source block rule before normal domain routing.
-    country_blocks = [r for r in rules if r.get("source_ip_cidr") and r.get("invert") is True and r.get("outbound") == "block"]
-    assert country_blocks, rules_text
-    assert any("188.143.204.77/32" in (r.get("source_ip_cidr") or []) for r in country_blocks), country_blocks
+    # v4.0.2 regression: no broad source-IP invert block may exist for HTTP/SOCKS.
+    # v4.0.0-v4.0.1 produced such a rule and blocked every request from 188.143.204.77.
+    broad_source_blocks = [
+        r for r in rules
+        if r.get("source_ip_cidr") and r.get("invert") is True and r.get("outbound") == "block"
+    ]
+    assert not broad_source_blocks, rules_text
+    assert "188.143.204.77/32" not in rules_text, rules_text
+
+    # Explicit manual blocklist must still produce a source block.
+    backend.save_blocked([{"cidr": "203.0.113.9/32", "source": "manual", "created_at": 1}])
+    cfg_block = backend.make_singbox_config()
+    rules_block = cfg_block.get("route", {}).get("rules", [])
+    assert any(r.get("source_ip_cidr") == ["203.0.113.9/32"] and r.get("outbound") == "block" for r in rules_block), rules_block
 
     # The new start_auth_gateways must not create listener sockets or relay threads.
     backend.AUTH_GATEWAY_SOCKETS.clear()
@@ -104,7 +110,7 @@ try:
 
     text = BACKEND.read_text(encoding="utf-8")
     assert "DIRECT_TRANSPORT" in text
-    assert "def handle_socks_gateway" in text  # kept only for diagnostics/rollback analysis
+    assert "country/trusted source guard" in text
     print({"ok": True, "direct_transport": True, "version": backend.APP_VERSION})
 finally:
     backend.stop_auth_gateways()

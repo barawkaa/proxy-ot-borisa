@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "4.0.1"
+APP_VERSION = "4.0.2"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -874,6 +874,8 @@ def security_summary(sec=None, options=None):
         warnings.append("HTTP-прокси без авторизации. Если порт 2081 открыт наружу — это открытый публичный proxy.")
     if sec.get("country_filter_enabled") and not any(load_country_cidrs(cc) for cc in (sec.get("allowed_countries") or [])):
         warnings.append("Фильтр по стране включён, но список CIDR ещё не загружен. Нажми обновление списка RU.")
+    if bool(sec.get("country_filter_enabled")):
+        warnings.append("В v4 direct-transport фильтр источников по стране не применяется к портам HTTP/SOCKS, чтобы не блокировать доверенный роутер. Используй firewall/проброс портов/доступ HA для ограничения внешнего доступа.")
     return {
         "country_filter_enabled": bool(sec.get("country_filter_enabled")),
         "allowed_countries": sec.get("allowed_countries") or [],
@@ -4684,6 +4686,12 @@ def make_singbox_config():
     options = load_options()
     settings = load_settings()
     routing = load_routing()
+    security = load_security()
+    # Remove stale automatic bans for trusted/allowed clients before building
+    # route rules. Otherwise an old autoban for the router can survive and keep
+    # sending all HTTP/SOCKS traffic to outbound/block even after the source-guard
+    # regression is fixed. Manual bans are deliberately preserved.
+    purge_exempt_autobans(security)
     servers_all = load_servers()
     sources_for_runtime = {s.get("id"): s for s in (load_server_sources().get("sources") or []) if isinstance(s, dict)}
     servers = [s for s in servers_all if server_runtime_allowed(s, sources_for_runtime)]
@@ -4712,7 +4720,6 @@ def make_singbox_config():
             for u in users
             if u.get("enabled", True) and u.get("http_enabled", True)
         ]
-    security = load_security()
 
     # v4 architecture: sing-box owns the real transport ports directly.
     # Python no longer implements HTTP/SOCKS relays, because the old gateway was
@@ -4781,29 +4788,26 @@ def make_singbox_config():
         rules.append({"source_ip_cidr": blocked_cidrs, "outbound": "block"})
 
 
-    security = load_security()
     denied_source_cidrs = denied_source_cidrs_from_security(security)
     if denied_source_cidrs:
         rules.append({"source_ip_cidr": denied_source_cidrs, "outbound": "block"})
-    if security.get("country_filter_enabled"):
-        allowed_source_cidrs = allowed_source_cidrs_from_security(security)
-        if allowed_source_cidrs:
-            # Разрешаем только частные сети + выбранные страны/ручные CIDR.
-            # Всё остальное блокируется до обычной маршрутизации.
-            rules.append({"source_ip_cidr": allowed_source_cidrs, "invert": True, "outbound": "block"})
 
     socks_inbound_tags = [socks_tag, socks_internal_tag]
     http_inbound_tags = [http_tag, http_internal_tag]
 
-    # Direct trusted mode: sing-box listens on the real port with no Python relay.
-    # Because SOCKS5/HTTP auth and source-IP auth-bypass cannot be mixed on one
-    # sing-box inbound, trusted bypass mode is implemented as trusted-only access:
-    # loopback/private/trusted CIDRs may use the port; other sources are blocked.
-    trusted_direct_cidrs = normalize_cidr_list(list(PRIVATE_SOURCE_CIDRS) + transport_trusted_cidrs)
-    if socks_direct_mode and trusted_direct_cidrs:
-        rules.append({"inbound": [socks_tag], "source_ip_cidr": trusted_direct_cidrs, "invert": True, "outbound": "block"})
-    if http_direct_mode and trusted_direct_cidrs:
-        rules.append({"inbound": [http_tag], "source_ip_cidr": trusted_direct_cidrs, "invert": True, "outbound": "block"})
+    # v4.0.2 safety fix:
+    # Do NOT generate broad source-IP allowlist/block rules for the real HTTP/SOCKS
+    # transport ports. v4.0.0-v4.0.1 moved transport directly to sing-box, but the
+    # old country/trusted source guard was translated into route rules that matched
+    # legitimate router traffic (188.143.204.77) and sent every destination to
+    # outbound/block. That made both HTTP and SOCKS5 unusable even though the
+    # inbounds were listening.
+    #
+    # Runtime routing must decide by destination (domain/IP/rule-set/manual
+    # include/exclude), not by blocking a whole proxy client source in route layer.
+    # Manual blocklist entries still remain above; automatic country-source
+    # protection is intentionally disabled for direct-transport ports until it can
+    # be implemented with a verified inbound-level firewall/HA network boundary.
 
     # Power switches: if a service is disabled, block both external and internal inbounds.
     if not settings.get("socks_enabled", True):

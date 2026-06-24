@@ -308,8 +308,11 @@ try:
     assert inbound_tags["IN-SOCKS5-INTERNAL-12081"].get("listen") == "127.0.0.1"
     assert "users" not in inbound_tags["IN-HTTP-2081"], inbound_tags["IN-HTTP-2081"]
     assert "users" not in inbound_tags["IN-SOCKS5-2080"], inbound_tags["IN-SOCKS5-2080"]
-    rules_dump = json.dumps(cfg.get("route", {}).get("rules", []), ensure_ascii=False)
-    assert '"source_ip_cidr"' in rules_dump and '192.168.1.35/32' in rules_dump and '"invert": true' in rules_dump, rules_dump
+    rules = cfg.get("route", {}).get("rules", [])
+    rules_dump = json.dumps(rules, ensure_ascii=False)
+    # v4.0.2: direct transport must not create a broad source-IP invert block.
+    # That rule made real trusted routers route every destination to outbound/block.
+    assert not any(r.get("source_ip_cidr") and r.get("invert") is True and r.get("outbound") == "block" for r in rules), rules_dump
     dumped = json.dumps(cfg, ensure_ascii=False)
     for forbidden in ["trusted_auth_bypass_enabled", "trusted_auth_bypass_cidrs", "trusted_auth_bypass_http", "trusted_auth_bypass_socks", "trusted_http_proxy_port", "trusted_socks_proxy_port"]:
         assert forbidden not in dumped, forbidden
@@ -656,7 +659,7 @@ finally:
     backend.gateway_activity_update_destination = _old_update_12518
 
 
-# v4.0.1 sing-box-first checks: HTTP/SOCKS public ports are owned by sing-box;
+# v4.0.2 sing-box-first checks: HTTP/SOCKS public ports are owned by sing-box;
 # Python must not start the old TCP relay, while subscription/runtime compatibility stays protected.
 assert backend.normalize_utls_fingerprint("helloChrome_120") == "chrome"
 assert backend.normalize_utls_fingerprint("HelloFirefox_Auto") == "firefox"
@@ -682,15 +685,15 @@ print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))
 
 # v1.26.1 release/product checks: this release is not only syntax-valid, it must
 # keep public version files aligned and keep the cleaned UI concepts present.
-assert backend.APP_VERSION == "4.0.1", backend.APP_VERSION
+assert backend.APP_VERSION == "4.0.2", backend.APP_VERSION
 _config_version = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
-assert str(_config_version) == "4.0.1", _config_version
+assert str(_config_version) == "4.0.2", _config_version
 _repo_root = ROOT.parent
 _readme = (_repo_root / "README.md").read_text(encoding="utf-8")
 _changelog = (_repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
-assert "Текущая версия: v4.0.1" in _readme
-assert "Текущая версия add-on: **4.0.1**" in _readme
-assert _changelog.lstrip().startswith("# Changelog\n\n## v4.0.1") or _changelog.lstrip().startswith("## v4.0.1")
+assert "Текущая версия: v4.0.2" in _readme
+assert "Текущая версия add-on: **4.0.2**" in _readme
+assert _changelog.lstrip().startswith("# Changelog\n\n## v4.0.2") or _changelog.lstrip().startswith("## v4.0.2")
 for stale in ["Текущая версия: v1.25", "Текущая версия add-on: **1.25"]:
     assert stale not in _readme, stale
 assert "function shortRouteNote" in html

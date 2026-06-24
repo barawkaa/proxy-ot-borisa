@@ -1,26 +1,22 @@
 # Proxy от Бориса
 
-Текущая версия: v4.0.1
+Текущая версия: v4.0.2
 
 
-> Текущая версия add-on: **4.0.1**. Архив собран как полноценный Home Assistant add-on repository: включает `repository.yaml`, корневой `README.md`, `CHANGELOG.md`, папку add-on и все файлы, необходимые для установки/публикации.
+> Текущая версия add-on: **4.0.2**. Архив собран как полноценный Home Assistant add-on repository: включает `repository.yaml`, корневой `README.md`, `CHANGELOG.md`, папку add-on и все файлы, необходимые для установки/публикации.
 
 **Proxy от Бориса** — это Home Assistant add-on, который превращает вашу VPN/VLESS-подписку в управляемый HTTP/SOCKS5/Telegram MTProto прокси-шлюз.
 
 
-### Что нового в 4.0.1
+### Что нового в 4.0.2
 
-- Исправлен критичный баг v4.0.0: trusted-клиент/роутер из `trusted_clients.json` мог попадать под ранний `outbound/block` в sing-box, особенно при включённом фильтре источников/страны. Теперь trusted IP из обычного реестра клиентов и CIDR из trusted bypass объединяются в единый список доверенных источников для транспортных правил.
-- Исправлен прямой trusted-only режим: наличие trusted-клиента в `trusted_clients.json` теперь достаточно, чтобы перевести внешний sing-box inbound в no-auth trusted-only режим; раньше учитывался только список `trusted_auth_bypass_cidrs`.
-
-- Новая архитектура транспорта: публичные HTTP `2081` и SOCKS5 `2080` теперь слушает сам `sing-box` напрямую.
-- Python backend больше не является TCP/SOCKS relay для пользовательского трафика. Он управляет UI, настройками, подписками, диагностикой, историей, backup/cleanup и генерацией `sing-box.json`.
-- Убран главный источник поломок старой ветки: Python gateway больше не прокачивает SOCKS5-потоки Keenetic и не может портить протокол ошибками вроде `socks5: unsupported command 5`.
-- Для диагностики сохранены внутренние localhost-порты `12080/12081`, но внешний клиентский трафик через них не ходит.
-- Trusted bypass работает как trusted-only режим: при включённом bypass и заданных trusted CIDR внешние порты работают без proxy-auth только для private/trusted источников; остальные источники блокируются правилами sing-box.
-- Для HTTP/SOCKS inbounds включён native sniffing sing-box, чтобы IP-first SOCKS5 от Keenetic маршрутизировался без Python-перехвата TLS.
+- Исправлена критическая ошибка v4.0.0-v4.0.1: прямой `sing-box` transport принимал подключения от роутера, но route source-IP allowlist/country-filter правило отправляло весь трафик в `outbound/block`. В результате не работали ни HTTP 2081, ни SOCKS5 2080.
+- Для реальных HTTP/SOCKS портов 2081/2080 убраны broad source-IP invert/block правила. Маршрутизация снова решается по назначению: домен, IP, ручные правила, Re:filter/rule-set и выбранный режим маршрутизации.
+- Python relay не возвращён: публичные HTTP `2081` и SOCKS5 `2080` по-прежнему слушает сам `sing-box` напрямую.
+- Ручной blocklist сохранён: явно заблокированные CIDR по-прежнему отправляются в `outbound/block`.
+- Риск открытого proxy в direct-transport архитектуре должен контролироваться сетевой границей: firewall, отсутствие публичного проброса портов, доступ только от нужных IP/VPN/HA-сети.
 - Сохранена runtime-совместимость подписок: значения uTLS fingerprint вида `helloChrome_120` нормализуются в `chrome` до генерации `sing-box.json`.
-- Dockerfile больше не использует плавающий `sing-box:latest`; sing-box закреплён на `v1.12.12`.
+- Dockerfile не использует плавающий `sing-box:latest`; sing-box закреплён на `v1.12.12`.
 - Не используется экспериментальная Python-логика `SOCKS_SNI_ROUTE`.
 
 ### Что было в 1.26.1

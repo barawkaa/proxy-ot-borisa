@@ -1,5 +1,12 @@
 # Changelog
 
+## v4.0.2 — direct transport source-block fix
+
+- Исправлена критическая ошибка v4.0.0-v4.0.1: HTTP/SOCKS inbounds sing-box слушали 0.0.0.0:2081/2080, но route source-IP allowlist/country-filter правило блокировало доверенный роутер и отправляло все назначения в outbound/block.
+- Убраны broad source-IP invert/block правила для реальных HTTP/SOCKS direct-transport портов.
+- Ручной blocklist сохранён; Python relay не возвращён.
+- Добавлены regression-проверки: в generated sing-box config не должно быть broad source-IP invert block rules для HTTP/SOCKS direct transport, а chatgpt.com/google/rutracker не должны попадать в block только из-за source 188.143.204.77.
+
 ## v4.0.1 — trusted-source unblock fix
 
 - Исправлен критичный баг v4.0.0: внешний sing-box inbound принимал подключения от trusted-роутера, но раннее правило источников отправляло весь трафик в `outbound/block`, из-за чего не работали даже HTTP/ChatGPT/Google. В логах это выглядело как `inbound/http[IN-HTTP-2081] from 188.143.204.77` → `outbound/block[block]` → `operation not permitted`.
@@ -126,6 +133,13 @@
 - Проверка длинного потока теперь сравнивает HTTP gateway, SOCKS5 gateway и internal VPN-core, чтобы отличать проблему gateway от проблемы VPN-ноды или внешнего сайта.
 
 # Changelog
+
+## v4.0.2 — direct transport source-block fix
+
+- Исправлена критическая ошибка v4.0.0-v4.0.1: HTTP/SOCKS inbounds sing-box слушали 0.0.0.0:2081/2080, но route source-IP allowlist/country-filter правило блокировало доверенный роутер и отправляло все назначения в outbound/block.
+- Убраны broad source-IP invert/block правила для реальных HTTP/SOCKS direct-transport портов.
+- Ручной blocklist сохранён; Python relay не возвращён.
+- Добавлены regression-проверки: в generated sing-box config не должно быть broad source-IP invert block rules для HTTP/SOCKS direct transport, а chatgpt.com/google/rutracker не должны попадать в block только из-за source 188.143.204.77.
 
 ## 1.25.7
 

@@ -1,3 +1,11 @@
+## 2.0.1
+
+- Исправлена критичная регрессия SOCKS5 через маршрутизатор: gateway relay больше не закрывает весь TCP-туннель из-за idle timeout только в upload-направлении.
+- Relay теперь различает короткий socket timeout как служебный wake-up, общий idle timeout всего туннеля и штатный half-close одной стороны соединения.
+- Для HTTPS/HTTP2/WebSocket сохранено поведение: если upload временно молчит, но download активен, соединение остаётся живым.
+- Добавлены regression-тесты relay: download после простоя upload и download после half-close upload.
+- Сохранены исправления 2.0.0: закреплённая версия sing-box, нормализация uTLS fingerprint и отсутствие сломанной Python-логики SOCKS_SNI_ROUTE.
+
 ## 2.0.0
 
 - Релизная ветка возвращена к рабочей базе v1.26.1 по внешнему HTTP/SOCKS/MTProto транспорту.

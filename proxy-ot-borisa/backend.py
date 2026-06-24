@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -5294,6 +5294,13 @@ def read_until(sock, marker=b'\r\n\r\n', limit=65536):
     return data
 
 
+# Gateway relay timeouts are deliberately split:
+# - socket timeout is only a short wake-up interval for checking stop flags;
+# - global idle timeout is applied to the whole TCP tunnel, not to one direction.
+# A silent upload direction while download is active is normal for HTTPS/HTTP2/WebSocket.
+RELAY_SOCKET_TIMEOUT_SECONDS = 5
+RELAY_GLOBAL_IDLE_TIMEOUT_SECONDS = 1800
+
 def classify_socket_close(error):
     """Classify expected TCP relay/socket shutdowns for readable logs.
 
@@ -5319,15 +5326,30 @@ def classify_socket_close(error):
 
 
 def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
-    """Relay two TCP sockets reliably for long-lived streams.
+    """Relay two TCP sockets reliably for long-lived bidirectional streams.
 
-    v1.25.3 used non-blocking sockets with sendall(). On a loaded Raspberry Pi or
-    a slow client this can raise BlockingIOError/partial-send situations and close
-    large downloads early. The gateway must be boring and stable: two blocking
-    forwarder threads, explicit half-close, byte accounting, no heavy logic in the
-    hot path.
+    The relay must not close the whole tunnel just because one direction is
+    temporarily idle. Browsers, HTTP/2, WebSocket and file uploads often have
+    long pauses in one direction while the opposite direction is still alive.
+
+    Rules:
+    - socket.timeout is a wake-up tick, not a close reason;
+    - global idle timeout is based on activity in both directions;
+    - EOF in one direction performs TCP half-close only;
+    - sockets are closed only after both pumps finish, fatal error, service stop
+      or full-tunnel idle timeout.
     """
     stop = threading.Event()
+    last_activity = {"ts": time.monotonic()}
+    state_lock = threading.Lock()
+
+    def mark_activity():
+        with state_lock:
+            last_activity["ts"] = time.monotonic()
+
+    def tunnel_idle_for():
+        with state_lock:
+            return time.monotonic() - float(last_activity.get("ts") or time.monotonic())
 
     def close_quiet(sock):
         try:
@@ -5346,14 +5368,23 @@ def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
             try:
                 src.setblocking(True)
                 dst.setblocking(True)
-                src.settimeout(300)
-                dst.settimeout(300)
+                src.settimeout(float(RELAY_SOCKET_TIMEOUT_SECONDS))
+                dst.settimeout(float(RELAY_SOCKET_TIMEOUT_SECONDS))
             except Exception:
                 pass
             while not stop.is_set() and not AUTH_GATEWAY_STOP.is_set():
-                data = src.recv(65536)
+                try:
+                    data = src.recv(65536)
+                except socket.timeout:
+                    if tunnel_idle_for() >= float(RELAY_GLOBAL_IDLE_TIMEOUT_SECONDS):
+                        log('GATEWAY', 'RELAY_CLOSE', f'Relay tunnel idle timeout after {int(RELAY_GLOBAL_IDLE_TIMEOUT_SECONDS)}s', actor='gateway', action='relay_close', extra={'direction': direction, 'reason': 'tunnel_idle_timeout'})
+                        stop.set()
+                        break
+                    continue
                 if not data:
+                    log('GATEWAY', 'RELAY_CLOSE', f'Relay direction {direction}: peer closed', actor='gateway', action='relay_close', extra={'direction': direction, 'reason': 'peer_eof'})
                     break
+                mark_activity()
                 dst.sendall(data)
                 try:
                     tap = upload_tap if direction == 'upload' else download_tap
@@ -5372,8 +5403,10 @@ def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
                 log('GATEWAY', 'RELAY_CLOSE', f"Relay direction {direction}: {close_info.get('label')}", actor='gateway', action='relay_close', extra={'direction': direction, 'reason': close_info.get('reason'), 'error_type': type(e).__name__})
             else:
                 log('GATEWAY', 'RELAY_ERROR', f'Relay direction {direction} error: {type(e).__name__}: {e}', actor='gateway', action='relay_error', extra={'direction': direction, 'error_type': type(e).__name__})
+                stop.set()
         finally:
-            stop.set()
+            # Half-close the destination write side so the opposite direction can
+            # still deliver pending response data. Do not set stop here.
             shutdown_write(dst)
 
     threads = [
@@ -5381,19 +5414,21 @@ def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
         threading.Thread(target=pump, args=(b, a, 'download'), name='gateway-relay-download', daemon=True),
     ]
     try:
+        mark_activity()
         for th in threads:
             th.start()
-        while not stop.is_set() and any(th.is_alive() for th in threads) and not AUTH_GATEWAY_STOP.is_set():
+        while any(th.is_alive() for th in threads) and not AUTH_GATEWAY_STOP.is_set():
             for th in threads:
                 th.join(timeout=0.5)
+            if stop.is_set():
+                break
     finally:
         stop.set()
         close_quiet(a)
         close_quiet(b)
         for th in threads:
             if th.is_alive():
-                th.join(timeout=0.2)
-
+                th.join(timeout=0.5)
 
 
 

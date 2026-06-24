@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.0.1"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -825,12 +825,37 @@ def check_country_ip(ip, country="RU"):
     return {"ip": raw_ip, "country": str(country or "RU").upper(), "in_list": bool(matched), "matched_cidr": matched, "count": len(cidrs)}
 
 
+def trusted_source_cidrs_for_transport(sec=None):
+    """CIDRs that must be accepted on direct sing-box transport ports.
+
+    v4 removes the Python auth/trusted gateway from the TCP data path.  That
+    means all source-IP protection must be expressed in sing-box route rules.
+    The old UI stores trusted routers in two places: the explicit trusted
+    bypass CIDR list and the ordinary trusted_clients.json registry.  Both must
+    be treated as trusted source CIDRs, otherwise a trusted Keenetic can be
+    blocked by the generic country/unknown-source protection rule before the
+    normal VPN/DIRECT routing rules are even evaluated.
+    """
+    sec = sec or load_security()
+    cidrs = []
+    cidrs.extend(sec.get("trusted_auth_bypass_cidrs") or [])
+    try:
+        cidrs.extend((load_trusted() or {}).keys())
+    except Exception:
+        pass
+    return normalize_cidr_list(cidrs)
+
+
 def allowed_source_cidrs_from_security(sec=None):
     sec = sec or load_security()
     allowed = list(PRIVATE_SOURCE_CIDRS)
     for cc in sec.get("allowed_countries") or []:
         allowed.extend(load_country_cidrs(cc))
     allowed.extend(sec.get("custom_allowed_cidrs") or [])
+    # Trusted proxy clients must bypass source-country/unknown-source blocking.
+    # Without this, v4 direct transport can accept the connection from Keenetic
+    # and then immediately route it to outbound/block.
+    allowed.extend(trusted_source_cidrs_for_transport(sec))
     return normalize_cidr_list(allowed)
 
 
@@ -4693,8 +4718,12 @@ def make_singbox_config():
     # Python no longer implements HTTP/SOCKS relays, because the old gateway was
     # the source of SOCKS5 protocol corruption (for example: unsupported command 5).
     # Internal localhost inbounds are kept only for diagnostics/MTProto helpers.
-    socks_direct_mode = bool(security.get("trusted_auth_bypass_enabled") and security.get("trusted_auth_bypass_socks", True) and security.get("trusted_auth_bypass_cidrs"))
-    http_direct_mode = bool(security.get("trusted_auth_bypass_enabled") and security.get("trusted_auth_bypass_http", True) and security.get("trusted_auth_bypass_cidrs"))
+    # Trusted sources may be stored either in security.trusted_auth_bypass_cidrs
+    # or in trusted_clients.json; both must switch the external inbound into
+    # no-auth trusted-only mode.
+    transport_trusted_cidrs = trusted_source_cidrs_for_transport(security)
+    socks_direct_mode = bool(security.get("trusted_auth_bypass_enabled") and security.get("trusted_auth_bypass_socks", True) and transport_trusted_cidrs)
+    http_direct_mode = bool(security.get("trusted_auth_bypass_enabled") and security.get("trusted_auth_bypass_http", True) and transport_trusted_cidrs)
 
     external_socks_inbound = {"type": "socks", "tag": socks_tag, "listen": "0.0.0.0", "listen_port": socks_port, "sniff": True, "sniff_override_destination": False}
     external_http_inbound = {"type": "http", "tag": http_tag, "listen": "0.0.0.0", "listen_port": http_port, "sniff": True, "sniff_override_destination": False}
@@ -4770,7 +4799,7 @@ def make_singbox_config():
     # Because SOCKS5/HTTP auth and source-IP auth-bypass cannot be mixed on one
     # sing-box inbound, trusted bypass mode is implemented as trusted-only access:
     # loopback/private/trusted CIDRs may use the port; other sources are blocked.
-    trusted_direct_cidrs = normalize_cidr_list(list(PRIVATE_SOURCE_CIDRS) + list(security.get("trusted_auth_bypass_cidrs") or []))
+    trusted_direct_cidrs = normalize_cidr_list(list(PRIVATE_SOURCE_CIDRS) + transport_trusted_cidrs)
     if socks_direct_mode and trusted_direct_cidrs:
         rules.append({"inbound": [socks_tag], "source_ip_cidr": trusted_direct_cidrs, "invert": True, "outbound": "block"})
     if http_direct_mode and trusted_direct_cidrs:

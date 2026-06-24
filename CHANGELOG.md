@@ -1,5 +1,12 @@
 # Changelog
 
+## v4.0.1 — trusted-source unblock fix
+
+- Исправлен критичный баг v4.0.0: внешний sing-box inbound принимал подключения от trusted-роутера, но раннее правило источников отправляло весь трафик в `outbound/block`, из-за чего не работали даже HTTP/ChatGPT/Google. В логах это выглядело как `inbound/http[IN-HTTP-2081] from 188.143.204.77` → `outbound/block[block]` → `operation not permitted`.
+- Trusted IP из обычного реестра `trusted_clients.json` теперь автоматически добавляются в trusted transport CIDR и в allowed source CIDR. Это защищает Keenetic/роутер от блокировки source-country/unknown-source правилом.
+- Trusted-only direct mode теперь включается не только при заполненном `security.trusted_auth_bypass_cidrs`, но и при наличии trusted-клиентов в `trusted_clients.json`.
+- Добавлен regression-test: trusted public router `188.143.204.77` не должен быть исключён из allowed source CIDR и не должен попадать под общий ранний block-rule.
+
 ## v4.0.0 — sing-box-first transport rebuild
 
 - Переписана транспортная архитектура HTTP/SOCKS: публичные порты `2080` и `2081` теперь слушает сам `sing-box` напрямую.

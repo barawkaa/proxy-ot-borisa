@@ -656,7 +656,7 @@ finally:
     backend.gateway_activity_update_destination = _old_update_12518
 
 
-# v4.0.0 sing-box-first checks: HTTP/SOCKS public ports are owned by sing-box;
+# v4.0.1 sing-box-first checks: HTTP/SOCKS public ports are owned by sing-box;
 # Python must not start the old TCP relay, while subscription/runtime compatibility stays protected.
 assert backend.normalize_utls_fingerprint("helloChrome_120") == "chrome"
 assert backend.normalize_utls_fingerprint("HelloFirefox_Auto") == "firefox"
@@ -682,15 +682,15 @@ print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))
 
 # v1.26.1 release/product checks: this release is not only syntax-valid, it must
 # keep public version files aligned and keep the cleaned UI concepts present.
-assert backend.APP_VERSION == "4.0.0", backend.APP_VERSION
+assert backend.APP_VERSION == "4.0.1", backend.APP_VERSION
 _config_version = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
-assert str(_config_version) == "4.0.0", _config_version
+assert str(_config_version) == "4.0.1", _config_version
 _repo_root = ROOT.parent
 _readme = (_repo_root / "README.md").read_text(encoding="utf-8")
 _changelog = (_repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
-assert "Текущая версия: v4.0.0" in _readme
-assert "Текущая версия add-on: **4.0.0**" in _readme
-assert _changelog.lstrip().startswith("# Changelog\n\n## v4.0.0") or _changelog.lstrip().startswith("## v4.0.0")
+assert "Текущая версия: v4.0.1" in _readme
+assert "Текущая версия add-on: **4.0.1**" in _readme
+assert _changelog.lstrip().startswith("# Changelog\n\n## v4.0.1") or _changelog.lstrip().startswith("## v4.0.1")
 for stale in ["Текущая версия: v1.25", "Текущая версия add-on: **1.25"]:
     assert stale not in _readme, stale
 assert "function shortRouteNote" in html

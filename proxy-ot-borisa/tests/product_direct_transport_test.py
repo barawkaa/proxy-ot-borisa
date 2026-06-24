@@ -47,8 +47,15 @@ try:
     sec["trusted_auth_bypass_enabled"] = True
     sec["trusted_auth_bypass_http"] = True
     sec["trusted_auth_bypass_socks"] = True
-    sec["trusted_auth_bypass_cidrs"] = ["188.143.204.77/32"]
+    # Regression for v4.0.0: direct sing-box transport blocked a trusted
+    # Keenetic because only security.trusted_auth_bypass_cidrs was considered.
+    # In real use the router may be stored in trusted_clients.json instead.
+    sec["trusted_auth_bypass_cidrs"] = []
+    sec["country_filter_enabled"] = True
+    sec["allowed_countries"] = ["RU"]
+    sec["custom_allowed_cidrs"] = []
     backend.save_security(sec)
+    backend.save_trusted({"188.143.204.77": {"name": "Keenetic", "trusted": True}})
 
     src = backend.upsert_server_source("manual", "Manual", "manual")
     servers = backend.annotate_servers_with_source([{
@@ -77,6 +84,16 @@ try:
     assert "188.143.204.77/32" in rules_text, rules_text
     assert '"invert": true' in rules_text, rules_text
     assert '"outbound": "block"' in rules_text, rules_text
+
+    allowed = backend.allowed_source_cidrs_from_security(sec)
+    trusted_transport = backend.trusted_source_cidrs_for_transport(sec)
+    assert "188.143.204.77/32" in trusted_transport, trusted_transport
+    assert "188.143.204.77/32" in allowed, allowed
+    # If this fails, the trusted public router can be matched by the global
+    # country/unknown-source block rule before normal domain routing.
+    country_blocks = [r for r in rules if r.get("source_ip_cidr") and r.get("invert") is True and r.get("outbound") == "block"]
+    assert country_blocks, rules_text
+    assert any("188.143.204.77/32" in (r.get("source_ip_cidr") or []) for r in country_blocks), country_blocks
 
     # The new start_auth_gateways must not create listener sockets or relay threads.
     backend.AUTH_GATEWAY_SOCKETS.clear()

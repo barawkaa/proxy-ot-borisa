@@ -1,3 +1,11 @@
+## 1.26.4
+
+- Полный релиз от рабочей базы v1.26.1 без переписывания внешнего SOCKS5 gateway: транспортный hot path Keenetic оставлен прозрачным.
+- Исправлен аварийный старт `sing-box` после обновления подписок: uTLS fingerprints вида `helloChrome_120`, `HelloFirefox_Auto` и аналогичные provider-specific значения нормализуются в совместимые sing-box fingerprints. Нормализация применяется и при импорте, и непосредственно перед генерацией runtime outbound, поэтому уже сохранённые серверы тоже не должны валить core.
+- Для проблемы ChatGPT upload через Keenetic/SOCKS5 добавлено безопасное native sniffing на внутреннем localhost SOCKS inbound sing-box: IP-first TLS-соединения могут маршрутизироваться по SNI-домену без Python-перехвата первого TLS-пакета.
+- Добавлен fallback совместимости: если конкретная сборка `sing-box` не поддерживает sniffing-поля, add-on не падает, а валидирует и запускает стабильную конфигурацию без sniffing, сохраняя работоспособность HTTP/SOCKS/MTProto.
+- Не возвращалась неудачная логика `SOCKS_SNI_ROUTE`/Python pre-read/rewrite.
+
 ## 1.26.1
 
 - Переработана диагностика URL: теперь результат разбит на этапы TCP/CONNECT, TLS, HTTP-запрос, HTTP-ответ, чтение данных и закрытие соединения.

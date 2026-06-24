@@ -653,17 +653,17 @@ finally:
 
 print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))
 
-# v1.26.1 release/product checks: this release is not only syntax-valid, it must
+# v1.26.4 release/product checks: this release is not only syntax-valid, it must
 # keep public version files aligned and keep the cleaned UI concepts present.
-assert backend.APP_VERSION == "1.26.1", backend.APP_VERSION
+assert backend.APP_VERSION == "1.26.4", backend.APP_VERSION
 _config_version = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
-assert str(_config_version) == "1.26.1", _config_version
+assert str(_config_version) == "1.26.4", _config_version
 _repo_root = ROOT.parent
 _readme = (_repo_root / "README.md").read_text(encoding="utf-8")
 _changelog = (_repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
-assert "Текущая версия: v1.26.1" in _readme
-assert "Текущая версия add-on: **1.26.1**" in _readme
-assert _changelog.lstrip().startswith("## 1.26.1")
+assert "Текущая версия: v1.26.4" in _readme
+assert "Текущая версия add-on: **1.26.4**" in _readme
+assert _changelog.lstrip().startswith("## 1.26.4")
 for stale in ["Текущая версия: v1.25", "Текущая версия add-on: **1.25"]:
     assert stale not in _readme, stale
 assert "function shortRouteNote" in html
@@ -711,3 +711,47 @@ assert _res2['downloaded_bytes'] > 0, _res2
 assert _res2['error'] == '', _res2
 assert _res2['stop_reason'] == 'remote_closed_after_response', _res2
 assert _res2.get('close_warning'), _res2
+
+# v1.26.4 release/product checks: stable full release, not a quick patch.
+assert backend.APP_VERSION == "1.26.4", backend.APP_VERSION
+_config_version_1264 = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
+assert str(_config_version_1264) == "1.26.4", _config_version_1264
+_repo_root_1264 = ROOT.parent
+_readme_1264 = (_repo_root_1264 / "README.md").read_text(encoding="utf-8")
+_changelog_1264 = (_repo_root_1264 / "CHANGELOG.md").read_text(encoding="utf-8")
+assert "Текущая версия: v1.26.4" in _readme_1264
+assert "Текущая версия add-on: **1.26.4**" in _readme_1264
+assert _changelog_1264.lstrip().startswith("## 1.26.4")
+assert backend.normalize_utls_fingerprint("helloChrome_120") == "chrome"
+assert backend.normalize_utls_fingerprint("HelloFirefox_Auto") == "firefox"
+assert backend.normalize_utls_fingerprint("randomized") == "randomized"
+_fp_server = {"type":"vless","tag":"fp-test","tls":{"enabled":True,"server_name":"example.com","utls":{"enabled":True,"fingerprint":"helloChrome_120"}}}
+assert backend.server_to_singbox_outbound(_fp_server)["tls"]["utls"]["fingerprint"] == "chrome"
+_cfg_sniff = backend.make_singbox_config(internal_socks_sniff=True)
+_internal_socks = next(i for i in _cfg_sniff["inbounds"] if i.get("tag") == "IN-SOCKS5-2080")
+assert _internal_socks.get("sniff") is True, _internal_socks
+assert _internal_socks.get("sniff_override_destination") is False, _internal_socks
+assert _internal_socks.get("sniff_timeout") == "1s", _internal_socks
+_cfg_no_sniff = backend.make_singbox_config(internal_socks_sniff=False)
+_internal_socks_safe = next(i for i in _cfg_no_sniff["inbounds"] if i.get("tag") == "IN-SOCKS5-2080")
+assert "sniff" not in _internal_socks_safe, _internal_socks_safe
+assert backend._is_singbox_sniff_compat_error('json: unknown field "sniff"') is True
+assert backend._is_singbox_sniff_compat_error('unknown uTLS fingerprint') is False
+_old_validate_1264 = backend.validate_generated_singbox_config
+try:
+    calls = []
+    def _fake_validate(cfg=None):
+        calls.append(cfg)
+        inbound = next(i for i in cfg["inbounds"] if i.get("tag") == "IN-SOCKS5-2080")
+        if inbound.get("sniff") is True:
+            raise RuntimeError('json: unknown field "sniff"')
+        return {"ok": True}
+    backend.validate_generated_singbox_config = _fake_validate
+    _fallback_cfg = backend.build_valid_singbox_config()
+    _fallback_socks = next(i for i in _fallback_cfg["inbounds"] if i.get("tag") == "IN-SOCKS5-2080")
+    assert "sniff" not in _fallback_socks, _fallback_socks
+    assert len(calls) == 2, calls
+finally:
+    backend.validate_generated_singbox_config = _old_validate_1264
+assert "SOCKS_SNI_ROUTE" not in BACKEND.read_text(encoding="utf-8"), "Do not reintroduce Python SOCKS5 pre-read/rewrite routing"
+print(json.dumps({'v1264_release_checks': True}, ensure_ascii=False))

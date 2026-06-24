@@ -1,12 +1,21 @@
 # Proxy от Бориса
 
-Текущая версия: v1.26.1
+Текущая версия: v1.26.4
 
 
-> Текущая версия add-on: **1.26.1**. Архив собран как полноценный Home Assistant add-on repository: включает `repository.yaml`, корневой `README.md`, `CHANGELOG.md`, папку add-on и все файлы, необходимые для установки/публикации.
+> Текущая версия add-on: **1.26.4**. Архив собран как полноценный Home Assistant add-on repository: включает `repository.yaml`, корневой `README.md`, `CHANGELOG.md`, папку add-on и все файлы, необходимые для установки/публикации.
 
 **Proxy от Бориса** — это Home Assistant add-on, который превращает вашу VPN/VLESS-подписку в управляемый HTTP/SOCKS5/Telegram MTProto прокси-шлюз.
 
+
+
+### Что нового в 1.26.4
+
+- Релиз собран от рабочей базы v1.26.1: внешний HTTP/SOCKS gateway и прозрачный SOCKS5 relay для Keenetic не переписаны.
+- Исправлен аварийный старт `sing-box` после обновления подписок с Hiddify/Clash/Xray-style uTLS fingerprint (`helloChrome_120`, `HelloFirefox_Auto` и похожие значения): перед генерацией `sing-box.json` fingerprint нормализуется в совместимый формат (`chrome`, `firefox`, `safari`, `ios`, `android`, `edge`, `qq`, `random`, `randomized`).
+- Для SOCKS5/IP-first сценария Keenetic включено безопасное native sniffing на внутреннем localhost SOCKS inbound sing-box. Это должно позволить core применять доменные правила/Re:filter по TLS SNI (`*.oaiusercontent.com`, `*.chatgpt.com`) без Python-перехвата TLS-пакетов.
+- Добавлен безопасный fallback: если установленная сборка `sing-box` не поддержит native sniffing-поля, add-on не должен падать при старте, а перейдёт на стабильный режим без sniffing и запишет предупреждение в журнал.
+- Не возвращалась неудачная логика `SOCKS_SNI_ROUTE`/Python pre-read/rewrite, из-за которой ломался SOCKS5 через роутер.
 
 ### Что нового в 1.26.1
 

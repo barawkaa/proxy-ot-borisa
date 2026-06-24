@@ -22,7 +22,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_NAME = "Proxy от Бориса"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 
 DIAGNOSTIC_SPEED_PRESETS = [
     {"id": "selectel_10mb", "title": "Selectel 10 MB", "url": "https://speedtest.selectel.ru/10MB", "size_hint": "10 MB", "kind": "speed"},
@@ -2930,10 +2930,10 @@ APP_SERVER_META_KEYS = {
     "servers_count",
 }
 
-# sing-box accepts a small set of uTLS fingerprints. Subscriptions from
-# Hiddify/Clash/Xray often provide values like helloChrome_120 or
-# HelloFirefox_Auto. Those values must never reach sing-box.json: sing-box
-# fails hard on unknown fingerprints and the whole proxy core does not start.
+# sing-box accepts a limited set of uTLS fingerprints. Subscriptions from
+# Hiddify/Clash/Xray can provide values like helloChrome_120 or
+# HelloFirefox_Auto. Those provider-specific values must never reach
+# generated sing-box.json, because sing-box fails hard on unknown fingerprints.
 SINGBOX_UTLS_FINGERPRINTS = {
     "chrome", "firefox", "safari", "ios", "android", "edge",
     "360", "qq", "random", "randomized",
@@ -2965,8 +2965,6 @@ def normalize_utls_fingerprint(value):
         return "randomized"
     if compact.startswith("random"):
         return "random"
-    # Safe fallback: better to start with a conservative browser fingerprint
-    # than to pass an unsupported provider-specific value into sing-box.
     return "chrome"
 
 def normalize_server_runtime_compat(server):
@@ -2980,7 +2978,7 @@ def normalize_server_runtime_compat(server):
             utls["fingerprint"] = normalize_utls_fingerprint(utls.get("fingerprint") or utls.get("fp"))
             utls.pop("fp", None)
             tls["utls"] = utls
-        elif tls.get("enabled") and item.get("type") in {"vless", "trojan", "vmess"}:
+        elif tls.get("enabled") and str(item.get("type") or "").lower() in {"vless", "trojan", "vmess"}:
             tls["utls"] = {"enabled": True, "fingerprint": "chrome"}
         item["tls"] = tls
     return item
@@ -3009,7 +3007,8 @@ def server_to_singbox_outbound(server):
     sing-box rejects unknown outbound fields, so these keys must never be
     written into /tmp/boris-proxy/sing-box.json.
     """
-    item = normalize_server_runtime_compat(server)
+    server = normalize_server_runtime_compat(server)
+    item = dict(server)
     # Keep this list deliberately broad: these are application metadata keys,
     # not sing-box outbound schema fields. If any of them reaches
     # /tmp/boris-proxy/sing-box.json, sing-box can refuse to start with
@@ -4114,8 +4113,8 @@ def parse_clash_yaml_vless(text):
         tls_enabled = bool(item.get("tls") is True or str(item.get("tls")).lower() == "true" or item.get("servername") or item.get("sni") or item.get("reality-opts") or item.get("reality_opts"))
         if tls_enabled:
             server_name = item.get("servername") or item.get("sni") or item.get("server_name") or server
-            fp = normalize_utls_fingerprint(item.get("client-fingerprint") or item.get("fingerprint") or item.get("fp") or "chrome")
-            tls = {"enabled": True, "server_name": str(server_name), "utls": {"enabled": True, "fingerprint": fp}}
+            fp = item.get("client-fingerprint") or item.get("fingerprint") or item.get("fp") or "chrome"
+            tls = {"enabled": True, "server_name": str(server_name), "utls": {"enabled": True, "fingerprint": normalize_utls_fingerprint(fp)}}
             ro = item.get("reality-opts") or item.get("reality_opts") or {}
             if isinstance(ro, dict):
                 pk = ro.get("public-key") or ro.get("public_key") or ro.get("pbk")
@@ -4301,14 +4300,14 @@ def parse_vless_uri(uri, index=0):
         outbound["flow"] = flow
     security = (q.get("security") or "").lower()
     sni = q.get("sni") or q.get("serverName") or q.get("peer") or server
-    fp = normalize_utls_fingerprint(q.get("fp") or q.get("fingerprint") or "chrome")
+    fp = q.get("fp") or q.get("fingerprint") or "chrome"
     pbk = q.get("pbk") or q.get("publicKey") or q.get("public_key")
     sid = q.get("sid") or q.get("shortId") or q.get("short_id") or ""
     if security in ["tls", "reality"] or pbk:
         tls = {
             "enabled": True,
             "server_name": sni,
-            "utls": {"enabled": True, "fingerprint": fp},
+            "utls": {"enabled": True, "fingerprint": normalize_utls_fingerprint(fp)},
         }
         if security == "reality" or pbk:
             tls["reality"] = {"enabled": True, "public_key": pbk or "", "short_id": sid}
@@ -4343,8 +4342,8 @@ def parse_trojan_uri(uri, index=0):
     security = (q.get("security") or "tls").lower()
     if security != "none":
         sni = q.get("sni") or q.get("serverName") or q.get("peer") or server
-        fp = normalize_utls_fingerprint(q.get("fp") or q.get("fingerprint") or "chrome")
-        outbound["tls"] = {"enabled": True, "server_name": sni, "utls": {"enabled": True, "fingerprint": fp}}
+        fp = q.get("fp") or q.get("fingerprint") or "chrome"
+        outbound["tls"] = {"enabled": True, "server_name": sni, "utls": {"enabled": True, "fingerprint": normalize_utls_fingerprint(fp)}}
     transport_type = (q.get("type") or q.get("transport") or "tcp").lower()
     if transport_type == "ws":
         transport = {"type": "ws"}
@@ -4610,18 +4609,7 @@ def make_singbox_config():
     # listens on localhost without auth. The gateway decides per source IP whether
     # a client may bypass auth or must authenticate normally.
     inbounds = [
-        {
-            "type": "socks",
-            "tag": socks_tag,
-            "listen": "127.0.0.1",
-            "listen_port": INTERNAL_SOCKS_PROXY_PORT,
-            # Native sing-box sniffing is safer than Python pre-reading the TLS
-            # stream. It helps IP-first SOCKS clients such as Keenetic route
-            # HTTPS by SNI, while the external SOCKS5 gateway remains transparent.
-            "sniff": True,
-            "sniff_override_destination": True,
-            "sniff_timeout": "300ms",
-        },
+        {"type": "socks", "tag": socks_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_SOCKS_PROXY_PORT},
         {"type": "http", "tag": http_tag, "listen": "127.0.0.1", "listen_port": INTERNAL_HTTP_PROXY_PORT},
     ]
     inbounds.append({"type": "socks", "tag": mtg_upstream_tag, "listen": "127.0.0.1", "listen_port": MTG_UPSTREAM_SOCKS_PORT})
@@ -5294,13 +5282,6 @@ def read_until(sock, marker=b'\r\n\r\n', limit=65536):
     return data
 
 
-# Gateway relay timeouts are deliberately split:
-# - socket timeout is only a short wake-up interval for checking stop flags;
-# - global idle timeout is applied to the whole TCP tunnel, not to one direction.
-# A silent upload direction while download is active is normal for HTTPS/HTTP2/WebSocket.
-RELAY_SOCKET_TIMEOUT_SECONDS = 5
-RELAY_GLOBAL_IDLE_TIMEOUT_SECONDS = 1800
-
 def classify_socket_close(error):
     """Classify expected TCP relay/socket shutdowns for readable logs.
 
@@ -5326,30 +5307,15 @@ def classify_socket_close(error):
 
 
 def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
-    """Relay two TCP sockets reliably for long-lived bidirectional streams.
+    """Relay two TCP sockets reliably for long-lived streams.
 
-    The relay must not close the whole tunnel just because one direction is
-    temporarily idle. Browsers, HTTP/2, WebSocket and file uploads often have
-    long pauses in one direction while the opposite direction is still alive.
-
-    Rules:
-    - socket.timeout is a wake-up tick, not a close reason;
-    - global idle timeout is based on activity in both directions;
-    - EOF in one direction performs TCP half-close only;
-    - sockets are closed only after both pumps finish, fatal error, service stop
-      or full-tunnel idle timeout.
+    v1.25.3 used non-blocking sockets with sendall(). On a loaded Raspberry Pi or
+    a slow client this can raise BlockingIOError/partial-send situations and close
+    large downloads early. The gateway must be boring and stable: two blocking
+    forwarder threads, explicit half-close, byte accounting, no heavy logic in the
+    hot path.
     """
     stop = threading.Event()
-    last_activity = {"ts": time.monotonic()}
-    state_lock = threading.Lock()
-
-    def mark_activity():
-        with state_lock:
-            last_activity["ts"] = time.monotonic()
-
-    def tunnel_idle_for():
-        with state_lock:
-            return time.monotonic() - float(last_activity.get("ts") or time.monotonic())
 
     def close_quiet(sock):
         try:
@@ -5368,23 +5334,14 @@ def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
             try:
                 src.setblocking(True)
                 dst.setblocking(True)
-                src.settimeout(float(RELAY_SOCKET_TIMEOUT_SECONDS))
-                dst.settimeout(float(RELAY_SOCKET_TIMEOUT_SECONDS))
+                src.settimeout(300)
+                dst.settimeout(300)
             except Exception:
                 pass
             while not stop.is_set() and not AUTH_GATEWAY_STOP.is_set():
-                try:
-                    data = src.recv(65536)
-                except socket.timeout:
-                    if tunnel_idle_for() >= float(RELAY_GLOBAL_IDLE_TIMEOUT_SECONDS):
-                        log('GATEWAY', 'RELAY_CLOSE', f'Relay tunnel idle timeout after {int(RELAY_GLOBAL_IDLE_TIMEOUT_SECONDS)}s', actor='gateway', action='relay_close', extra={'direction': direction, 'reason': 'tunnel_idle_timeout'})
-                        stop.set()
-                        break
-                    continue
+                data = src.recv(65536)
                 if not data:
-                    log('GATEWAY', 'RELAY_CLOSE', f'Relay direction {direction}: peer closed', actor='gateway', action='relay_close', extra={'direction': direction, 'reason': 'peer_eof'})
                     break
-                mark_activity()
                 dst.sendall(data)
                 try:
                     tap = upload_tap if direction == 'upload' else download_tap
@@ -5403,10 +5360,8 @@ def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
                 log('GATEWAY', 'RELAY_CLOSE', f"Relay direction {direction}: {close_info.get('label')}", actor='gateway', action='relay_close', extra={'direction': direction, 'reason': close_info.get('reason'), 'error_type': type(e).__name__})
             else:
                 log('GATEWAY', 'RELAY_ERROR', f'Relay direction {direction} error: {type(e).__name__}: {e}', actor='gateway', action='relay_error', extra={'direction': direction, 'error_type': type(e).__name__})
-                stop.set()
         finally:
-            # Half-close the destination write side so the opposite direction can
-            # still deliver pending response data. Do not set stop here.
+            stop.set()
             shutdown_write(dst)
 
     threads = [
@@ -5414,21 +5369,19 @@ def relay_pair(a, b, activity_key=None, upload_tap=None, download_tap=None):
         threading.Thread(target=pump, args=(b, a, 'download'), name='gateway-relay-download', daemon=True),
     ]
     try:
-        mark_activity()
         for th in threads:
             th.start()
-        while any(th.is_alive() for th in threads) and not AUTH_GATEWAY_STOP.is_set():
+        while not stop.is_set() and any(th.is_alive() for th in threads) and not AUTH_GATEWAY_STOP.is_set():
             for th in threads:
                 th.join(timeout=0.5)
-            if stop.is_set():
-                break
     finally:
         stop.set()
         close_quiet(a)
         close_quiet(b)
         for th in threads:
             if th.is_alive():
-                th.join(timeout=0.5)
+                th.join(timeout=0.2)
+
 
 
 
@@ -6101,6 +6054,9 @@ def clash_request(method, path, body=None, timeout=8):
 
 def write_config(path=None, cfg=None):
     cfg = cfg or make_singbox_config()
+    unsupported = find_unsupported_utls_fingerprints(cfg)
+    if unsupported:
+        raise RuntimeError("Unsupported uTLS fingerprint reached sing-box config: " + json.dumps(unsupported, ensure_ascii=False))
     target = Path(path or SINGBOX_CONFIG)
     write_json(target, cfg)
     return cfg
@@ -6122,9 +6078,6 @@ def stop_singbox():
 
 def validate_generated_singbox_config(cfg=None):
     cfg = cfg or make_singbox_config()
-    unsupported = find_unsupported_utls_fingerprints(cfg)
-    if unsupported:
-        raise RuntimeError("Unsupported uTLS fingerprint reached sing-box config: " + json.dumps(unsupported, ensure_ascii=False))
     tmp = TMP_DIR / f"sing-box.check.{os.getpid()}.{secrets.token_hex(4)}.json"
     write_json(tmp, cfg)
     try:
@@ -6147,9 +6100,6 @@ def validate_generated_singbox_config(cfg=None):
 def start_singbox(prechecked_config=None):
     global singbox_process, last_error, SINGBOX_STARTED_AT
     cfg = prechecked_config or make_singbox_config()
-    unsupported = find_unsupported_utls_fingerprints(cfg)
-    if unsupported:
-        raise RuntimeError("Unsupported uTLS fingerprint reached runtime config: " + json.dumps(unsupported, ensure_ascii=False))
     write_config(SINGBOX_CONFIG, cfg)
     log("SING_BOX", "START", f"Starting sing-box with {SINGBOX_CONFIG}")
     singbox_process = subprocess.Popen([SINGBOX_BIN, "run", "-c", str(SINGBOX_CONFIG)], stdout=sys.stdout, stderr=sys.stderr)

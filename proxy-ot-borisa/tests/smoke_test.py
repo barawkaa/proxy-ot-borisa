@@ -546,12 +546,12 @@ assert "Диагностика Proxy/VPN" not in html
 assert 'subscriptionSourcesMiniHtml' in html and 'Трафик по источникам серверов:' in html
 assert '"traffic": traffic' in backend_text and 'subscription_traffic_refresh' in backend_text
 
-# Dockerfile build sanity. v2.0.1 pins sing-box instead of using :latest:
-# sing-box 1.13+ removed legacy inbound fields that v1.x generated, and moving
-# latest tags broke production startup. mtg-multi remains a prebuilt image.
+# Dockerfile build sanity. sing-box is pinned: latest moved to 1.13+ and rejected
+# the legacy inbound format used by the current stable runtime generator.
+# mtg remains prebuilt, not built from source inside Home Assistant.
 dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 assert "ghcr.io/sagernet/sing-box:latest" not in dockerfile
-assert "SING_BOX_IMAGE=ghcr.io/sagernet/sing-box:v1.12.12" in dockerfile
+assert "ghcr.io/sagernet/sing-box:v1.12.12" in dockerfile
 assert "ghcr.io/dolonet/mtg-multi:latest" in dockerfile
 assert "go build" not in dockerfile
 assert "golang:" not in dockerfile
@@ -651,66 +651,39 @@ try:
 finally:
     backend.gateway_activity_update_destination = _old_update_12518
 
+
+# v2.0.2 recovery checks: keep stable v1.26.1 SOCKS hot path, but protect runtime
+# from unsupported subscription fingerprints and floating sing-box latest.
+assert backend.normalize_utls_fingerprint("helloChrome_120") == "chrome"
+assert backend.normalize_utls_fingerprint("HelloFirefox_Auto") == "firefox"
+_test_server = {"type":"vless","tag":"T","server":"example.com","server_port":443,"uuid":"00000000-0000-0000-0000-000000000000","tls":{"enabled":True,"server_name":"example.com","utls":{"enabled":True,"fingerprint":"helloChrome_120"}}}
+_out = backend.server_to_singbox_outbound(_test_server)
+assert _out["tls"]["utls"]["fingerprint"] == "chrome"
+_cfg = backend.make_singbox_config()
+assert not backend.find_unsupported_utls_fingerprints(_cfg)
+_docker = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+assert "sing-box:latest" not in _docker
+assert "ghcr.io/sagernet/sing-box:v1.12.12" in _docker
+_backend_text = BACKEND.read_text(encoding="utf-8")
+assert "SOCKS_SNI_ROUTE" not in _backend_text
+for _inb in _cfg.get("inbounds", []):
+    if _inb.get("tag", "").startswith("IN-SOCKS5-"):
+        assert "sniff" not in _inb
+        assert "sniff_override_destination" not in _inb
+
 print(json.dumps({'sni_tap_checks': True}, ensure_ascii=False))
 
-# v2.0.1: gateway relay must not close a live tunnel just because one
-# direction is idle or half-closed. This is the regression that broke
-# SOCKS5 behind Keenetic while HTTP 2081 still worked.
-def _relay_socketpair():
-    client_end, relay_client = socket.socketpair()
-    relay_upstream, upstream_end = socket.socketpair()
-    return client_end, relay_client, relay_upstream, upstream_end
-
-_old_relay_socket_timeout = backend.RELAY_SOCKET_TIMEOUT_SECONDS
-_old_relay_global_idle = backend.RELAY_GLOBAL_IDLE_TIMEOUT_SECONDS
-_old_log_fn = backend.log
-try:
-    backend.RELAY_SOCKET_TIMEOUT_SECONDS = 0.15
-    backend.RELAY_GLOBAL_IDLE_TIMEOUT_SECONDS = 3
-    backend.log = lambda *a, **k: None
-
-    c, ra, rb, u = _relay_socketpair()
-    t = threading.Thread(target=backend.relay_pair, args=(ra, rb), daemon=True)
-    t.start()
-    c.sendall(b'hello')
-    u.settimeout(1)
-    assert u.recv(5) == b'hello'
-    time.sleep(0.5)  # longer than one socket timeout; must not close tunnel
-    u.sendall(b'world')
-    c.settimeout(1)
-    assert c.recv(5) == b'world'
-    c.close(); u.close(); t.join(2)
-
-    c, ra, rb, u = _relay_socketpair()
-    t = threading.Thread(target=backend.relay_pair, args=(ra, rb), daemon=True)
-    t.start()
-    c.sendall(b'GET / HTTP/1.1\r\n\r\n')
-    u.settimeout(1)
-    assert u.recv(18).startswith(b'GET /')
-    c.shutdown(socket.SHUT_WR)
-    time.sleep(0.2)
-    u.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK')
-    c.settimeout(1)
-    assert b'200 OK' in c.recv(128)
-    c.close(); u.close(); t.join(2)
-finally:
-    backend.RELAY_SOCKET_TIMEOUT_SECONDS = _old_relay_socket_timeout
-    backend.RELAY_GLOBAL_IDLE_TIMEOUT_SECONDS = _old_relay_global_idle
-    backend.log = _old_log_fn
-
-print(json.dumps({'relay_idle_regression_checks': True}, ensure_ascii=False))
-
-# v2.0.1 release/product checks: this release is not only syntax-valid, it must
+# v1.26.1 release/product checks: this release is not only syntax-valid, it must
 # keep public version files aligned and keep the cleaned UI concepts present.
-assert backend.APP_VERSION == "2.0.1", backend.APP_VERSION
+assert backend.APP_VERSION == "2.0.2", backend.APP_VERSION
 _config_version = yaml.safe_load(CONFIG.read_text(encoding="utf-8")).get("version")
-assert str(_config_version) == "2.0.1", _config_version
+assert str(_config_version) == "2.0.2", _config_version
 _repo_root = ROOT.parent
 _readme = (_repo_root / "README.md").read_text(encoding="utf-8")
 _changelog = (_repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
-assert "Текущая версия: v2.0.1" in _readme
-assert "Текущая версия add-on: **2.0.1**" in _readme
-assert _changelog.lstrip().startswith("## 2.0.1")
+assert "Текущая версия: v2.0.2" in _readme
+assert "Текущая версия add-on: **2.0.2**" in _readme
+assert _changelog.lstrip().startswith("## 2.0.2")
 for stale in ["Текущая версия: v1.25", "Текущая версия add-on: **1.25"]:
     assert stale not in _readme, stale
 assert "function shortRouteNote" in html
@@ -758,34 +731,3 @@ assert _res2['downloaded_bytes'] > 0, _res2
 assert _res2['error'] == '', _res2
 assert _res2['stop_reason'] == 'remote_closed_after_response', _res2
 assert _res2.get('close_warning'), _res2
-
-# v2.0.1 release integrity: the runtime core must not depend on a moving
-# sing-box:latest tag, because latest can remove config fields and break startup.
-dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8')
-assert 'ghcr.io/sagernet/sing-box:latest' not in dockerfile
-assert 'SING_BOX_IMAGE=ghcr.io/sagernet/sing-box:v1.12.12' in dockerfile
-assert backend.APP_VERSION == '2.0.1'
-assert CONFIG.read_text(encoding='utf-8').split('version:', 1)[1].splitlines()[0].strip() == '2.0.1'
-
-# v2.0.1: provider-specific uTLS fingerprints must be normalized before they
-# reach sing-box.json, both for imported links and already-saved server objects.
-assert backend.normalize_utls_fingerprint('helloChrome_120') == 'chrome'
-assert backend.normalize_utls_fingerprint('HelloFirefox_Auto') == 'firefox'
-assert backend.normalize_utls_fingerprint('randomized') == 'randomized'
-_vless = backend.parse_vless_uri('vless://00000000-0000-0000-0000-000000000000@example.test:443?security=reality&sni=example.test&fp=helloChrome_120&pbk=abc&sid=01#helloChrome')
-assert _vless['tls']['utls']['fingerprint'] == 'chrome', _vless
-_saved = {'type':'vless','tag':'saved','server':'example.test','server_port':443,'uuid':'00000000-0000-0000-0000-000000000000','tls':{'enabled':True,'server_name':'example.test','utls':{'enabled':True,'fingerprint':'helloChrome_120'}}}
-_clean_saved = backend.server_to_singbox_outbound(_saved)
-assert _clean_saved['tls']['utls']['fingerprint'] == 'chrome', _clean_saved
-_cfg2 = backend.make_singbox_config()
-assert backend.find_unsupported_utls_fingerprints(_cfg2) == [], backend.find_unsupported_utls_fingerprints(_cfg2)
-
-# v2.0.1: IP-first SOCKS5 is handled by native sing-box sniffing on the internal
-# localhost SOCKS inbound only. The external Python gateway must remain transparent.
-_socks_in = [i for i in _cfg2.get('inbounds', []) if i.get('tag') == 'IN-SOCKS5-2080'][0]
-assert _socks_in.get('listen') == '127.0.0.1'
-assert _socks_in.get('listen_port') == backend.INTERNAL_SOCKS_PROXY_PORT
-assert _socks_in.get('sniff') is True
-assert _socks_in.get('sniff_override_destination') is True
-assert _socks_in.get('sniff_timeout') == '300ms'
-assert 'SOCKS_SNI_ROUTE' not in backend_text

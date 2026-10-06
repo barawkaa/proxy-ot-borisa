@@ -194,7 +194,8 @@ class Gateway:
     def flush(self):
         if self.pending:self.store.sessions(self.pending);self.pending=[]
         if self.usage_pending:
-            self.store.add_usage([(uid,*counts) for uid,counts in self.usage_pending.items()]);self.usage_pending.clear();self.usage_cache=self.store.usage()
+            self.store.add_usage([(uid,*counts) for uid,counts in self.usage_pending.items()]);self.usage_pending.clear()
+        self.usage_cache=self.store.usage()
         self.bans={k:v for k,v in self.bans.items() if v>time.time()}
 
     def disconnect(self,client_id=''):

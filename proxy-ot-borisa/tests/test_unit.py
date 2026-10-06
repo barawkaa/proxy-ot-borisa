@@ -113,3 +113,13 @@ class AccessTests(unittest.TestCase):
             self.assertEqual(g.trusted('192.168.1.2','http')['id'],u['id']);self.assertIsNone(g.trusted('192.168.1.3','http'));self.assertIsNone(g.trusted('192.168.1.2','socks'));self.assertIsNone(g.authenticate(u['username'],'wrong','http'));s.db.close()
 
 if __name__=='__main__':unittest.main()
+
+class MoreRegressionTests(unittest.TestCase):
+    def test_native_profile_array_name(self):
+        profile=[{'remarks':'🇫🇷 Франция','outbounds':[{'type':'trojan','tag':'proxy','server':'example.com','server_port':443,'password':'p'},{'type':'direct','tag':'direct'}]}]
+        r=parse_payload(json.dumps(profile));self.assertEqual(len(r['servers']),1);self.assertEqual(r['servers'][0]['name'],'🇫🇷 Франция')
+    def test_history_cap(self):
+        with tempfile.TemporaryDirectory() as d:
+            store=Store(d);c=defaults();c['settings']['event_records']=3;store.save(c)
+            for i in range(8):store.event('test',str(i))
+            self.assertEqual(len(store.list('events')),3);store.db.close()

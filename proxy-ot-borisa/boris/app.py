@@ -22,7 +22,7 @@ from .migration import migrate
 from .runtime import Runtime
 from .gateway import Gateway
 from .health import Health
-from .subscriptions import parse_payload, fetch_subscription
+from .subscriptions import parse_payload, fetch_subscription, read_limited
 from .routing import explain
 
 
@@ -31,7 +31,7 @@ class Application:
         self.store=Store(root);migrate(self.store)
         self.runtime=Runtime(self.store);self.gateway=Gateway(self.store);self.health=Health(self.store,self.runtime)
         self.mutation=asyncio.Lock();self.jobs={};self.background=[];self.stopping=False;self.heartbeat=time.time()
-        self.tg_stats={};self.tg_previous={};self.tg_active={};self.boot_error='';self.booted=False;self.current_task=None
+        self.tg_stats={};self.tg_previous={};self.tg_active={};self.tg_epoch=None;self.boot_error='';self.booted=False;self.current_task=None
         self.source_retry={};self.last_cleanup=0;self.last_rules=0;self.active_job=None;self.last_flush=0;self.next_boot=0;self.core_connections=[]
         self.ui=Path(__file__).resolve().parent.parent/'ui'
         self.web=web.Application(client_max_size=8*1024**2,middlewares=[self.guard])
@@ -143,7 +143,9 @@ class Application:
         if action=='rules':return web.json_response(self.job('Обновление списков',self.update_rules))
         if action=='diagnostics':return web.json_response(self.job('Проверка приложения',self.diagnostics))
         if action=='restart':return web.json_response(self.job('Восстановление сервисов',self.restart))
-        if action=='disconnect':self.gateway.disconnect(b.get('id',''));return web.json_response({'ok':True})
+        if action=='disconnect':
+            self.gateway.disconnect(b.get('id',''))
+            return web.json_response({'ok':True,'note':'HTTP/SOCKS5 отключены. Для отзыва Telegram отключите доступ в карточке клиента.'})
         if action=='cleanup':return web.json_response(self.store.cleanup(bool(b.get('clear'))))
         if action=='route-test':
             u=next((x for x in self.store.config['clients'] if x['id']==b.get('client_id')),None)
@@ -205,8 +207,7 @@ class Application:
                     if not rule.get('enabled'):continue
                     if not re.fullmatch('[A-Za-z0-9_-]{1,80}',rule['id']):raise ValueError('Недопустимый ID списка')
                     async with session.get(rule['url']) as r:
-                        r.raise_for_status();body=await r.content.read(8*1024**2+1)
-                        if len(body)>8*1024**2:raise ValueError('Список больше 8 МБ')
+                        r.raise_for_status();body=await read_limited(r.content,8*1024**2)
                     # Content-addressed file: never overwrite last-good before validation.
                     import hashlib
                     digest=hashlib.sha256(body).hexdigest()[:16];path=directory/(rule['id']+'-'+digest+('.srs' if rule['format']=='binary' else '.json'))
@@ -219,7 +220,7 @@ class Application:
                     rule['cache_path']=str(path);rule['updated_at']=time.time()
                 if c['security']['country_enabled']:
                     async with session.get(c['security']['country_url']) as r:
-                        r.raise_for_status();raw=await r.content.read(1024**2)
+                        r.raise_for_status();raw=await read_limited(r.content,1024**2)
                     c['security']['country_cidrs']=[str(ipaddress.ip_network(x.strip())) for x in raw.decode().splitlines() if x.strip()]
             await self.commit(c)
             keep={x.get('cache_path') for x in c['routing']['sources']}
@@ -256,6 +257,11 @@ class Application:
             self.tg_active={}
             return
         stats=await self.runtime.stats();users=stats.get('users',{});records=[]
+        epoch=stats.get('started_at')
+        if epoch!=self.tg_epoch:
+            self.tg_previous={};self.tg_epoch=epoch
+            for rec in self.tg_active.values():rec['ended']=time.time();rec['result']='service_restarted';records.append(rec)
+            self.tg_active={}
         for u in self.store.config['clients']:
             x=users.get(u['username'],{});key=u['id'];counters=(int(x.get('bytes_in',0)),int(x.get('bytes_out',0)))
             prev=self.tg_previous.get(key,(0,0));self.gateway.usage_pending[key][0]+=max(0,counters[0]-prev[0]);self.gateway.usage_pending[key][1]+=max(0,counters[1]-prev[1]);self.tg_previous[key]=counters

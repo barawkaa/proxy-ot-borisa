@@ -11,7 +11,8 @@ def rank(result,now=None):
     now=time.time() if now is None else now
     if not result or now-result.get('checked_at',0)>600 or not result.get('foreign_ok'):return (9,999999)
     tier=0 if result.get('russian_ok') else 1
-    return (tier,float(result.get('latency_ms') or 99999)+result.get('failure_rate',0)*1000)
+    service_penalty=500 if any(x.get('status')!='ok' for x in result.get('services',[])) else 0
+    return (tier,float(result.get('latency_ms') or 99999)+result.get('failure_rate',0)*1000+service_penalty)
 
 
 class Health:

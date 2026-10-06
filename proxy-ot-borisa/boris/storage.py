@@ -54,11 +54,13 @@ class Store:
                 self.db.execute('UPDATE events SET count=count+1,ts=? WHERE id=?', (time.time(), row[0]))
             else:
                 self.db.execute('INSERT INTO events(ts,kind,message) VALUES(?,?,?)', (time.time(), kind, message[:500]))
+            self.db.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY ts DESC LIMIT ?)',(self.config['settings']['event_records'],))
             self.db.commit()
 
     def sessions(self, records):
         with self.lock:
             self.db.executemany('INSERT OR REPLACE INTO sessions VALUES(:id,:client_id,:name,:protocol,:ip,:destination,:started,:ended,:upload,:download,:result)', records)
+            self.db.execute('DELETE FROM sessions WHERE rowid NOT IN (SELECT rowid FROM sessions ORDER BY started DESC LIMIT ?)',(self.config['settings']['history_records'],))
             self.db.commit()
 
     def add_usage(self, records):

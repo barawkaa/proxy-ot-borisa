@@ -33,3 +33,25 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/api/backup');self.assertEqual(r.status,200);self.assertIn('attachment',r.headers['Content-Disposition']);self.assertEqual((await r.json())['config']['schema'],5)
 
 if __name__=='__main__':unittest.main()
+
+class TransferTests(unittest.IsolatedAsyncioTestCase):
+    async def test_subscription_chunked_body_is_complete(self):
+        import asyncio
+        from aiohttp import web
+        from boris.subscriptions import fetch_subscription
+        payload='vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls#First\nvless://22222222-2222-4222-8222-222222222222@example.net:443?security=tls#Second'
+        async def fragmented(request):
+            response=web.StreamResponse();await response.prepare(request)
+            for chunk in [payload[:40],payload[40:100],payload[100:]]:
+                await response.write(chunk.encode());await asyncio.sleep(.01)
+            await response.write_eof();return response
+        app=web.Application();app.router.add_get('/sub',fragmented)
+        async with TestServer(app) as server:
+            result=await fetch_subscription(str(server.make_url('/sub')),'test')
+            self.assertEqual(len(result['servers']),2)
+    async def test_oversized_stream_rejected(self):
+        from boris.subscriptions import read_limited
+        class Stream:
+            async def iter_chunked(self,n):
+                yield b'123';yield b'456'
+        with self.assertRaises(ValueError):await read_limited(Stream(),5)

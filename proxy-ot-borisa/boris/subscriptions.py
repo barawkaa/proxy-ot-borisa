@@ -14,6 +14,15 @@ SERVICE_TYPES = {'selector','urltest','direct','block','dns'}
 MAX_BYTES = 4*1024*1024
 
 
+async def read_limited(stream, limit):
+    chunks=[];size=0
+    async for chunk in stream.iter_chunked(65536):
+        size+=len(chunk)
+        if size>limit:raise ValueError('Ответ превышает допустимый размер')
+        chunks.append(chunk)
+    return b''.join(chunks)
+
+
 def unbase(text):
     return base64.urlsafe_b64decode(text.strip() + '=' * (-len(text.strip())%4)).decode('utf-8-sig')
 
@@ -21,7 +30,7 @@ def unbase(text):
 def tls_options(q, default=False):
     if q.get('security','tls' if default else '') not in ('tls','reality'):
         return None
-    tls = {'enabled':True, 'server_name':q.get('sni') or q.get('peer') or '', 'insecure':str(q.get('allowInsecure','0')).lower() in ('1','true')}
+    tls = {'enabled':True, 'server_name':q.get('sni') or q.get('peer') or '', 'insecure':str(q.get('allowInsecure',q.get('insecure','0'))).lower() in ('1','true')}
     if q.get('alpn'):
         tls['alpn'] = q['alpn'].split(',')
     if q.get('fp'):
@@ -199,6 +208,7 @@ def parse_payload(text, source_id='manual'):
             try:text=unbase(text)
             except Exception: pass
         candidates=[line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+    if len(candidates)>500:raise ValueError('В одном источнике допускается не более 500 подключений')
     servers=[]; errors=[]; seen=set(); total=0
     for idx,item in enumerate(candidates):
         if isinstance(item,dict) and item.get('type') in SERVICE_TYPES: continue
@@ -207,6 +217,10 @@ def parse_payload(text, source_id='manual'):
             if isinstance(item,str): name,o=parse_uri(item)
             elif kind=='clash':name,o=parse_clash(item)
             elif kind=='xray' or 'outbounds' in item and any('protocol' in x for x in item['outbounds']):name,o=parse_xray(item)
+            elif 'outbounds' in item:
+                remote=[x for x in item['outbounds'] if x.get('type') not in SERVICE_TYPES]
+                if len(remote)!=1:raise ValueError('Неподдерживаемая составная конфигурация sing-box')
+                o=copy.deepcopy(remote[0]);name=item.get('remarks') or item.get('name') or o.get('tag','Сервер')
             else:
                 o=copy.deepcopy(item);name=o.pop('name',None) or o.get('tag','Сервер')
                 # v4 UI metadata is not a core field.
@@ -232,8 +246,7 @@ async def fetch_subscription(address, source_id, proxy=None):
                 try:
                     async with session.get(address,headers={'User-Agent':ua},proxy=via) as r:
                         r.raise_for_status()
-                        body=await r.content.read(MAX_BYTES+1)
-                        if len(body)>MAX_BYTES:raise ValueError('Подписка больше 4 МБ')
+                        body=await read_limited(r.content,MAX_BYTES)
                         parsed=parse_payload(body.decode('utf-8-sig'),source_id)
                         parsed['user_agent']=ua
                         parsed['traffic']={k:int(v) for k,v in re.findall(r'(upload|download|total|expire)=(\d+)',r.headers.get('subscription-userinfo',''))}

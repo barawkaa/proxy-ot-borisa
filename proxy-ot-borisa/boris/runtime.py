@@ -98,6 +98,8 @@ class Runtime:
                 self.error='Новая конфигурация не запустилась; выполнен возврат к предыдущей'
                 raise RuntimeError(self.error) from None
             self.last_good=cfg;self.started=time.time();self.error='';self.next_restart=0
+            chosen=next(x['default'] for x in cfg['outbounds'] if x['tag']=='vpn')
+            self.selected='' if chosen=='unavailable' else chosen
             await self.apply_mtg(config)
 
     async def select(self,tag):

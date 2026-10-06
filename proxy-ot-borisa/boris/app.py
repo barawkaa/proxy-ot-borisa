@@ -31,7 +31,7 @@ class Application:
         self.store=Store(root);migrate(self.store)
         self.runtime=Runtime(self.store);self.gateway=Gateway(self.store);self.health=Health(self.store,self.runtime)
         self.mutation=asyncio.Lock();self.jobs={};self.background=[];self.stopping=False;self.heartbeat=time.time()
-        self.tg_stats={};self.tg_previous={};self.tg_active={};self.boot_error='';self.booted=False
+        self.tg_stats={};self.tg_previous={};self.tg_active={};self.boot_error='';self.booted=False;self.current_task=None
         self.source_retry={};self.last_cleanup=0;self.last_rules=0;self.active_job=None;self.last_flush=0;self.next_boot=0;self.core_connections=[]
         self.ui=Path(__file__).resolve().parent.parent/'ui'
         self.web=web.Application(client_max_size=8*1024**2,middlewares=[self.guard])
@@ -118,7 +118,8 @@ class Application:
         async with self.mutation:
             c=self.store.snapshot();source=next(x for x in c['sources'] if x['id']==source_id)
             self.source_retry[source_id]=time.time()+300
-            parsed=await fetch_subscription(source['url'],source_id)
+            proxy=('http://__selected:'+self.runtime.password+'@127.0.0.1:12085') if self.runtime.selected else None
+            parsed=await fetch_subscription(source['url'],source_id,proxy)
             await self.runtime.validate_servers(parsed['servers'])
             old={s['id']:s for s in c['servers'] if s['source_id']==source_id}
             for node in parsed['servers']:
@@ -247,7 +248,13 @@ class Application:
         await self.health.current_check();return self.runtime.status()
 
     async def sample_telegram(self):
-        if not self.runtime.status()['telegram']:self.tg_stats={};return
+        if not self.runtime.status()['telegram']:
+            self.tg_stats={};self.tg_previous={}
+            records=[]
+            for rec in self.tg_active.values():rec['ended']=time.time();rec['result']='service_stopped';records.append(rec)
+            if records:self.store.sessions(records)
+            self.tg_active={}
+            return
         stats=await self.runtime.stats();users=stats.get('users',{});records=[]
         for u in self.store.config['clients']:
             x=users.get(u['username'],{});key=u['id'];counters=(int(x.get('bytes_in',0)),int(x.get('bytes_out',0)))
@@ -276,9 +283,10 @@ class Application:
                     if now-self.last_flush>=30:
                         self.gateway.flush();self.store.cleanup();self.last_flush=now
                     if now-self.last_cleanup>=3600:self.store.cleanup();self.last_cleanup=now
+                    if now-self.health.last_current>=s['check_interval'] and (not self.current_task or self.current_task.done()):
+                        self.current_task=asyncio.create_task(self.check_current())
                     if not self.active_job or self.active_job.done():
-                        if now-self.health.last_current>=s['check_interval']:self.job('Контроль подключения',self.health.current_check)
-                        elif now-self.health.last_full>=s['availability_interval']:self.job('Проверка доступности',lambda:self.health.scan(True))
+                        if now-self.health.last_full>=s['availability_interval']:self.job('Проверка доступности',lambda:self.health.scan(True))
                         elif now-self.health.last_scan>=s['scan_interval']:self.job('Проверка задержки',lambda:self.health.scan(False))
                         else:
                             due=next((x for x in self.store.config['sources'] if x.get('enabled') and now-x.get('updated_at',0)>=max(300,int(x.get('interval',s['subscription_interval']))) and now>=self.source_retry.get(x['id'],0)),None)
@@ -288,6 +296,11 @@ class Application:
             except asyncio.CancelledError:raise
             except Exception:self.store.event('error','Фоновая проверка не завершилась; будет повторена')
             await asyncio.sleep(10)
+
+    async def check_current(self):
+        try:await self.health.current_check()
+        except asyncio.CancelledError:raise
+        except Exception:self.store.event('error','Проверка текущего подключения не завершилась; будет повторена')
 
     async def bootstrap(self):
         try:
@@ -299,7 +312,7 @@ class Application:
         self.background=[asyncio.create_task(self.bootstrap()),asyncio.create_task(self.scheduler())]
     async def close(self,app):
         self.stopping=True
-        tasks=self.background+([self.active_job] if self.active_job else [])
+        tasks=self.background+([self.active_job] if self.active_job else [])+([self.current_task] if self.current_task else [])
         for t in tasks:t.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
         await self.gateway.close();await self.runtime.close();self.store.db.close()

@@ -26,7 +26,8 @@ class RealCoreTests(unittest.IsolatedAsyncioTestCase):
         self.reference=await asyncio.create_subprocess_exec(self.runtime.binary,'run','-c',str(p),stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL)
         await asyncio.sleep(.3)
         await self.runtime.apply(self.c);await self.runtime.select(self.c['servers'][0]['id']);await self.gateway.apply()
-        app=web.Application();app.router.add_get('/ok',lambda r:web.Response(text='BORIS_INTEGRATION_OK'))
+        async def ok(request):return web.Response(text='BORIS_INTEGRATION_OK')
+        app=web.Application();app.router.add_get('/ok',ok)
         self.runner=web.AppRunner(app);await self.runner.setup();await web.TCPSite(self.runner,'127.0.0.1',18111).start()
         async def echo(r,w):
             try:

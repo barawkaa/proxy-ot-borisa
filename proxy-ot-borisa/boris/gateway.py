@@ -37,6 +37,9 @@ async def socks_open(port,host,dest_port,username='',password=''):
         if size is None:raise OSError('SOCKS address')
         await reader.readexactly(size+2)
         return reader,writer
+    except asyncio.IncompleteReadError:
+        writer.close()
+        raise OSError('SOCKS connection closed during handshake') from None
     except BaseException:
         writer.close()
         raise
@@ -155,7 +158,10 @@ class Gateway:
                     elif h[3]==3:host=(await r.readexactly((await r.readexactly(1))[0])).decode('idna')
                     else:raise ValueError('Address type')
                     port=int.from_bytes(await r.readexactly(2),'big');destination=f'{host}:{port}'
-                    ur,uw=await socks_open(12080,host,port,user['username'],user['password']);upstream=uw
+                    try:ur,uw=await socks_open(12080,host,port,user['username'],user['password'])
+                    except OSError:
+                        w.write(b'\x05\x04\x00\x01'+b'\x00'*6);await w.drain();return
+                    upstream=uw
                     w.write(b'\x05\x00\x00\x01'+b'\x00'*6);await w.drain()
             rec={'id':uid,'client_id':user['id'],'name':user['name'],'protocol':protocol,'ip':ip,'destination':destination,'started':time.time(),'ended':0,'upload':0,'download':0,'result':'active'}
             self.active[uid]=rec

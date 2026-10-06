@@ -48,8 +48,40 @@ jobs:
           push: false
           tags: proxy-boris:5.0
           outputs: type=docker,dest=/tmp/proxy-boris-5.0.tar
+      - name: Boot the ARM64 image and check the application
+        run: |
+          docker load -i /tmp/proxy-boris-5.0.tar
+          docker run -d --name boris-smoke --network host proxy-boris:5.0
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8099/api/state -o /tmp/state.json && python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"] and s["version"]=="5.0"'; then break; fi
+            sleep 1
+          done
+          python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"]'
+          docker stop boris-smoke
       - uses: actions/upload-artifact@v4
         with:
           name: proxy-boris-5.0-arm64
           path: /tmp/proxy-boris-5.0.tar
+          retention-days: 7
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r proxy-ot-borisa/requirements.txt
+      - run: npm install --no-save playwright@1.56.1
+      - run: npx playwright install --with-deps chromium
+      - name: Desktop and mobile interaction test
+        run: |
+          python proxy-ot-borisa/tests/ui_fixture.py > /tmp/ui-fixture.log 2>&1 &
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:18099/healthz && break || sleep 1; done
+          node proxy-ot-borisa/tests/ui_test.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-previews
+          path: /tmp/ui-*.png
           retention-days: 7

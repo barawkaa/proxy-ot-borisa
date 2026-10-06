@@ -18,7 +18,7 @@ class Health:
     def __init__(self,store,runtime):
         self.store=store;self.runtime=runtime;self.results={};self.history={};self.lock=asyncio.Lock()
         self.last_switch=0;self.reason='Ожидание проверки';self.progress={'running':False,'done':0,'total':0}
-        self.last_scan=0;self.last_full=0;self.last_current=0;self.after_switch={}
+        self.last_scan=0;self.last_full=0;self.last_current=0;self.after_switch={};self.recovery_lock=asyncio.Lock()
 
     def candidates(self):
         c=self.store.config;sources={x['id']:x for x in c['sources']}
@@ -75,7 +75,7 @@ class Health:
                 await asyncio.gather(*(run(s) for s in servers))
                 self.last_scan=time.time()
                 if full:self.last_full=time.time()
-                await self.choose()
+                if not self.recovery_lock.locked():await self.choose()
             finally:self.progress['running']=False
 
     async def choose(self,failed=False):
@@ -90,6 +90,9 @@ class Health:
             self.reason='Выбранный вручную сервер недоступен; автоматическая замена отключена';return
         ordered=sorted(candidates,key=lambda x:(rank(self.results.get(x['id'])),x.get('priority',50)))
         ordered=[x for x in ordered if rank(self.results.get(x['id']))[0]<9]
+        if s['telegram_enabled']:
+            tg_ok=[x for x in ordered if self.results.get(x['id'],{}).get('telegram',{}).get('status')=='tcp_ok']
+            if tg_ok:ordered=tg_ok
         if not ordered:
             self.reason='Рабочий VPN не найден. Повторная проверка выполняется автоматически.'
             if failed:await self.runtime.select('')
@@ -117,15 +120,15 @@ class Health:
             self.last_current=0
 
     async def current_check(self):
-        if self.lock.locked():return
-        async with self.lock:
+        if self.recovery_lock.locked():return
+        async with self.recovery_lock:
             self.last_current=time.time()
             current=next((s for s in self.candidates() if s['id']==self.runtime.selected),None)
             if current:
-                first=await self.probe(current,False)
-                if first['foreign_ok']:return
+                first=await self.probe(current,True)
+                if first['foreign_ok'] and (not self.store.config['settings']['telegram_enabled'] or first.get('telegram',{}).get('status')=='tcp_ok'):return
                 second=await self.probe(current,True)
-                if second['foreign_ok']:return
+                if second['foreign_ok'] and (not self.store.config['settings']['telegram_enabled'] or second.get('telegram',{}).get('status')=='tcp_ok'):return
             # Confirmed failure: renew candidates now, not on the next scheduled scan.
             sem=asyncio.Semaphore(self.store.config['settings']['parallel_checks'])
             ordered=sorted(self.candidates(),key=lambda x:rank(self.results.get(x['id'])))

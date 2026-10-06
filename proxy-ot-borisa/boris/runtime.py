@@ -28,7 +28,7 @@ class Runtime:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
             async with session.request(method,'http://127.0.0.1:19090'+path,headers={'Authorization':'Bearer '+self.api_secret},json=data) as r:
                 r.raise_for_status()
-                return await r.json() if r.status!=204 else {}
+                return await r.json(content_type=None) if r.status!=204 else {}
 
     async def _read(self, process, name):
         while True:
@@ -108,7 +108,8 @@ class Runtime:
                 if o.get('tag')=='vpn':o['default']=tag or 'unavailable'
 
     def mtg_config(self,c):
-        s=c['settings'];users=[u for u in c['clients'] if client_enabled(u) and u.get('telegram')]
+        s=c['settings'];usage=self.store.usage()
+        users=[u for u in c['clients'] if client_enabled(u) and u.get('telegram') and (not u.get('monthly_limit_gb') or sum(usage.get(u['id'],{}).values())<u['monthly_limit_gb']*1024**3)]
         if not s['telegram_enabled'] or not users:return ''
         q=json.dumps
         lines=[f'bind-to = "0.0.0.0:{s["telegram_port"]}"','api-bind-to = "127.0.0.1:19091"','prefer-ip = "prefer-ipv4"','auto-update = false',
@@ -154,6 +155,8 @@ class Runtime:
                 except Exception:
                     self.next_restart=now+min(300,5*2**min(self.failures,6))
                     self.error='Ядро не восстановилось; следующая попытка после паузы'
+        if self.mtg_config(config)!=self.last_mtg:
+            await self.apply_mtg(config)
         if self.mtg_config(config) and now>=self.tg_next:
             try:
                 if not self.mtg or self.mtg.returncode is not None:raise RuntimeError()

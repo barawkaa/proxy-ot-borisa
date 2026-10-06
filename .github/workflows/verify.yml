@@ -1,0 +1,55 @@
+name: Verify complete application
+on:
+  push:
+    branches: [main, release/5.0]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        run: pip install -r proxy-ot-borisa/requirements.txt
+      - name: Download pinned engines
+        run: |
+          mkdir engines
+          curl --fail --location --retry 3 https://github.com/SagerNet/sing-box/releases/download/v1.12.12/sing-box-1.12.12-linux-amd64.tar.gz -o engines/sb.tar.gz
+          curl --fail --location --retry 3 https://github.com/dolonet/mtg-multi/releases/download/v1.12.0/mtg-multi-1.12.0-linux-amd64.tar.gz -o engines/mtg.tar.gz
+          tar -xzf engines/sb.tar.gz -C engines
+          tar -xzf engines/mtg.tar.gz -C engines
+      - name: Unit and real proxy integration tests
+        env:
+          PYTHONPATH: proxy-ot-borisa
+          CORE_INTEGRATION: '1'
+          SINGBOX_BIN: ${{ github.workspace }}/engines/sing-box-1.12.12-linux-amd64/sing-box
+          MTG_BIN: ${{ github.workspace }}/engines/mtg-multi-1.12.0-linux-amd64/mtg-multi
+        run: |
+          python -m compileall -q proxy-ot-borisa/boris
+          node --check proxy-ot-borisa/ui/app.js
+          python -m unittest discover -s proxy-ot-borisa/tests -v
+  build-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: proxy-ot-borisa
+          platforms: linux/arm64
+          push: false
+          tags: proxy-boris:5.0
+          outputs: type=docker,dest=/tmp/proxy-boris-5.0.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proxy-boris-5.0-arm64
+          path: /tmp/proxy-boris-5.0.tar
+          retention-days: 7

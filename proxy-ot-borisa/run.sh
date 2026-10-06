@@ -1,6 +1,4 @@
 #!/usr/bin/with-contenv bashio
-
-set -e
-
-bashio::log.info "[STAGE=BOOT] [RESULT=START] Starting Proxy от Бориса backend"
+set -euo pipefail
+umask 077
 exec python3 /app/backend.py

@@ -29,6 +29,15 @@ class Selection51(unittest.IsolatedAsyncioTestCase):
         self.h.last_switch=time.time();await self.h.choose()
         self.assertEqual(self.runtime.selected,'b');self.assertEqual(self.h.probe.await_count,3)
         event=self.store.list('events')[0]['message'];self.assertIn('860',event);self.assertIn('250',event)
+    async def test_recent_slowdown_not_hidden_by_old_median(self):
+        self.h.results['a']['median_ms']=100
+        await self.h.choose();self.assertEqual(self.runtime.selected,'b')
+    async def test_candidate_loses_universal_access_during_confirmation(self):
+        original=self.h.probe.side_effect
+        async def probe(node,*args,**kwargs):
+            if node['id']=='b':self.h.results['b'].update(russian_ok=False,russian_status='unreachable')
+            return await original(node,*args,**kwargs)
+        self.h.probe.side_effect=probe;await self.h.choose();self.runtime.select.assert_not_awaited()
     async def test_small_difference_keeps_current(self):
         self.h.results['a']=self.result(270);await self.h.choose();self.runtime.select.assert_not_awaited()
     async def test_spike_candidate_rejected(self):
@@ -104,4 +113,4 @@ class Measurements51(unittest.IsolatedAsyncioTestCase):
             path=Path(root)/'config-v5.json';path.write_text(json.dumps(c));original=path.read_bytes()
             store=Store(root)
             self.assertEqual(store.config['settings']['scan_interval'],60);self.assertEqual(store.config['settings']['switch_margin_percent'],25)
-            self.assertEqual(store.config['clients'],c['clients']);self.assertEqual(path.read_bytes(),original);store.db.close()
+            self.assertEqual(store.config['settings']['switch_hold_seconds'],300);self.assertEqual(store.config['clients'],c['clients']);self.assertEqual(path.read_bytes(),original);store.db.close()

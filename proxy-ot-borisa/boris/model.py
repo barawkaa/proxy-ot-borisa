@@ -26,6 +26,7 @@ def defaults():
             'check_interval': 60, 'scan_interval': 60, 'availability_interval': 300,
             'subscription_interval': 3600, 'parallel_checks': 3, 'check_timeout': 8,
             'switch_margin_ms': 80, 'switch_margin_percent': 25,
+            'switch_hold_seconds': 300,  # Retained solely for reading these data with release 5.0.
             'manual_failover': True, 'history_days': 7, 'history_records': 10000,
             'event_records': 5000, 'history_mb': 50, 'debug_until': 0,
             'max_connections': 512, 'idle_seconds': 600,

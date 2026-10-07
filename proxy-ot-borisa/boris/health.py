@@ -153,7 +153,13 @@ class Health:
             self.describe('Нет подтверждённого сервера для включённых сервисов; проверки продолжаются');return
         best=nodes[0];br=rank(self.results[best['id']]);cr=rank(self.results.get(current))
         if best['id']==current:
-            self.describe('Текущий сервер лучший по доступности, стабильности и измеренной задержке');return
+            latest=self.results.get(current,{}).get('latency_ms')
+            challenger=next((x for x in nodes if x['id']!=current and rank(self.results[x['id']])[:2]<=cr[:2] and latest is not None and self.enough(latest,rank(self.results[x['id']])[2])),None)
+            if challenger:
+                # A fresh slowdown must not hide behind ten older fast measurements.
+                best=challenger;br=rank(self.results[best['id']]);cr=(*cr[:2],latest)
+            else:
+                self.describe('Текущий сервер лучший по доступности, стабильности и измеренной задержке');return
         improving=not failed and self.usable(current)
         if improving:
             if br[:2]>cr[:2]:self.describe('Сохраняем текущий: у более быстрого кандидата хуже доступность или стабильность');return
@@ -171,8 +177,11 @@ class Health:
             if not any(x['id']==best['id'] for x in self.ordered()):return
             fresh=self.results.get(current,{})
             current_ms=fresh.get('latency_ms');candidate_ms=max(x for x in confirmations if x is not None)
-            if self.usable(current) and rank(self.results[best['id']])[:2]>=rank(fresh)[:2]:
-                if current_ms is None or not self.enough(current_ms,candidate_ms):
+            if self.usable(current):
+                candidate_class=rank(self.results[best['id']])[:2];current_class=rank(fresh)[:2]
+                if candidate_class>current_class:
+                    self.describe('Повторная проверка выявила худшую доступность кандидата; сохраняем текущий');return
+                if candidate_class==current_class and (current_ms is None or not self.enough(current_ms,candidate_ms)):
                     self.describe('Преимущество кандидата не подтвердилось двумя измерениями');return
             reason='Подтверждено улучшение доступности или задержки'
         else:reason='Восстановление после отказа' if failed else 'Первый рабочий сервер'

@@ -29,7 +29,6 @@ class Store:
         self.config = json.loads(self.path.read_text()) if self.path.exists() else defaults()
         # Add 5.1 defaults without overwriting personal choices.
         for key,value in defaults()['settings'].items():self.config['settings'].setdefault(key,value)
-        self.config['settings'].pop('switch_hold_seconds',None)
         if not self.config.get('health_revision'):
             if self.config['settings']['scan_interval']==180:self.config['settings']['scan_interval']=60
             self.config['health_revision']=1

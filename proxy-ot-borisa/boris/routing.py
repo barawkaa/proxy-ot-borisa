@@ -41,6 +41,10 @@ def core_config(config, internal_password, api_secret, selected='', log_path=Non
     sources={s['id']:s for s in config['sources']}
     servers=[s for s in config['servers'] if s.get('enabled',True) and not s.get('error') and sources.get(s['source_id'],{}).get('enabled',True)]
     clients=[c for c in config['clients'] if client_enabled(c)]
+    profiles=[]
+    if config['access']['enabled']:
+        profiles=[{'username':'__access_'+mode,'password':config['access']['internal_password'],'route_mode':mode} for mode in ('default','all_vpn','selected','except','direct')]
+        clients+=profiles
     outbounds=[{**s['outbound'],'tag':s['id']} for s in servers]
     tags=[s['id'] for s in servers]
     # No working VPN is fail-closed. Never silently fall back to home IP.
@@ -54,6 +58,10 @@ def core_config(config, internal_password, api_secret, selected='', log_path=Non
     rules=[{'inbound':['telegram'],'action':'route','outbound':'vpn'},
            {'inbound':['probes'],'auth_user':['__selected'],'action':'route','outbound':'vpn'}]
     for tag in tags:rules.append({'inbound':['probes'],'auth_user':[tag],'action':'route','outbound':tag})
+    if profiles:
+        names=[u['username'] for u in profiles]
+        # IP-only grants must never expose HA, the router, or cloud metadata.
+        rules.extend([{'auth_user':names,'action':'resolve'}, {'auth_user':names,'ip_is_private':True,'action':'reject'}])
     for c in clients:rules.extend(route_rules(config,c))
     rules.append({'action':'reject'})
     sets=[]

@@ -17,13 +17,15 @@ class Selection51(unittest.IsolatedAsyncioTestCase):
         async def select(tag):self.runtime.selected=tag
         self.runtime.select=AsyncMock(side_effect=select)
         self.h=Health(self.store,self.runtime);self.h.url_check=AsyncMock(return_value={'status':'ok','ms':200})
+        self.h.telegram.chain=AsyncMock(return_value={'status':'protocol_ok'})
+        self.h.telegram.media=AsyncMock(return_value={'status':'unconfigured'})
         self.h.results={x:self.result(860 if x=='a' else 250 if x=='b' else 300) for x in ('a','b','c')}
         async def probe(node,full=True,urgent=False):
             self.h.results[node['id']]['checked_at']=time.time()
             return self.h.results[node['id']]
         self.h.probe=AsyncMock(side_effect=probe)
     def result(self,ms,ru='available'):
-        return dict(checked_at=time.time(),full_at=time.time(),foreign_ok=True,russian_ok=ru=='available',russian_status=ru,latency_ms=ms,median_ms=ms,failure_rate=0,telegram={'status':'tcp_ok'})
+        return dict(checked_at=time.time(),full_at=time.time(),foreign_ok=True,russian_ok=ru=='available',russian_status=ru,latency_ms=ms,median_ms=ms,failure_rate=0,telegram={'status':'protocol_ok'})
     async def asyncTearDown(self):self.store.db.close();self.temp.cleanup()
     async def test_big_improvement_does_not_wait_five_minutes(self):
         self.h.last_switch=time.time();await self.h.choose()

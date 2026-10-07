@@ -27,11 +27,24 @@ const assert=require('node:assert/strict');
  await page.getByRole('button',{name:'Добавить доверенный адрес',exact:true}).click();await page.locator('.trusted-cidr').fill('192.168.1.20/32');
  await page.getByRole('button',{name:'Сохранить',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('dialog').open);
  const security=await page.evaluate(async()=>{const r=await fetch('api/state');return (await r.json()).config.security});assert.equal(security.trusted.length,1);assert.deepEqual(security.trusted[0].protocols,['http']);
- for(const hash of ['home','servers','telegram','proxy','history','diagnostics','settings']){
+ await page.getByRole('link',{name:'Доступ по IP',exact:true}).click();
+ await page.getByRole('button',{name:'Разрешить',exact:true}).click();
+ await page.getByRole('button',{name:/Разрешённые · 1/}).click();
+ await page.getByText('203.0.113.25',{exact:true}).first().waitFor();
+ await page.getByRole('button',{name:'Приостановить',exact:true}).click();
+ await page.getByRole('button',{name:/Запрещённые \/ пауза · 1/}).click();
+ await page.getByRole('button',{name:'Запретить',exact:true}).click();
+ await page.screenshot({path:'/tmp/ui-access.png',fullPage:true});
+ await page.getByRole('link',{name:'Главная',exact:true}).click();
+ await page.getByRole('button',{name:'Проверить сейчас',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#notice').textContent.includes('Проверено'));
+ assert.equal(await page.locator('#notice .notice').count(),1);
+ assert(!(await page.locator('#notice').innerText()).includes('Результат — в разделе'));
+ for(const hash of ['home','servers','telegram','proxy','access','protection','history','diagnostics','settings']){
    await page.goto('http://127.0.0.1:18099/#'+hash);await page.waitForTimeout(150);
  }
  await page.setViewportSize({width:390,height:844});
- for(const hash of ['home','servers','telegram','history','settings']){
+ for(const hash of ['home','servers','telegram','access','protection','history','settings']){
    await page.goto('http://127.0.0.1:18099/#'+hash);await page.waitForTimeout(200);
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,'Overflow: '+hash);
    if(hash==='home')await page.screenshot({path:'/tmp/ui-mobile.png',fullPage:true});

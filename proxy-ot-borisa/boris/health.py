@@ -4,7 +4,7 @@ import statistics
 import time
 from collections import deque
 import aiohttp
-from .gateway import socks_open
+from .telegram_probe import TelegramProbe
 
 
 def group_status(checks):
@@ -12,6 +12,7 @@ def group_status(checks):
     states=[x.get('status') for x in checks]
     if all(x=='ok' for x in states):return 'available'
     if any(x=='ok' for x in states):return 'partial'
+    if any(x=='limited' for x in states):return 'limited'
     if any(x=='restricted' for x in states):return 'restricted'
     return 'unreachable'
 
@@ -21,7 +22,7 @@ def rank(result,now=None):
     if not result or now-result.get('checked_at',0)>180 or not result.get('foreign_ok'):return (9,9,999999)
     ru=result.get('russian_status', 'available' if result.get('russian_ok') else 'unreachable')
     if now-result.get('full_at',result.get('checked_at',0))>600:ru='unknown'
-    tier=0 if ru=='available' else 1 if ru in ('partial','restricted','unknown') else 2
+    tier=0 if ru=='available' else 1 if ru in ('partial','restricted','limited','unknown') else 2
     # Reliability is a separate visible category, never invented milliseconds.
     reliability=1 if result.get('failure_rate',0)>=.4 else 0
     return (tier,reliability,float(result.get('median_ms',result.get('latency_ms')) or 99999))
@@ -29,7 +30,7 @@ def rank(result,now=None):
 
 class Health:
     def __init__(self,store,runtime):
-        self.store=store;self.runtime=runtime;self.results={};self.history={};self.lock=asyncio.Lock()
+        self.store=store;self.runtime=runtime;self.telegram=TelegramProbe(store,runtime);self.chain_result={};self.results={};self.history={};self.lock=asyncio.Lock()
         self.last_switch=0;self.reason='Ожидание проверки';self.progress={'running':False,'done':0,'total':0}
         self.last_scan=0;self.last_full=0;self.last_current=0;self.after_switch={};self.recovery_lock=asyncio.Lock()
         self.decision_lock=asyncio.Lock();self.probe_locks={};self.inflight=0;self.urgent_waiters=0;self.capacity=asyncio.Condition()
@@ -43,8 +44,18 @@ class Health:
         c=self.store.config;sources={x['id']:x for x in c['sources']}
         nodes=[x for x in self.candidates() if x.get('auto',True) and sources.get(x['source_id'],{}).get('auto',True) and rank(self.results.get(x['id']))[0]<9]
         if c['settings']['telegram_enabled']:
-            nodes=[x for x in nodes if self.results[x['id']].get('telegram',{}).get('status')=='tcp_ok' and time.time()-self.results[x['id']].get('full_at',0)<600]
-        return sorted(nodes,key=lambda x:(rank(self.results[x['id']]),x.get('priority',50),x['id']))
+            nodes=[x for x in nodes if self.usable(x['id']) and self.results[x['id']].get('telegram',{}).get('status') in ('protocol_ok','partial') and time.time()-self.results[x['id']].get('full_at',0)<600]
+        return sorted(nodes,key=lambda x:(self.node_rank(x['id']),x.get('priority',50),x['id']))
+
+    def node_rank(self,tag):
+        base=rank(self.results.get(tag));r=self.results.get(tag,{})
+        if base[0]>=9:return base
+        if not self.store.config['settings']['telegram_enabled']:return base
+        tg=r.get('telegram',{});media=tg.get('media',{})
+        media_status=media.get('status') if time.time()-media.get('checked_at',0)<600 else 'unknown'
+        quality=0 if media_status=='media_ok' else 2 if media_status=='stalled' else 1
+        if tg.get('status')!='protocol_ok':quality+=3
+        return (quality*3+base[0],base[1],base[2])
 
     def describe(self,reason):
         nodes=self.ordered();current=self.runtime.selected
@@ -61,20 +72,17 @@ class Health:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout),trust_env=False) as session:
                 async with session.get(url,proxy='http://127.0.0.1:12085',proxy_auth=aiohttp.BasicAuth(tag,self.runtime.password),allow_redirects=True,max_redirects=3) as r:
                     await r.content.read(1024)
-                    status='ok' if 200<=r.status<400 else 'restricted' if r.status in (401,403,429,451) else 'error'
-                    return {'status':status,'http_status':r.status,'ms':round((time.monotonic()-start)*1000),'url':url}
+                    challenge=r.headers.get('cf-mitigated','').lower()=='challenge'
+                    status='limited' if challenge or r.status in (401,403,429) else 'ok' if 200<=r.status<400 else 'restricted' if r.status==451 else 'error'
+                    reason='Cloudflare запросил проверку браузера' if challenge else {401:'Сайт требует авторизацию',403:'Сайт отказал автоматическому запросу; причина не подтверждена',429:'Сайт ограничил частоту запросов',451:'Сайт сообщил об ограничении по правовым причинам'}.get(r.status,'')
+                    return {'status':status,'reason':reason,'http_status':r.status,'ms':round((time.monotonic()-start)*1000),'url':url}
         except (aiohttp.ClientError,TimeoutError):return {'status':'unreachable','ms':None,'url':url}
 
     async def telegram_check(self,tag):
-        for target in self.store.config['settings']['telegram_targets'][:3]:
-            try:
-                host,port=target.rsplit(':',1)
-                async with asyncio.timeout(self.store.config['settings']['check_timeout']):
-                    _,w=await socks_open(12085,host,int(port),tag,self.runtime.password)
-                    w.close();await w.wait_closed()
-                    return {'status':'tcp_ok','detail':'TCP доступен; отправка сообщений не проверялась'}
-            except (OSError,TimeoutError,ValueError,asyncio.IncompleteReadError):continue
-        return {'status':'unreachable'}
+        result=await self.telegram.protocol(tag)
+        if self.store.config['settings']['telegram_enabled'] and result['status'] in ('protocol_ok','partial'):
+            result['media']=await self.telegram.media(tag)
+        return result
 
     async def probe(self,server,full=True,urgent=False):
         tag=server['id']
@@ -114,7 +122,9 @@ class Health:
         return res
 
     async def scan(self,full=True):
-        if self.lock.locked():return
+        if self.lock.locked():
+            async with self.lock:pass
+            return {'summary':self.scan_summary()}
         async with self.lock:
             servers=self.candidates();ids={x['id'] for x in servers}
             for mapping in (self.results,self.history,self.probe_locks):
@@ -129,11 +139,21 @@ class Health:
                 self.last_scan=time.time()
                 if full:self.last_full=time.time()
                 if not self.recovery_lock.locked():await self.choose()
+                if full and self.runtime.selected and self.store.config['settings']['telegram_enabled']:
+                    self.chain_result=await self.telegram.chain()
+                    self.chain_result['media']=await self.telegram.media(self.runtime.selected,chain=True)
+                    if self.chain_result['status']=='unreachable' or self.chain_result['media']['status']=='stalled':self.last_current=0
             finally:self.progress['running']=False
+            return {'summary':self.scan_summary()}
+
+    def scan_summary(self):
+        count=sum(self.usable(x['id']) for x in self.candidates())
+        node=next((x['name'] for x in self.candidates() if x['id']==self.runtime.selected),'нет')
+        return f'Проверено {len(self.candidates())}; доступны {count}. Выбран: {node}. {self.reason}'
 
     def usable(self,tag):
         r=self.results.get(tag,{})
-        return rank(r)[0]<9 and (not self.store.config['settings']['telegram_enabled'] or r.get('telegram',{}).get('status')=='tcp_ok')
+        return rank(r)[0]<9 and not (r.get('telegram',{}).get('media',{}).get('status')=='stalled' and time.time()-r.get('telegram',{}).get('media',{}).get('checked_at',0)<600) and (not self.store.config['settings']['telegram_enabled'] or r.get('telegram',{}).get('status') in ('protocol_ok','partial'))
 
     async def choose(self,failed=False):
         async with self.decision_lock:await self._choose(failed)
@@ -151,13 +171,13 @@ class Health:
         if not nodes:
             if failed:await self.runtime.select('')
             self.describe('Нет подтверждённого сервера для включённых сервисов; проверки продолжаются');return
-        best=nodes[0];br=rank(self.results[best['id']]);cr=rank(self.results.get(current))
+        best=nodes[0];br=self.node_rank(best['id']);cr=self.node_rank(current)
         if best['id']==current:
             latest=self.results.get(current,{}).get('latency_ms')
-            challenger=next((x for x in nodes if x['id']!=current and rank(self.results[x['id']])[:2]<=cr[:2] and latest is not None and self.enough(latest,rank(self.results[x['id']])[2])),None)
+            challenger=next((x for x in nodes if x['id']!=current and self.node_rank(x['id'])[:2]<=cr[:2] and latest is not None and self.enough(latest,rank(self.results[x['id']])[2])),None)
             if challenger:
                 # A fresh slowdown must not hide behind ten older fast measurements.
-                best=challenger;br=rank(self.results[best['id']]);cr=(*cr[:2],latest)
+                best=challenger;br=self.node_rank(best['id']);cr=(*cr[:2],latest)
             else:
                 self.describe('Текущий сервер лучший по доступности, стабильности и измеренной задержке');return
         improving=not failed and self.usable(current)
@@ -178,7 +198,7 @@ class Health:
             fresh=self.results.get(current,{})
             current_ms=fresh.get('latency_ms');candidate_ms=max(x for x in confirmations if x is not None)
             if self.usable(current):
-                candidate_class=rank(self.results[best['id']])[:2];current_class=rank(fresh)[:2]
+                candidate_class=self.node_rank(best['id'])[:2];current_class=self.node_rank(current)[:2]
                 if candidate_class>current_class:
                     self.describe('Повторная проверка выявила худшую доступность кандидата; сохраняем текущий');return
                 if candidate_class==current_class and (current_ms is None or not self.enough(current_ms,candidate_ms)):
@@ -204,11 +224,18 @@ class Health:
         if self.after_switch['status']!='ok':
             if tag in self.results:self.results[tag]['foreign_ok']=False
             self.last_current=0;self.describe('Итоговая проверка после переключения не прошла');return False
+        if self.store.config['settings']['telegram_enabled']:
+            self.chain_result=await self.telegram.chain()
+            self.chain_result['media']=await self.telegram.media(tag,chain=True,force=True)
+            if self.chain_result['status']=='unreachable' or self.chain_result['media']['status']=='stalled':
+                if tag in self.results:self.results[tag]['telegram']={'status':'unreachable'}
+                self.describe('Telegram не прошёл проверку через MTProxy; поиск другого сервера');return False
         def label(uid):
             node=next((x for x in self.store.config['servers'] if x['id']==uid),None)
             ms=self.results.get(uid,{}).get('latency_ms')
             return (node['name'] if node else 'нет сервера')+(f' ({ms} мс)' if ms is not None else '')
         message=f'{reason}: {label(previous)} → {label(tag)}'
+        if reason=='Восстановление после отказа' and previous and hasattr(self.runtime,'close_failed_routes'):await self.runtime.close_failed_routes(previous)
         self.store.event('selection',message);self.describe(message);return True
 
     async def current_check(self):
@@ -218,9 +245,23 @@ class Health:
             current=next((s for s in self.candidates() if s['id']==self.runtime.selected),None)
             if current:
                 await self.probe(current,True,urgent=True)
-                if self.usable(current['id']):await self.choose();return
+                if self.usable(current['id']):
+                    if self.store.config['settings']['telegram_enabled']:
+                        self.chain_result=await self.telegram.chain()
+                        self.chain_result['media']=await self.telegram.media(current['id'],chain=True)
+                        if self.chain_result['status']=='unreachable' or self.chain_result['media']['status']=='stalled':
+                            self.results[current['id']]['telegram']['status']='unreachable'
+                        else:await self.choose();return
+                    else:await self.choose();return
                 await self.probe(current,True,urgent=True)
-                if self.usable(current['id']):await self.choose();return
+                if self.usable(current['id']):
+                    if self.store.config['settings']['telegram_enabled']:
+                        self.chain_result=await self.telegram.chain()
+                        self.chain_result['media']=await self.telegram.media(current['id'],chain=True)
+                        if self.chain_result['status']=='unreachable' or self.chain_result['media']['status']=='stalled':
+                            self.results[current['id']]['telegram']['status']='unreachable'
+                        else:await self.choose();return
+                    else:await self.choose();return
             ordered=sorted(self.candidates(),key=lambda x:rank(self.results.get(x['id'])))
             for offset in range(0,len(ordered),3):
                 await asyncio.gather(*(self.probe(x,True,urgent=True) for x in ordered[offset:offset+3] if not current or x['id']!=current['id']))

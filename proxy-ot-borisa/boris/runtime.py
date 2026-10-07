@@ -110,16 +110,30 @@ class Runtime:
                 for o in self.last_good['outbounds']:
                     if o.get('tag')=='vpn':o['default']=tag or 'unavailable'
 
+    async def close_failed_routes(self,tag):
+        try:
+            data=await self.api('/connections')
+            ids=[x['id'] for x in data.get('connections',[]) if tag in x.get('chains',[])][:2048]
+            semaphore=asyncio.Semaphore(8)
+            async def close(uid):
+                import urllib.parse
+                async with semaphore:
+                    try:await self.api('/connections/'+urllib.parse.quote(uid,safe=''),'DELETE')
+                    except (aiohttp.ClientError,TimeoutError):pass
+            await asyncio.gather(*(close(uid) for uid in ids))
+        except (aiohttp.ClientError,TimeoutError):pass
+
     def mtg_config(self,c):
         s=c['settings'];usage=self.store.usage()
         users=[u for u in c['clients'] if client_enabled(u) and u.get('telegram') and (not u.get('monthly_limit_gb') or sum(usage.get(u['id'],{}).values())<u['monthly_limit_gb']*1024**3)]
         if not s['telegram_enabled'] or not users:return ''
         q=json.dumps
-        lines=[f'bind-to = "0.0.0.0:{s["telegram_port"]}"','api-bind-to = "127.0.0.1:19091"','prefer-ip = "prefer-ipv4"','auto-update = false',
+        lines=['bind-to = "127.0.0.1:12086"','api-bind-to = "127.0.0.1:19091"','prefer-ip = "prefer-ipv4"','auto-update = false',
                '[network]','dns = "https://1.1.1.1/dns-query"','proxies = ["socks5://127.0.0.1:12084"]',
                '[network.timeout]','tcp = "10s"','http = "10s"','idle = "10m"','handshake = "10s"',
                '[defense.blocklist]','enabled = false','[stats.prometheus]','enabled = false',
                '[throttle]',f'max-connections = {s["max_connections"]}','check-interval = "5s"','[secrets]']
+        users=users+[{'username':'__health','telegram_secret':c['telegram_probe']['internal_secret']}]
         lines.extend(q(u['username'])+' = '+q(u['telegram_secret']) for u in users)
         return '\n'.join(lines)+'\n'
 

@@ -88,4 +88,28 @@ class RealCoreTests(unittest.IsolatedAsyncioTestCase):
         else:self.fail('MTProxy stats API did not start')
         self.assertIsNone(self.runtime.mtg.returncode)
 
+
+    async def test_mtg_authenticated_front_gateway(self):
+        from boris.telegram_probe import fake_open
+        self.c['settings']['telegram_enabled']=True;self.store.save(self.c)
+        await self.runtime.apply_mtg(self.c);await self.gateway.apply()
+        async with asyncio.timeout(10):
+            r,w=await fake_open(self.c['settings']['telegram_port'],self.user['telegram_secret'])
+        self.assertTrue(any(x.get('client_id')==self.user['id'] for x in self.gateway.tg_connections.values()))
+        self.gateway.disconnect(self.user['id'])
+        await asyncio.wait_for(r.reader.read(),3);w.close();await w.wait_closed()
+        bad=client_new()['telegram_secret']
+        with self.assertRaises((OSError,asyncio.IncompleteReadError)):
+            async with asyncio.timeout(5):await fake_open(self.c['settings']['telegram_port'],bad)
+
+    async def test_ip_proxy_approval_and_private_destination_denied(self):
+        self.c['access']['enabled']=True;self.store.save(self.c)
+        await self.runtime.apply(self.c);await self.gateway.apply()
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+            async with session.get('http://127.0.0.1:18111/ok',proxy='http://127.0.0.1:2084') as r:self.assertEqual(r.status,403)
+            self.gateway.access.update('127.0.0.1',{'status':'approved'})
+            try:
+                async with session.get('http://127.0.0.1:18111/ok',proxy='http://127.0.0.1:2084') as r:self.assertNotEqual(r.status,200)
+            except (aiohttp.ClientError,TimeoutError):pass
+
 if __name__=='__main__':unittest.main()

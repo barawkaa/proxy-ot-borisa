@@ -21,6 +21,7 @@ from .migration import migrate
 from .runtime import Runtime
 from .gateway import Gateway
 from .health import Health
+from .notifications import Notifications
 from .subscriptions import parse_payload, fetch_subscription, read_limited
 from .routing import explain
 
@@ -29,6 +30,7 @@ class Application:
     def __init__(self,root):
         self.store=Store(root);migrate(self.store)
         self.runtime=Runtime(self.store);self.gateway=Gateway(self.store);self.health=Health(self.store,self.runtime)
+        self.notifications=Notifications(self.store,self.gateway,self.runtime);self.notification_task=None
         self.mutation=asyncio.Lock();self.jobs={};self.background=[];self.stopping=False;self.heartbeat=time.time()
         self.tg_stats={};self.tg_previous={};self.tg_active={};self.tg_epoch=None;self.boot_error='';self.booted=False;self.current_task=None;self.scan_task=None
         self.source_retry={};self.last_rules=0;self.active_job=None;self.last_flush=0;self.next_boot=0
@@ -85,8 +87,8 @@ class Application:
             host=s['public_host'];u['tg_url']='tg://proxy?'+urllib.parse.urlencode({'server':host,'port':s['telegram_port'],'secret':u['telegram_secret']}) if host else ''
             u['tme_url']='https://t.me/proxy?'+u['tg_url'].split('?',1)[1] if host else ''
         return web.json_response({'version':VERSION,'ui_build':self.ui_build,'config':c,'runtime':self.runtime.status(),'results':self.health.results,
-            'selection_reason':self.health.reason,'decision':self.health.decision,'services':self.service_status(),'checks':self.health.progress,'jobs':list(self.jobs.values()),
-            'active':list(self.gateway.active.values()),'telegram_stats':self.tg_stats,'telegram_active':list(self.tg_active.values()),
+            'telegram_check':self.health.chain_result,'selection_reason':self.health.reason,'decision':self.health.decision,'services':self.service_status(),'checks':self.health.progress,'jobs':list(self.jobs.values()),
+            'access':self.gateway.access.rows(),'bans':self.gateway.security_state(),'notifications':{'error':self.notifications.error,'last_ok':self.notifications.last_ok},'active':list(self.gateway.active.values()),'telegram_stats':self.tg_stats,'telegram_active':[r for r in self.gateway.tg_connections.values() if r.get('client_id') and r['client_id']!='__health'],
             'usage':self.store.usage(),'events':self.store.list('events',30),'boot_error':self.boot_error,'booted':self.booted,
             'storage_bytes':(self.store.root/'history-v5.sqlite').stat().st_size})
     def service_status(self):
@@ -126,8 +128,13 @@ class Application:
     def job(self,title,func,background=False):
         if self.active_job and not self.active_job.done():raise ValueError('Дождитесь завершения текущей операции')
         uid=secrets.token_hex(8);record={'id':uid,'title':title,'state':'running','started':time.time(),'background':background};self.jobs[uid]=record
+        self.store.event('task',title+': запущено')
         async def run():
-            try:record['result']=await func();record['state']='done'
+            try:
+                record['result']=await func();record['state']='done'
+                result=record['result'];summary=result.get('summary','Готово') if isinstance(result,dict) else ('Проверок: '+str(len(result))+', ошибок: '+str(sum(not x.get('ok',False) for x in result)) if isinstance(result,list) else 'Готово')
+                record['summary']=summary
+                self.store.event('task',title+': '+summary)
             except asyncio.CancelledError:record['state']='cancelled';raise
             except Exception as e:
                 record['state']='error';record['error']=str(e)[:400] if isinstance(e,ValueError) else 'Операция не выполнена; прежние настройки сохранены'
@@ -139,9 +146,11 @@ class Application:
 
     async def commit(self,c):
         c=validate(c);old=self.store.snapshot()
-        await self.runtime.apply(c)
         try:
+            await self.runtime.apply(c)
             self.store.save(c);await self.gateway.apply()
+            for rec in list(self.gateway.active.values()):
+                if rec['protocol']=='http_ip' and (not c['access']['enabled'] or not self.gateway.access.allowed(self.gateway.access.get(rec['ip']))):self.gateway.disconnect_ip(rec['ip'])
         except Exception:
             self.store.save(old);await self.runtime.apply(old);await self.gateway.apply();raise
         self.store.event('settings','Настройки сохранены')
@@ -170,6 +179,20 @@ class Application:
 
     async def command(self,request):
         action=request.match_info['action'];b=await request.json()
+        if action=='notification-test':return web.json_response(self.job('Проверка уведомлений',self.notifications.test))
+        if action=='access-client':
+            row=self.gateway.access.update(b['ip'],b)
+            self.gateway.disconnect_ip(row['ip'])
+            return web.json_response({'ok':True})
+        if action=='access-invite':
+            s=self.store.config['settings'];a=self.store.config['access']
+            if not a['enabled'] or not s['public_host']:raise ValueError('Включите HTTP по IP и укажите внешний адрес прокси')
+            token,expires=self.gateway.access.invite(b.get('name','Гость'))
+            host=s['public_host'];host='['+host+']' if ':' in host else host
+            return web.json_response({'url':f'http://{host}:{a["port"]}/invite/{token}','expires':expires})
+        if action=='unban':
+            self.gateway.bans.pop(b['ip'],None);self.gateway.auth_attempts.pop(b['ip'],None);self.gateway.attempts.pop(b['ip'],None)
+            self.store.event('security','Временная блокировка снята владельцем');return web.json_response({'ok':True})
         if action=='check':return web.json_response(self.job('Проверка серверов',lambda:self.health.scan(True)))
         if action=='refresh':return web.json_response(self.job('Обновление подписки',lambda:self.refresh_source(b['id'])))
         if action=='rules':return web.json_response(self.job('Обновление списков',self.update_rules))
@@ -177,7 +200,7 @@ class Application:
         if action=='restart':return web.json_response(self.job('Восстановление сервисов',self.restart))
         if action=='disconnect':
             self.gateway.disconnect(b.get('id',''))
-            return web.json_response({'ok':True,'note':'HTTP/SOCKS5 отключены. Для отзыва Telegram отключите доступ в карточке клиента.'})
+            return web.json_response({'ok':True,'note':'Активные соединения клиента отключены. Для постоянного запрета выключите доступ в его карточке.'})
         if action=='cleanup':return web.json_response(self.store.cleanup(bool(b.get('clear'))))
         if action=='route-test':
             u=next((x for x in self.store.config['clients'] if x['id']==b.get('client_id')),None)
@@ -202,7 +225,7 @@ class Application:
                 if not tag:await self.health.choose()
                 return web.json_response({'ok':True})
             if action=='settings':
-                for section in ('settings','routing','security'):
+                for section in ('settings','routing','security','access','notifications','telegram_probe'):
                     if section in b:c[section].update(b[section])
             elif action=='client':
                 uid=b.get('id');existing=next((u for u in c['clients'] if u['id']==uid),None)
@@ -291,28 +314,14 @@ class Application:
 
     async def sample_telegram(self):
         if not self.runtime.status()['telegram']:
-            self.tg_stats={};self.tg_previous={}
-            records=[]
-            for rec in self.tg_active.values():rec['ended']=time.time();rec['result']='service_stopped';records.append(rec)
-            if records:self.store.sessions(records)
-            self.tg_active={}
-            return
-        stats=await self.runtime.stats();users=stats.get('users',{});records=[]
+            self.tg_stats={};self.tg_previous={};return
+        stats=await self.runtime.stats();users=stats.get('users',{})
         epoch=stats.get('started_at')
-        if epoch!=self.tg_epoch:
-            self.tg_previous={};self.tg_epoch=epoch
-            for rec in self.tg_active.values():rec['ended']=time.time();rec['result']='service_restarted';records.append(rec)
-            self.tg_active={}
+        if epoch!=self.tg_epoch:self.tg_previous={};self.tg_epoch=epoch
         for u in self.store.config['clients']:
             x=users.get(u['username'],{});key=u['id'];counters=(int(x.get('bytes_in',0)),int(x.get('bytes_out',0)))
             prev=self.tg_previous.get(key,(0,0));self.gateway.usage_pending[key][0]+=max(0,counters[0]-prev[0]);self.gateway.usage_pending[key][1]+=max(0,counters[1]-prev[1]);self.tg_previous[key]=counters
-            if x.get('connections',0)>0:
-                if key not in self.tg_active:self.tg_active[key]={'id':secrets.token_hex(12),'client_id':key,'name':u['name'],'protocol':'telegram','ip':'не предоставлен ядром','destination':'Telegram','started':time.time(),'ended':0,'upload':0,'download':0,'result':'active'}
-                rec=self.tg_active[key];rec['upload']+=max(0,counters[0]-prev[0]);rec['download']+=max(0,counters[1]-prev[1])
-            elif key in self.tg_active:
-                rec=self.tg_active.pop(key);rec['ended']=time.time();rec['result']='closed';records.append(rec)
-        if records:self.store.sessions(records)
-        self.tg_stats=users
+        self.tg_stats={key:value for key,value in users.items() if key!='__health'}
 
     async def scheduler(self):
         while not self.stopping:
@@ -327,6 +336,8 @@ class Application:
                     try:await self.sample_telegram()
                     except (aiohttp.ClientError,TimeoutError):self.tg_stats={}
                     now=time.time();s=self.store.config['settings']
+                    if (not self.notification_task or self.notification_task.done()) and now>=self.notifications.next_send:
+                        self.notification_task=asyncio.create_task(self.notifications.tick())
                     if now-self.last_flush>=30:
                         self.gateway.flush();self.store.cleanup();self.last_flush=now
                     if now-self.health.last_current>=s['check_interval'] and (not self.current_task or self.current_task.done()):
@@ -365,7 +376,7 @@ class Application:
         self.background=[asyncio.create_task(self.bootstrap()),asyncio.create_task(self.scheduler())]
     async def close(self,app):
         self.stopping=True
-        tasks=self.background+([self.active_job] if self.active_job else [])+([self.current_task] if self.current_task else [])+([self.scan_task] if self.scan_task else [])
+        tasks=self.background+([self.notification_task] if self.notification_task else [])+([self.active_job] if self.active_job else [])+([self.current_task] if self.current_task else [])+([self.scan_task] if self.scan_task else [])
         for t in tasks:t.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
         await self.gateway.close();await self.runtime.close();self.store.db.close()

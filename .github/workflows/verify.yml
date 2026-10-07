@@ -1,7 +1,7 @@
 name: Verify complete application
 on:
   push:
-    branches: [main, release/5.2]
+    branches: [main, release/5.3]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -49,14 +49,14 @@ jobs:
           context: proxy-ot-borisa
           platforms: linux/arm64
           push: false
-          tags: proxy-boris:5.2
-          outputs: type=docker,dest=/tmp/proxy-boris-5.2.tar
+          tags: proxy-boris:5.3
+          outputs: type=docker,dest=/tmp/proxy-boris-5.3.tar
       - name: Boot the ARM64 image and check the application
         run: |
-          docker load -i /tmp/proxy-boris-5.2.tar
-          docker run -d --name boris-smoke --network host proxy-boris:5.2
+          docker load -i /tmp/proxy-boris-5.3.tar
+          docker run -d --name boris-smoke --network host proxy-boris:5.3
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8099/api/state -o /tmp/state.json && python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"] and s["version"]=="5.2"'; then break; fi
+            if curl -fsS http://127.0.0.1:8099/api/state -o /tmp/state.json && python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"] and s["version"]=="5.3"'; then break; fi
             sleep 1
           done
           python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"]'
@@ -77,8 +77,8 @@ jobs:
           path: /tmp/ui-image-*.png
       - uses: actions/upload-artifact@v4
         with:
-          name: proxy-boris-5.2-arm64
-          path: /tmp/proxy-boris-5.2.tar
+          name: proxy-boris-5.3-arm64
+          path: /tmp/proxy-boris-5.3.tar
           retention-days: 7
   browser:
     runs-on: ubuntu-latest

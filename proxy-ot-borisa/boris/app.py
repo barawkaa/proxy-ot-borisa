@@ -1,7 +1,5 @@
 """HA Ingress API and independent scheduling. All config mutations are serialized."""
 import asyncio
-import contextlib
-import copy
 import io
 import ipaddress
 import json
@@ -16,7 +14,7 @@ from aiohttp import web
 import qrcode
 import qrcode.image.svg
 from . import VERSION
-from .model import validate, client_new, client_enabled
+from .model import validate, client_new
 from .storage import Store, atomic_json
 from .migration import migrate
 from .runtime import Runtime
@@ -31,14 +29,14 @@ class Application:
         self.store=Store(root);migrate(self.store)
         self.runtime=Runtime(self.store);self.gateway=Gateway(self.store);self.health=Health(self.store,self.runtime)
         self.mutation=asyncio.Lock();self.jobs={};self.background=[];self.stopping=False;self.heartbeat=time.time()
-        self.tg_stats={};self.tg_previous={};self.tg_active={};self.tg_epoch=None;self.boot_error='';self.booted=False;self.current_task=None
+        self.tg_stats={};self.tg_previous={};self.tg_active={};self.tg_epoch=None;self.boot_error='';self.booted=False;self.current_task=None;self.scan_task=None
         self.source_retry={};self.last_cleanup=0;self.last_rules=0;self.active_job=None;self.last_flush=0;self.next_boot=0;self.core_connections=[]
         self.ui=Path(__file__).resolve().parent.parent/'ui'
         self.web=web.Application(client_max_size=8*1024**2,middlewares=[self.guard])
         self.web.router.add_get('/healthz',self.healthz)
         self.web.router.add_get('/api/state',self.state)
         self.web.router.add_get('/api/history',self.history)
-        self.web.router.add_get('/api/backup',self.backup)
+        self.web.router.add_get('/api/report',self.report)
         self.web.router.add_get('/api/qr/{uid}',self.qr)
         self.web.router.add_post('/api/{action}',self.command)
         self.web.router.add_get('/',self.index)
@@ -77,13 +75,37 @@ class Application:
             host=s['public_host'];u['tg_url']='tg://proxy?'+urllib.parse.urlencode({'server':host,'port':s['telegram_port'],'secret':u['telegram_secret']}) if host else ''
             u['tme_url']='https://t.me/proxy?'+u['tg_url'].split('?',1)[1] if host else ''
         return web.json_response({'version':VERSION,'config':c,'runtime':self.runtime.status(),'results':self.health.results,
-            'selection_reason':self.health.reason,'checks':self.health.progress,'jobs':list(self.jobs.values()),
+            'selection_reason':self.health.reason,'decision':self.health.decision,'services':self.service_status(),'checks':self.health.progress,'jobs':list(self.jobs.values()),
             'active':list(self.gateway.active.values()),'telegram_stats':self.tg_stats,'telegram_active':list(self.tg_active.values()),
             'usage':self.store.usage(),'events':self.store.list('events',30),'boot_error':self.boot_error,'booted':self.booted,
             'storage_bytes':(self.store.root/'history-v5.sqlite').stat().st_size})
-    async def history(self,request):return web.json_response({'sessions':self.store.list('sessions',request.query.get('limit',200)),'events':self.store.list('events',request.query.get('limit',200))})
-    async def backup(self,request):
-        return web.json_response({'version':VERSION,'config':self.store.snapshot()},headers={'Content-Disposition':'attachment; filename="proxy-boris-5.0-backup.json"'})
+    def service_status(self):
+        s=self.store.config['settings'];runtime=self.runtime.status()
+        ports={sock.getsockname()[1] for listener in self.gateway.listeners if listener.is_serving() for sock in listener.sockets or []}
+        return {p:{'enabled':s[p+'_enabled'],'running':runtime['telegram'] if p=='telegram' else s[p+'_port'] in ports,
+                   'port':s[p+'_port']} for p in ('http','socks','telegram')}
+
+    async def history(self,request):
+        uid=request.query.get('client_id') or None
+        return web.json_response({'sessions':self.store.list('sessions',request.query.get('limit',200),uid),
+            'events':self.store.list('events',request.query.get('limit',200)) if not uid else [],
+            'clients':[{'id':r[0],'name':r[1]} for r in self.store.db.execute('SELECT client_id,MAX(name) FROM sessions GROUP BY client_id')],
+            'client_id':uid})
+
+    async def report(self,request):
+        # Explicit allowlist: no subscription URLs, outbound credentials, client data or raw logs.
+        metrics={}
+        for uid,r in self.health.results.items():
+            metrics[uid]={k:r.get(k) for k in ('checked_at','full_at','latency_ms','median_ms','samples','failure_rate','foreign_status','russian_status','service_status','foreign_ok')}
+            metrics[uid]['checks']={group:[{k:x.get(k) for k in ('status','http_status','ms')} for x in r.get(group,[])] for group in ('foreign','russian','services')}
+            metrics[uid]['telegram']=r.get('telegram',{}).get('status')
+        decision={k:v for k,v in self.health.decision.items() if k!='reason'}
+        decision['reason']=self.health.reason.split(':',1)[0]
+        return web.json_response({'version':VERSION,'generated_at':time.time(),'runtime':{k:self.runtime.status().get(k) for k in ('core','telegram','selected')},
+            'services':self.service_status(),'decision':decision,'results':metrics,'checks':self.health.progress,
+            'settings':{k:self.store.config['settings'][k] for k in ('selection','check_interval','scan_interval','availability_interval','parallel_checks','switch_margin_ms','switch_margin_percent')},
+            'servers':[{'id':x['id'],'protocol':x['outbound']['type'],'enabled':x.get('enabled',True),'auto':x.get('auto',True)} for x in self.store.config['servers']]})
+
     async def qr(self,request):
         u=next(x for x in self.store.config['clients'] if x['id']==request.match_info['uid']);s=self.store.config['settings']
         if not s['public_host']:raise ValueError('Укажите адрес подключения в настройках прокси')
@@ -91,9 +113,9 @@ class Application:
         image=qrcode.make(link,image_factory=qrcode.image.svg.SvgPathImage);b=io.BytesIO();image.save(b)
         return web.Response(body=b.getvalue(),content_type='image/svg+xml')
 
-    def job(self,title,func):
+    def job(self,title,func,background=False):
         if self.active_job and not self.active_job.done():raise ValueError('Дождитесь завершения текущей операции')
-        uid=secrets.token_hex(8);record={'id':uid,'title':title,'state':'running','started':time.time()};self.jobs[uid]=record
+        uid=secrets.token_hex(8);record={'id':uid,'title':title,'state':'running','started':time.time(),'background':background};self.jobs[uid]=record
         async def run():
             try:record['result']=await func();record['state']='done'
             except asyncio.CancelledError:record['state']='cancelled';raise
@@ -155,8 +177,9 @@ class Application:
             if action=='select':
                 tag=b.get('id','');mode='manual' if tag else 'auto'
                 if tag and not any(x['id']==tag for x in self.health.candidates()):raise ValueError('Сервер недоступен для выбора')
-                if tag:await self.health.switch(tag,'Ручной выбор')
-                c['settings'].update(selection=mode,manual_server=tag);self.store.save(c)
+                async with self.health.decision_lock:
+                    if tag:await self.health.switch(tag,'Ручной выбор')
+                    c['settings'].update(selection=mode,manual_server=tag);self.store.save(c)
                 if not tag:await self.health.choose()
                 return web.json_response({'ok':True})
             if action=='settings':
@@ -194,7 +217,6 @@ class Application:
                 else:
                     for k in ('enabled','auto','priority','name'):
                         if k in b:node[k]=b[k]
-            elif action=='restore':c=b['config'];await self.runtime.validate_servers(c['servers'])
             else:raise ValueError('Неизвестная операция')
             await self.commit(c)
         return web.json_response({'ok':True})
@@ -291,17 +313,24 @@ class Application:
                     if now-self.last_cleanup>=3600:self.store.cleanup();self.last_cleanup=now
                     if now-self.health.last_current>=s['check_interval'] and (not self.current_task or self.current_task.done()):
                         self.current_task=asyncio.create_task(self.check_current())
+                    # Health scans have their own task: subscriptions cannot starve checks, or vice versa.
+                    if (not self.scan_task or self.scan_task.done()) and not self.health.lock.locked():
+                        full=now-self.health.last_full>=s['availability_interval']
+                        if full or now-self.health.last_scan>=s['scan_interval']:
+                            self.scan_task=asyncio.create_task(self.scheduled_scan(full))
                     if not self.active_job or self.active_job.done():
-                        if now-self.health.last_full>=s['availability_interval']:self.job('Проверка доступности',lambda:self.health.scan(True))
-                        elif now-self.health.last_scan>=s['scan_interval']:self.job('Проверка задержки',lambda:self.health.scan(False))
-                        else:
-                            due=next((x for x in self.store.config['sources'] if x.get('enabled') and now-x.get('updated_at',0)>=max(300,int(x.get('interval',s['subscription_interval']))) and now>=self.source_retry.get(x['id'],0)),None)
-                            if due:self.job('Автообновление подписки',lambda uid=due['id']:self.refresh_source(uid))
-                            elif any(x.get('enabled') for x in self.store.config['routing']['sources']) and now-self.last_rules>self.store.config['routing']['update_interval']:
-                                self.last_rules=now;self.job('Автообновление списков',self.update_rules)
+                        due=next((x for x in self.store.config['sources'] if x.get('enabled') and now-x.get('updated_at',0)>=max(300,int(x.get('interval',s['subscription_interval']))) and now>=self.source_retry.get(x['id'],0)),None)
+                        if due:self.job('Автообновление подписки',lambda uid=due['id']:self.refresh_source(uid),True)
+                        elif any(x.get('enabled') for x in self.store.config['routing']['sources']) and now-self.last_rules>self.store.config['routing']['update_interval']:
+                            self.last_rules=now;self.job('Автообновление списков',self.update_rules,True)
             except asyncio.CancelledError:raise
             except Exception:self.store.event('error','Фоновая проверка не завершилась; будет повторена')
             await asyncio.sleep(10)
+
+    async def scheduled_scan(self,full):
+        try:await self.health.scan(full)
+        except asyncio.CancelledError:raise
+        except Exception:self.store.event('error','Общая проверка не завершилась; будет повторена')
 
     async def check_current(self):
         try:await self.health.current_check()
@@ -311,14 +340,14 @@ class Application:
     async def bootstrap(self):
         try:
             c=self.store.snapshot();await self.runtime.validate_servers(c['servers']);await self.commit(c);self.booted=True;self.boot_error=''
-            self.job('Первая проверка серверов',lambda:self.health.scan(True))
+            self.scan_task=asyncio.create_task(self.scheduled_scan(True))
         except Exception as e:self.boot_error=str(e) if isinstance(e,ValueError) else 'Сервисы не запустились. Проверьте диагностику и порты.'
 
     async def start(self,app):
         self.background=[asyncio.create_task(self.bootstrap()),asyncio.create_task(self.scheduler())]
     async def close(self,app):
         self.stopping=True
-        tasks=self.background+([self.active_job] if self.active_job else [])+([self.current_task] if self.current_task else [])
+        tasks=self.background+([self.active_job] if self.active_job else [])+([self.current_task] if self.current_task else [])+([self.scan_task] if self.scan_task else [])
         for t in tasks:t.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
         await self.gateway.close();await self.runtime.close();self.store.db.close()

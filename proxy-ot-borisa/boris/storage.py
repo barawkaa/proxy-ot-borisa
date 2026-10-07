@@ -27,6 +27,12 @@ class Store:
         self.lock = threading.RLock()
         self.path = self.root / 'config-v5.json'
         self.config = json.loads(self.path.read_text()) if self.path.exists() else defaults()
+        # Add 5.1 defaults without overwriting personal choices.
+        for key,value in defaults()['settings'].items():self.config['settings'].setdefault(key,value)
+        self.config['settings'].pop('switch_hold_seconds',None)
+        if not self.config.get('health_revision'):
+            if self.config['settings']['scan_interval']==180:self.config['settings']['scan_interval']=60
+            self.config['health_revision']=1
         self.db = sqlite3.connect(self.root / 'history-v5.sqlite', check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=DELETE')
         self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')
@@ -74,11 +80,13 @@ class Store:
         with self.lock:
             return {r[0]: {'upload':r[1], 'download':r[2]} for r in self.db.execute('SELECT client_id,upload,download FROM usage WHERE month=?', (time.strftime('%Y-%m', time.gmtime()),))}
 
-    def list(self, table, limit=200):
+    def list(self, table, limit=200, client_id=None):
         if table not in ('events','sessions'):
             raise ValueError('Неизвестная таблица')
         with self.lock:
-            cursor = self.db.execute(f'SELECT * FROM {table} ORDER BY {"ts" if table=="events" else "started"} DESC LIMIT ?', (min(1000,int(limit)),))
+            where=' WHERE client_id=?' if table=='sessions' and client_id else ''
+            args=([client_id] if where else [])+[max(1,min(1000,int(limit)))]
+            cursor = self.db.execute(f'SELECT * FROM {table}{where} ORDER BY {"ts" if table=="events" else "started"} DESC LIMIT ?', args)
             keys = [c[0] for c in cursor.description]
             return [dict(zip(keys,row)) for row in cursor]
 

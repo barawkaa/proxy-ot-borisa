@@ -1,5 +1,5 @@
 name: Proxy от Бориса
-version: "5.1"
+version: "5.2"
 slug: proxy_ot_borisa
 description: Личный HTTP, SOCKS5 и Telegram MTProxy с проверкой серверов и восстановлением
 arch:

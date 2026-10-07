@@ -1,2 +1,2 @@
 """Proxy от Бориса: independent application services."""
-VERSION = '5.1'
+VERSION = '5.2'

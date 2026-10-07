@@ -17,4 +17,7 @@ app.health.url_check=AsyncMock(return_value={'status':'ok','ms':190})
 app.health.describe('Текущий сервер лучший по доступности, стабильности и измеренной задержке')
 app.jobs={'done':{'id':'done','title':'Автообновление подписки','state':'done','background':True,'started':time.time()-20,'ended':time.time()-10}}
 app.store.sessions([dict(id=str(i),client_id=u['id'],name=u['name'],protocol='http',ip='192.168.1.'+str(10+i),destination='example.com',started=time.time()-60,ended=time.time(),upload=100,download=200,result='closed') for i,u in enumerate(c['clients'])])
+app.store.event('test','Событие для проверки диагностики')
+app.jobs.update(running={'id':'running','title':'Тестовая текущая задача','state':'running','background':True,'started':time.time()},error={'id':'error','title':'Тестовая ошибка задачи','state':'error','error':'Проверка не выполнена','started':time.time()-30,'ended':time.time()-10})
+app.gateway.active={u['id']:dict(id=u['id'],client_id=u['id'],name=u['name'],protocol='http',ip='192.168.1.10',destination='example-guest' if u['name']=='Гость' else 'example-boris',started=time.time()-20,ended=0,upload=10,download=20,result='active') for u in c['clients']}
 web.run_app(app.web,host='127.0.0.1',port=18099,access_log=None)

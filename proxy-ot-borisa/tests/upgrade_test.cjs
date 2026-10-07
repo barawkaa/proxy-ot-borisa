@@ -35,7 +35,7 @@ const assert=require('node:assert/strict');
  await frame.getByRole('cell',{name:'Гость',exact:true}).first().waitFor();
  await frame.getByRole('button',{name:'Борис',exact:true}).click();
  await frame.getByRole('link',{name:'Диагностика',exact:true}).click();
- await frame.getByText('Событие для проверки диагностики',{exact:true}).waitFor();
+ await frame.locator('.connection').filter({hasText:'Событие для проверки диагностики'}).waitFor();
  await frame.getByRole('link',{name:'Главная',exact:true}).click();
  await page.screenshot({path:'/tmp/ui-upgrade-5.2.png',fullPage:true});
  // Even a failed stylesheet cannot enlarge the image.

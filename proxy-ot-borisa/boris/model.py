@@ -23,9 +23,10 @@ def defaults():
             'selection': 'auto', 'manual_server': '', 'http_enabled': True, 'socks_enabled': True,
             'http_port': 2081, 'socks_port': 2080, 'telegram_port': 2083,
             'telegram_enabled': False, 'public_host': '', 'front_domain': 'www.google.com',
-            'check_interval': 60, 'scan_interval': 180, 'availability_interval': 300,
+            'check_interval': 60, 'scan_interval': 60, 'availability_interval': 300,
             'subscription_interval': 3600, 'parallel_checks': 3, 'check_timeout': 8,
-            'switch_margin_ms': 80, 'switch_hold_seconds': 300,
+            'switch_margin_ms': 80, 'switch_margin_percent': 25,
+            'switch_hold_seconds': 300,  # Retained solely for reading these data with release 5.0.
             'manual_failover': True, 'history_days': 7, 'history_records': 10000,
             'event_records': 5000, 'history_mb': 50, 'debug_until': 0,
             'max_connections': 512, 'idle_seconds': 600,
@@ -69,7 +70,7 @@ def validate(config):
               'subscription_interval': (300,604800), 'parallel_checks': (1,8), 'check_timeout': (2,30),
               'history_days': (1,30), 'history_records': (100,50000), 'event_records': (100,10000),
               'history_mb': (5,100), 'max_connections': (16,2048), 'idle_seconds': (30,3600),
-              'switch_margin_ms': (0,2000), 'switch_hold_seconds': (30,3600)}
+              'switch_margin_ms': (0,2000), 'switch_margin_percent': (0,90)}
     for key,(lo,hi) in ranges.items():
         s[key] = int(s[key])
         if not lo <= s[key] <= hi:

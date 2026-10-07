@@ -1,7 +1,7 @@
 name: Verify complete application
 on:
   push:
-    branches: [main, release/5.0]
+    branches: [main, release/5.1]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install dependencies
-        run: pip install -r proxy-ot-borisa/requirements.txt
+        run: pip install -r proxy-ot-borisa/requirements.txt ruff==0.14.0
       - name: Download pinned engines
         run: |
           mkdir engines
@@ -32,6 +32,7 @@ jobs:
           MTG_BIN: ${{ github.workspace }}/engines/mtg-multi-1.12.0-linux-amd64/mtg-multi
         run: |
           python -m compileall -q proxy-ot-borisa/boris
+          ruff check proxy-ot-borisa/boris --select F
           node --check proxy-ot-borisa/ui/app.js
           python -m unittest discover -s proxy-ot-borisa/tests -v
   build-arm64:
@@ -46,22 +47,22 @@ jobs:
           context: proxy-ot-borisa
           platforms: linux/arm64
           push: false
-          tags: proxy-boris:5.0
-          outputs: type=docker,dest=/tmp/proxy-boris-5.0.tar
+          tags: proxy-boris:5.1
+          outputs: type=docker,dest=/tmp/proxy-boris-5.1.tar
       - name: Boot the ARM64 image and check the application
         run: |
-          docker load -i /tmp/proxy-boris-5.0.tar
-          docker run -d --name boris-smoke --network host proxy-boris:5.0
+          docker load -i /tmp/proxy-boris-5.1.tar
+          docker run -d --name boris-smoke --network host proxy-boris:5.1
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8099/api/state -o /tmp/state.json && python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"] and s["version"]=="5.0"'; then break; fi
+            if curl -fsS http://127.0.0.1:8099/api/state -o /tmp/state.json && python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"] and s["version"]=="5.1"'; then break; fi
             sleep 1
           done
           python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"]'
           docker stop boris-smoke
       - uses: actions/upload-artifact@v4
         with:
-          name: proxy-boris-5.0-arm64
-          path: /tmp/proxy-boris-5.0.tar
+          name: proxy-boris-5.1-arm64
+          path: /tmp/proxy-boris-5.1.tar
           retention-days: 7
   browser:
     runs-on: ubuntu-latest

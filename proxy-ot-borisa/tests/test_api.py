@@ -14,7 +14,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close();self.app.store.db.close();self.tmp.cleanup()
     async def post(self,path,data,header=True):return await self.client.post('/api/'+path,json=data,headers={'X-Boris-Request':'1'} if header else {})
     async def test_state_and_csrf(self):
-        r=await self.client.get('/api/state');self.assertEqual(r.status,200);s=await r.json();self.assertEqual(s['version'],'5.0')
+        r=await self.client.get('/api/state');self.assertEqual(r.status,200);s=await r.json();self.assertEqual(s['version'],'5.1')
         r=await self.post('client',{'name':'No'},False);self.assertEqual(r.status,403)
     async def test_client_create_secrets_and_delete(self):
         r=await self.post('client',{'name':'Борис'});self.assertEqual(r.status,200)
@@ -29,8 +29,23 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_qr_no_external_service(self):
         await self.post('settings',{'settings':{'public_host':'example.com'}});uid=self.app.store.config['clients'][0]['id']
         r=await self.client.get('/api/qr/'+uid);self.assertEqual(r.status,200);self.assertIn('<svg',await r.text())
-    async def test_backup(self):
-        r=await self.client.get('/api/backup');self.assertEqual(r.status,200);self.assertIn('attachment',r.headers['Content-Disposition']);self.assertEqual((await r.json())['config']['schema'],5)
+    async def test_backup_removed_and_report_redacted(self):
+        r=await self.client.get('/api/backup');self.assertIn(r.status,(404,405))
+        r=await self.post('restore',{'config':self.app.store.snapshot()});self.assertEqual(r.status,400)
+        c=self.app.store.config;secret=c['clients'][0]['telegram_secret']
+        r=await self.client.get('/api/report');self.assertEqual(r.status,200);text=await r.text()
+        self.assertNotIn(secret,text);self.assertNotIn(c['clients'][0]['password'],text)
+        self.assertIn('decision',text);self.assertIn('results',text)
+
+    async def test_history_filters_before_limit(self):
+        rows=[]
+        for i in range(205):
+            rows.append(dict(id=str(i),client_id='a' if i<3 else 'b',name='A' if i<3 else 'B',protocol='http',ip='127.0.0.1',destination='example.com',started=i,ended=i+1,upload=0,download=0,result='closed'))
+        self.app.store.sessions(rows)
+        r=await self.client.get('/api/history?client_id=a&limit=2');data=await r.json()
+        self.assertEqual(len(data['sessions']),2);self.assertTrue(all(x['client_id']=='a' for x in data['sessions']))
+        self.assertEqual(len(data['clients']),2)
+
 
 if __name__=='__main__':unittest.main()
 

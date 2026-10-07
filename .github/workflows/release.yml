@@ -16,12 +16,21 @@ jobs:
           script: |
             const {owner,repo}=context.repo;
             const sha=context.payload.workflow_run.head_sha;
-            for (const [tag,target] of [['v4.0.2','698c57b79fe8bd126aaffc1b53147c0024eb3032'],['v5.0',sha]]) {
-              try { await github.rest.git.getRef({owner,repo,ref:`tags/${tag}`}); }
-              catch(e) { if(e.status!==404) throw e; await github.rest.git.createRef({owner,repo,ref:`refs/tags/${tag}`,sha:target}); }
+            const file=await github.rest.repos.getContent({owner,repo,path:'proxy-ot-borisa/config.yaml',ref:sha});
+            const yaml=Buffer.from(file.data.content,'base64').toString('utf8');
+            const version=yaml.match(/^version:\s*["']?([0-9]+\.[0-9]+(?:\.[0-9]+)?)/m)?.[1];
+            if(!version)throw new Error('Version missing');
+            const tag='v'+version;
+            try {
+              const existing=await github.rest.git.getRef({owner,repo,ref:'tags/'+tag});
+              if(existing.data.object.sha!==sha)throw new Error('Existing release tag points to another commit');
+            } catch(e) {
+              if(e.status!==404)throw e;
+              await github.rest.git.createRef({owner,repo,ref:'refs/tags/'+tag,sha});
             }
-            try { await github.rest.repos.getReleaseByTag({owner,repo,tag:'v5.0'}); }
+            try {await github.rest.repos.getReleaseByTag({owner,repo,tag});}
             catch(e) {
-              if(e.status!==404) throw e;
-              await github.rest.repos.createRelease({owner,repo,tag_name:'v5.0',name:'Proxy от Бориса 5.0',body:'Полная переработка приложения. Проверки и ARM64-сборка: '+context.payload.workflow_run.html_url+'\n\nПеред обновлением создайте резервную копию дополнения Home Assistant. Откат: docs/ROLLBACK.md. Проверка в домашней сети и на реальном HA OS выполняется отдельно.',draft:false,prerelease:false});
+              if(e.status!==404)throw e;
+              await github.rest.repos.createRelease({owner,repo,tag_name:tag,name:'Proxy от Бориса '+version,
+                body:'Постоянные проверки, подтверждённое переключение, объяснение выбора и готовый резерв. Понятные статусы сайтов. История всех клиентов и отдельно по клиентам. Новый прозрачный логотип. Копирование настроек убрано из приложения.\n\nПроверки: '+context.payload.workflow_run.html_url+'\n\nПредыдущие релизы сохранены. GitHub хранит код, личные данные восстанавливаются из резервной копии Home Assistant. Известные границы: docs/VALIDATION.md. Домашняя сеть и доставка сообщений Telegram проверяются отдельно.',draft:false,prerelease:false});
             }

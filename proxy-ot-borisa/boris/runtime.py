@@ -103,11 +103,12 @@ class Runtime:
             await self.apply_mtg(config)
 
     async def select(self,tag):
-        await self.api('/proxies/vpn','PUT',{'name':tag or 'unavailable'})
-        self.selected=tag
-        if self.last_good:
-            for o in self.last_good['outbounds']:
-                if o.get('tag')=='vpn':o['default']=tag or 'unavailable'
+        async with self.lock:
+            await self.api('/proxies/vpn','PUT',{'name':tag or 'unavailable'})
+            self.selected=tag
+            if self.last_good:
+                for o in self.last_good['outbounds']:
+                    if o.get('tag')=='vpn':o['default']=tag or 'unavailable'
 
     def mtg_config(self,c):
         s=c['settings'];usage=self.store.usage()

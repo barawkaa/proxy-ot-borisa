@@ -30,7 +30,7 @@ class Application:
         self.runtime=Runtime(self.store);self.gateway=Gateway(self.store);self.health=Health(self.store,self.runtime)
         self.mutation=asyncio.Lock();self.jobs={};self.background=[];self.stopping=False;self.heartbeat=time.time()
         self.tg_stats={};self.tg_previous={};self.tg_active={};self.tg_epoch=None;self.boot_error='';self.booted=False;self.current_task=None;self.scan_task=None
-        self.source_retry={};self.last_cleanup=0;self.last_rules=0;self.active_job=None;self.last_flush=0;self.next_boot=0;self.core_connections=[]
+        self.source_retry={};self.last_rules=0;self.active_job=None;self.last_flush=0;self.next_boot=0
         self.ui=Path(__file__).resolve().parent.parent/'ui'
         self.web=web.Application(client_max_size=8*1024**2,middlewares=[self.guard])
         self.web.router.add_get('/healthz',self.healthz)
@@ -255,14 +255,14 @@ class Application:
         try:await self.runtime.api('/version');results.append({'name':'Управление ядром','ok':True})
         except Exception:results.append({'name':'Управление ядром','ok':False})
         await self.health.scan(True)
-        results.append({'name':'Рабочий VPN','ok':bool(self.runtime.selected),'detail':self.health.reason})
+        results.append({'name':'Проверенный VPN','ok':self.health.usable(self.runtime.selected),'detail':self.health.reason})
         s=self.store.config['settings']
         for protocol in ('http','socks'):
             if not s[protocol+'_enabled']:continue
             try:
                 r,w=await asyncio.wait_for(asyncio.open_connection('127.0.0.1',s[protocol+'_port']),2);w.close();await w.wait_closed()
                 results.append({'name':protocol.upper()+' вход','ok':True,'detail':'Порт принимает соединения'})
-            except OSError:results.append({'name':protocol.upper()+' вход','ok':False})
+            except (OSError,TimeoutError):results.append({'name':protocol.upper()+' вход','ok':False})
         return results
 
     async def restart(self):
@@ -310,7 +310,6 @@ class Application:
                     now=time.time();s=self.store.config['settings']
                     if now-self.last_flush>=30:
                         self.gateway.flush();self.store.cleanup();self.last_flush=now
-                    if now-self.last_cleanup>=3600:self.store.cleanup();self.last_cleanup=now
                     if now-self.health.last_current>=s['check_interval'] and (not self.current_task or self.current_task.done()):
                         self.current_task=asyncio.create_task(self.check_current())
                     # Health scans have their own task: subscriptions cannot starve checks, or vice versa.
@@ -321,7 +320,7 @@ class Application:
                     if not self.active_job or self.active_job.done():
                         due=next((x for x in self.store.config['sources'] if x.get('enabled') and now-x.get('updated_at',0)>=max(300,int(x.get('interval',s['subscription_interval']))) and now>=self.source_retry.get(x['id'],0)),None)
                         if due:self.job('Автообновление подписки',lambda uid=due['id']:self.refresh_source(uid),True)
-                        elif any(x.get('enabled') for x in self.store.config['routing']['sources']) and now-self.last_rules>self.store.config['routing']['update_interval']:
+                        elif (self.store.config['security']['country_enabled'] or any(x.get('enabled') for x in self.store.config['routing']['sources'])) and now-self.last_rules>self.store.config['routing']['update_interval']:
                             self.last_rules=now;self.job('Автообновление списков',self.update_rules,True)
             except asyncio.CancelledError:raise
             except Exception:self.store.event('error','Фоновая проверка не завершилась; будет повторена')

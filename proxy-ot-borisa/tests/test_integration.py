@@ -65,6 +65,20 @@ class RealCoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_fail_closed(self):
         await self.runtime.select('')
         with self.assertRaises(OSError):await socks_open(2080,'127.0.0.1',18112,self.user['username'],self.user['password'])
+    async def test_probe_and_switch_preserve_existing_stream(self):
+        from boris.health import Health
+        import copy
+        other=copy.deepcopy(self.c['servers'][0]);other['id']='second_path';other['name']='Second';self.c['servers'].append(other)
+        await self.runtime.apply(self.c)
+        first=self.c['servers'][0]['id'];await self.runtime.select(first)
+        r,w=await socks_open(2080,'127.0.0.1',18112,self.user['username'],self.user['password'])
+        h=Health(self.store,self.runtime)
+        check=await h.url_check(other['id'],'http://127.0.0.1:18111/ok')
+        self.assertEqual(check['status'],'ok');self.assertEqual(self.runtime.selected,first)
+        await self.runtime.select(other['id'])
+        w.write(b'after-switch');await w.drain();self.assertEqual(await asyncio.wait_for(r.readexactly(12),3),b'after-switch')
+        w.close();await w.wait_closed()
+
     async def test_mtg_config_and_stats(self):
         self.c['settings']['telegram_enabled']=True;await self.runtime.apply_mtg(self.c)
         for _ in range(50):

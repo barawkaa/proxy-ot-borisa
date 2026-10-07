@@ -1,6 +1,7 @@
 """HA Ingress API and independent scheduling. All config mutations are serialized."""
 import asyncio
 import io
+import hashlib
 import ipaddress
 import json
 import os
@@ -32,6 +33,8 @@ class Application:
         self.tg_stats={};self.tg_previous={};self.tg_active={};self.tg_epoch=None;self.boot_error='';self.booted=False;self.current_task=None;self.scan_task=None
         self.source_retry={};self.last_rules=0;self.active_job=None;self.last_flush=0;self.next_boot=0
         self.ui=Path(__file__).resolve().parent.parent/'ui'
+        digest=hashlib.sha256(b''.join((self.ui/name).read_bytes() for name in ('style.css','app.js','logo.png'))).hexdigest()[:16]
+        self.ui_build=VERSION+'-'+digest
         self.web=web.Application(client_max_size=8*1024**2,middlewares=[self.guard])
         self.web.router.add_get('/healthz',self.healthz)
         self.web.router.add_get('/api/state',self.state)
@@ -40,7 +43,7 @@ class Application:
         self.web.router.add_get('/api/qr/{uid}',self.qr)
         self.web.router.add_post('/api/{action}',self.command)
         self.web.router.add_get('/',self.index)
-        self.web.router.add_static('/static/',self.ui)
+        self.web.router.add_get('/assets/{build}/{name}',self.asset)
         self.web.on_startup.append(self.start)
         self.web.on_cleanup.append(self.close)
 
@@ -64,7 +67,14 @@ class Application:
         response.headers['Content-Security-Policy']="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'"
         return response
 
-    async def index(self,request):return web.FileResponse(self.ui/'index.html')
+    async def index(self,request):
+        return web.Response(text=(self.ui/'index.html').read_text().replace('__BUILD__',self.ui_build),content_type='text/html')
+
+    async def asset(self,request):
+        name=request.match_info['name']
+        if request.match_info['build']!=self.ui_build or name not in ('style.css','app.js','logo.png'):
+            raise web.HTTPNotFound()
+        return web.FileResponse(self.ui/name)
     async def healthz(self,request):
         # Supervisor must recover a dead scheduler, not reboot on a provider outage.
         return web.json_response({'alive':not self.stopping,'scheduler':time.time()-self.heartbeat<90},status=200 if time.time()-self.heartbeat<90 else 503)
@@ -74,7 +84,7 @@ class Application:
         for u in c['clients']:
             host=s['public_host'];u['tg_url']='tg://proxy?'+urllib.parse.urlencode({'server':host,'port':s['telegram_port'],'secret':u['telegram_secret']}) if host else ''
             u['tme_url']='https://t.me/proxy?'+u['tg_url'].split('?',1)[1] if host else ''
-        return web.json_response({'version':VERSION,'config':c,'runtime':self.runtime.status(),'results':self.health.results,
+        return web.json_response({'version':VERSION,'ui_build':self.ui_build,'config':c,'runtime':self.runtime.status(),'results':self.health.results,
             'selection_reason':self.health.reason,'decision':self.health.decision,'services':self.service_status(),'checks':self.health.progress,'jobs':list(self.jobs.values()),
             'active':list(self.gateway.active.values()),'telegram_stats':self.tg_stats,'telegram_active':list(self.tg_active.values()),
             'usage':self.store.usage(),'events':self.store.list('events',30),'boot_error':self.boot_error,'booted':self.booted,
@@ -178,7 +188,16 @@ class Application:
                 tag=b.get('id','');mode='manual' if tag else 'auto'
                 if tag and not any(x['id']==tag for x in self.health.candidates()):raise ValueError('Сервер недоступен для выбора')
                 async with self.health.decision_lock:
-                    if tag:await self.health.switch(tag,'Ручной выбор')
+                    if tag:
+                        previous=self.runtime.selected
+                        if not await self.health.switch(tag,'Ручной выбор'):
+                            restored=False
+                            if previous and previous!=tag and self.health.usable(previous):
+                                restored=await self.health.switch(previous,'Возврат после неудачного ручного выбора')
+                            if not restored:
+                                await self.runtime.select('')
+                                self.health.describe('Ручное переключение не подтверждено; поиск рабочего сервера продолжается')
+                            raise ValueError('Сервер не прошёл итоговую проверку. '+('Прежнее подключение восстановлено.' if restored else 'Рабочее подключение не подтверждено. Проверки продолжаются.'))
                     c['settings'].update(selection=mode,manual_server=tag);self.store.save(c)
                 if not tag:await self.health.choose()
                 return web.json_response({'ok':True})

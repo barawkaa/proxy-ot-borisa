@@ -144,3 +144,38 @@ class Telegram53(unittest.IsolatedAsyncioTestCase):
             h.results['a']=r;h.results['b']=copy.deepcopy(r);h.results['b']['latency_ms']=200
             h.results['b']['telegram']['media']={'status':'media_ok','checked_at':time.time()}
             self.assertLess(h.node_rank('b'),h.node_rank('a'));store.db.close()
+
+class Media53(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from datetime import datetime,timezone
+        from telethon import types,utils
+        self.tmp=tempfile.TemporaryDirectory();self.store=Store(self.tmp.name)
+        self.store.config['servers']=[{'id':'a'}]
+        doc=types.Document(id=1,access_hash=2,file_reference=b'',date=datetime.now(timezone.utc),mime_type='application/octet-stream',size=1024*1024,dc_id=2,attributes=[])
+        self.store.config['telegram_probe'].update(enabled=True,api_id=1,api_hash='a'*32,bot_token='1:'+('x'*30),file_id=utils.pack_bot_file_id(doc),sample_kb=64)
+        from boris.telegram_probe import TelegramProbe
+        self.probe=TelegramProbe(self.store,type('Runtime',(),{'password':'internal'})())
+    async def asyncTearDown(self):self.store.db.close();self.tmp.cleanup()
+    def client(self,stall=False):
+        class Client:
+            connect=AsyncMock();disconnect=AsyncMock();is_user_authorized=AsyncMock(return_value=True)
+            async def __call__(self,request):return object()
+            async def iter_download(self,location,**kwargs):
+                self.params=kwargs
+                if stall:raise TimeoutError()
+                for _ in range(kwargs['limit']):yield bytes(65536)
+        return Client()
+    async def test_actual_bytes_are_required_and_download_is_bounded(self):
+        client=self.client()
+        with patch('boris.telegram_probe.TelegramClient',return_value=client):result=await self.probe.media('a')
+        self.assertEqual(result['status'],'media_ok');self.assertEqual(result['bytes'],65536);self.assertEqual(client.params['limit'],1)
+        client.disconnect.assert_awaited()
+        with patch('boris.telegram_probe.TelegramClient') as factory:
+            self.assertEqual(await self.probe.media('a'),result);factory.assert_not_called()
+    async def test_stalled_file_not_reported_available(self):
+        client=self.client(True)
+        with patch('boris.telegram_probe.TelegramClient',return_value=client):result=await self.probe.media('a')
+        self.assertEqual(result['status'],'stalled');client.disconnect.assert_awaited()
+    async def test_disabled_check_never_reports_media_ok(self):
+        self.store.config['telegram_probe']['enabled']=False
+        self.assertEqual((await self.probe.media('a'))['status'],'unconfigured')

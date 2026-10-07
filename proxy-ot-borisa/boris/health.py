@@ -53,7 +53,7 @@ class Health:
         if not self.store.config['settings']['telegram_enabled']:return base
         tg=r.get('telegram',{});media=tg.get('media',{})
         media_status=media.get('status') if time.time()-media.get('checked_at',0)<600 else 'unknown'
-        quality=0 if media_status=='media_ok' else 2 if media_status=='stalled' else 1
+        quality=0 if media_status=='media_ok' else 3 if media_status=='stalled' else 2 if media_status=='slow' else 1
         if tg.get('status')!='protocol_ok':quality+=3
         return (quality*3+base[0],base[1],base[2])
 
@@ -227,9 +227,11 @@ class Health:
         if self.store.config['settings']['telegram_enabled']:
             self.chain_result=await self.telegram.chain()
             self.chain_result['media']=await self.telegram.media(tag,chain=True,force=True)
+            if tag in self.results and self.chain_result['media'].get('status') in ('media_ok','slow','stalled'):self.results[tag]['telegram']['media']=self.chain_result['media']
             if self.chain_result['status']=='unreachable' or self.chain_result['media']['status']=='stalled':
                 if tag in self.results:self.results[tag]['telegram']={'status':'unreachable'}
                 self.describe('Telegram не прошёл проверку через MTProxy; поиск другого сервера');return False
+        if self.store.config['settings']['telegram_enabled'] and tag in self.results and self.chain_result.get('status')=='partial':self.results[tag]['telegram']['status']='partial'
         def label(uid):
             node=next((x for x in self.store.config['servers'] if x['id']==uid),None)
             ms=self.results.get(uid,{}).get('latency_ms')
@@ -248,7 +250,12 @@ class Health:
                 if self.usable(current['id']):
                     if self.store.config['settings']['telegram_enabled']:
                         self.chain_result=await self.telegram.chain()
+                        if self.chain_result['status']=='unreachable' and hasattr(self.runtime,'apply_mtg'):
+                            await self.runtime.apply_mtg(self.store.snapshot(),force=True)
+                            self.chain_result=await self.telegram.chain()
+                        if self.chain_result['status']=='partial':self.results[current['id']]['telegram']['status']='partial'
                         self.chain_result['media']=await self.telegram.media(current['id'],chain=True)
+                        if self.chain_result['media'].get('status') in ('media_ok','slow','stalled'):self.results[current['id']]['telegram']['media']=self.chain_result['media']
                         if self.chain_result['status']=='unreachable' or self.chain_result['media']['status']=='stalled':
                             self.results[current['id']]['telegram']['status']='unreachable'
                         else:await self.choose();return
@@ -257,7 +264,12 @@ class Health:
                 if self.usable(current['id']):
                     if self.store.config['settings']['telegram_enabled']:
                         self.chain_result=await self.telegram.chain()
+                        if self.chain_result['status']=='unreachable' and hasattr(self.runtime,'apply_mtg'):
+                            await self.runtime.apply_mtg(self.store.snapshot(),force=True)
+                            self.chain_result=await self.telegram.chain()
+                        if self.chain_result['status']=='partial':self.results[current['id']]['telegram']['status']='partial'
                         self.chain_result['media']=await self.telegram.media(current['id'],chain=True)
+                        if self.chain_result['media'].get('status') in ('media_ok','slow','stalled'):self.results[current['id']]['telegram']['media']=self.chain_result['media']
                         if self.chain_result['status']=='unreachable' or self.chain_result['media']['status']=='stalled':
                             self.results[current['id']]['telegram']['status']='unreachable'
                         else:await self.choose();return

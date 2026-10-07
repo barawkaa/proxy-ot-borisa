@@ -179,6 +179,7 @@ class Application:
 
     async def command(self,request):
         action=request.match_info['action'];b=await request.json()
+        if action=='media-file':return web.json_response(self.job('Создание контрольного файла',self.create_media_file))
         if action=='notification-test':return web.json_response(self.job('Проверка уведомлений',self.notifications.test))
         if action=='access-client':
             row=self.gateway.access.update(b['ip'],b)
@@ -262,6 +263,22 @@ class Application:
             else:raise ValueError('Неизвестная операция')
             await self.commit(c)
         return web.json_response({'ok':True})
+
+    async def create_media_file(self):
+        async with self.mutation:
+            c=self.store.snapshot();s=c['telegram_probe'];n=c['notifications']
+            if not s['bot_token'] or not n['chat_id']:raise ValueError('Сохраните токен контрольного бота и ID чата в настройках уведомлений')
+            form=aiohttp.FormData();form.add_field('chat_id',str(n['chat_id']))
+            form.add_field('caption','Контрольный файл Proxy от Бориса. Повторные проверки скачивают фрагмент без новых сообщений.')
+            form.add_field('document',secrets.token_bytes(1024*1024),filename='proxy-check.bin',content_type='application/octet-stream')
+            proxy='http://127.0.0.1:12085' if self.runtime.selected else None
+            auth=aiohttp.BasicAuth('__selected',self.runtime.password) if proxy else None
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45),trust_env=False) as session:
+                async with session.post('https://api.telegram.org/bot'+s['bot_token']+'/sendDocument',data=form,proxy=proxy,proxy_auth=auth) as response:
+                    result=await response.json()
+                    if not response.ok or not result.get('ok'):raise ValueError('Не удалось отправить контрольный файл. Проверьте токен, ID чата и права бота.')
+            s['file_id']=result['result']['document']['file_id'];await self.commit(c)
+            return {'summary':'Контрольный файл создан в Telegram; file_id сохранён автоматически'}
 
     async def update_rules(self):
         async with self.mutation:

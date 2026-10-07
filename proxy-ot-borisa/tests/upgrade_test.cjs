@@ -18,6 +18,9 @@ const assert=require('node:assert/strict');
  assert(!queryCss.includes('width:56px'),'HA cache policy ignores query version');
  await page.screenshot({path:'/tmp/ui-upgrade-reproduced-5.1.png',fullPage:true});
  // No cache deletion, no unregister, no new browser context.
+ await setVersion('5.2');await page.reload();
+ await frame.getByRole('heading',{name:'Выбор сервера'}).waitFor();
+ assert.equal((await frame.locator('.brand-icon').boundingBox()).width,56);
  await setVersion('current');await page.reload();
  await frame.getByRole('heading',{name:'Выбор сервера'}).waitFor();
  for(const viewport of [{width:1440,height:1000},{width:390,height:844}]){

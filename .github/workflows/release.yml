@@ -32,5 +32,5 @@ jobs:
             catch(e) {
               if(e.status!==404)throw e;
               await github.rest.repos.createRelease({owner,repo,tag_name:tag,name:'Proxy от Бориса '+version,
-                body:'Исправлена загрузка интерфейса при обновлении через Home Assistant: адреса ресурсов содержат версию и хеш, исключён конфликт /static/. Логотип ограничен в HTML и CSS. Журнал задач перенесён в диагностику. Исправлены подтверждение ручного выбора и возврат на прежний маршрут.\n\nПроверки: '+context.payload.workflow_run.html_url+'\n\nПроверяется воспроизведение сбоя 5.1 и переход на новую версию без очистки кеша, а также браузерный интерфейс из ARM64 образа. Это модель кеширования HA, не полноценная домашняя установка. Предыдущие релизы сохранены. GitHub хранит код, личные данные восстанавливаются из резервной копии Home Assistant. Границы проверки: docs/VALIDATION.md.',draft:false,prerelease:false});
+                body:Buffer.from((await github.rest.repos.getContent({owner,repo,path:'docs/RELEASE-'+version+'.md',ref:sha})).data.content,'base64').toString('utf8')+'\n\nПроверки точного коммита: '+context.payload.workflow_run.html_url,draft:false,prerelease:false});
             }

@@ -136,7 +136,7 @@ class TelegramProbe:
         from collections import defaultdict
         import logging
         results=[]
-        for dc in (2,-2,4,-4,5,-5):
+        async def check(dc):
             connection=FakeTLSConnection('',0,dc,loggers=defaultdict(lambda:logging.getLogger('boris.probe')),proxy=('127.0.0.1',port,secret))
             try:
                 async with asyncio.timeout(self.store.config['settings']['check_timeout']):
@@ -145,6 +145,8 @@ class TelegramProbe:
                 results.append({'dc':dc,'status':'protocol_ok'})
             except (OSError,TimeoutError,ValueError,asyncio.IncompleteReadError):results.append({'dc':dc,'status':'unreachable'})
             finally:await connection.disconnect()
+        await asyncio.gather(*(check(dc) for dc in (2,-2,4,-4,5,-5)))
+        results.sort(key=lambda x:x['dc'])
         return {'status':'protocol_ok' if all(x['status']=='protocol_ok' for x in results) else 'partial' if any(x['status']=='protocol_ok' for x in results) else 'unreachable','checks':results,'checked_at':time.time()}
 
     async def media(self,tag,chain=False,force=False):
@@ -155,6 +157,7 @@ class TelegramProbe:
         self.cache={k:v for k,v in self.cache.items() if k in valid}
         settings=self.store.config['telegram_probe'];key='__chain' if chain else tag
         old=self.cache.get(key,{'status':'unconfigured'})
+        if chain and old.get('server_id')!=tag:old={'status':'unconfigured'}
         if not settings['enabled']:return {'status':'unconfigured','detail':'Контрольный бот не настроен'}
         if time.time()<self.cooldown:return {'status':'limited','detail':'Telegram запросил паузу проверок'}
         if not force and (self.media_lock.locked() or time.time()-old.get('checked_at',0)<settings['interval']):return old
@@ -163,7 +166,7 @@ class TelegramProbe:
             try:
                 async with asyncio.timeout(settings['timeout']+20):result=await self._media(tag,chain)
             except TimeoutError:result={'status':'stalled','detail':'Контрольная передача не завершилась'}
-            result['checked_at']=time.time();self.cache[key]=result
+            result['checked_at']=time.time();result['server_id']=tag;self.cache[key]=result
             return result
 
     async def _media(self,tag,chain):
@@ -199,7 +202,7 @@ class TelegramProbe:
                     received+=len(chunk)
                 elapsed=time.monotonic()-start
                 if received<65536:return {'status':'configuration_error','detail':'Контрольный файл должен быть не меньше 64 КБ'}
-                return {'status':'media_ok','bytes':received,'kbps':round(received/max(elapsed,.001)/1024),'seconds':round(elapsed,2),'dc':location[0],'detail':'Получен фрагмент файла через MTProto; это не проверка всех видео Telegram'}
+                return {'status':'media_ok' if received/max(elapsed,.001)/1024>=s['min_kbps'] else 'slow','bytes':received,'kbps':round(received/max(elapsed,.001)/1024),'seconds':round(elapsed,2),'dc':location[0],'detail':'Получен фрагмент файла через MTProto; это не проверка всех видео Telegram'}
         except asyncio.CancelledError:raise
         except Exception as exc:
             from telethon.errors import FloodWaitError, RPCError

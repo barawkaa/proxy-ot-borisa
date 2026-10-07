@@ -46,7 +46,7 @@ def defaults():
         'notifications': {'enabled': False, 'token': '', 'chat_id': '', 'owner_id': '',
                           'app_url': '', 'poll_callbacks': False},
         'telegram_probe': {'internal_secret': 'ee'+secrets.token_hex(16)+'www.google.com'.encode().hex(), 'enabled': False, 'api_id': 0, 'api_hash': '', 'bot_token': '',
-                           'file_id': '', 'interval': 300, 'sample_kb': 512, 'timeout': 20},
+                           'file_id': '', 'min_kbps': 128, 'interval': 300, 'sample_kb': 512, 'timeout': 20},
         'legacy': {},
     }
 
@@ -164,7 +164,7 @@ def validate(config):
     if n['app_url'] and not n['app_url'].startswith('https://'):raise ValueError('Ссылка приложения должна начинаться с https://')
     sec['auth_failures']=int(sec['auth_failures'])
     if not 3<=sec['auth_failures']<=100:raise ValueError('Ошибок входа: от 3 до 100 за минуту')
-    for key,lo,hi in [('interval',60,3600),('sample_kb',64,2048),('timeout',5,60)]:
+    for key,lo,hi in [('interval',60,3600),('sample_kb',64,2048),('timeout',5,60),('min_kbps',16,10000)]:
         t[key]=int(t[key])
         if not lo<=t[key]<=hi:raise ValueError('Неверный параметр проверки медиа: '+key)
     if t['enabled'] and (not int(t['api_id']) or not re.fullmatch(r'[a-fA-F0-9]{32}',t['api_hash']) or not t['bot_token']):

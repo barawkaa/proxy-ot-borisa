@@ -112,4 +112,39 @@ class RealCoreTests(unittest.IsolatedAsyncioTestCase):
                 async with session.get('http://127.0.0.1:18111/ok',proxy='http://127.0.0.1:2084') as r:self.assertNotEqual(r.status,200)
             except (aiohttp.ClientError,TimeoutError):pass
 
+    async def test_real_mtg_round_trip_to_controlled_mtproto_datacenter(self):
+        from telethon.crypto import AESModeCTR
+        from boris.telegram_probe import TelegramProbe
+        failures=[];seen=[]
+        async def datacenter(r,w):
+            try:
+                greeting=await r.readexactly(2);await r.readexactly(greeting[1]);w.write(b'\x05\x00');await w.drain()
+                head=await r.readexactly(4)
+                length={1:4,4:16}.get(head[3])
+                if head[3]==3:length=(await r.readexactly(1))[0]
+                await r.readexactly(length+2);w.write(b'\x05\x00\x00\x01'+bytes(6));await w.drain()
+                frame=await r.readexactly(64)
+                decoder=AESModeCTR(frame[8:40],frame[40:56]);reverse=frame[55:7:-1]
+                encoder=AESModeCTR(reverse[:32],reverse[32:]);decoded=decoder.encrypt(frame)
+                if decoded[56:60]!=b'\xdd'*4:raise ValueError('Expected padded MTProto transport')
+                size=int.from_bytes(decoder.encrypt(await r.readexactly(4)),'little')
+                packet=decoder.encrypt(await r.readexactly(size));seen.append(packet[20:24])
+                body=b'\x63\x24\x16\x05'+packet[24:40]+bytes(20)
+                reply=bytes(8)+bytes(8)+len(body).to_bytes(4,'little')+body
+                w.write(encoder.encrypt(len(reply).to_bytes(4,'little')+reply));await w.drain()
+                await r.read()
+            except (OSError,asyncio.IncompleteReadError):pass
+            except Exception as exc:failures.append(type(exc).__name__)
+            finally:w.close()
+        listener=await asyncio.start_server(datacenter,'127.0.0.1',18114)
+        original=self.runtime.mtg_config
+        self.runtime.mtg_config=lambda c:original(c).replace('127.0.0.1:12084','127.0.0.1:18114')
+        self.c['settings']['telegram_enabled']=True;self.store.save(self.c)
+        try:
+            await self.runtime.apply_mtg(self.c);await self.gateway.apply()
+            result=await TelegramProbe(self.store,self.runtime).chain()
+            self.assertEqual(result['status'],'protocol_ok',result)
+            self.assertEqual(len(seen),6);self.assertTrue(all(x==b'\xf1\x8e\x7e\xbe' for x in seen));self.assertEqual(failures,[])
+        finally:listener.close();await listener.wait_closed()
+
 if __name__=='__main__':unittest.main()

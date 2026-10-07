@@ -4,6 +4,8 @@ Uses immutable v5.0/v5.1 assets from git. This is a focused compatibility
 fixture, not a claim that the complete Home Assistant OS runs in this test.
 """
 import os
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 import aiohttp
@@ -14,10 +16,13 @@ PREFIX='/api/hassio_ingress/test/'
 UPSTREAM=os.environ.get('UPGRADE_UPSTREAM','http://127.0.0.1:18099')
 version='5.0'
 old={}
-for tag in ('5.0','5.1'):
+for tag in ('5.0','5.1','5.2'):
     for name in ('index.html','style.css','app.js','logo.png'):
         if tag=='5.0' and name=='logo.png':continue
         old[tag,name]=subprocess.check_output(['git','show',f'v{tag}:proxy-ot-borisa/ui/{name}'],cwd=ROOT)
+
+old_build='5.2-'+hashlib.sha256(b''.join(old['5.2',name] for name in ('style.css','app.js','logo.png'))).hexdigest()[:16]
+old['5.2','index.html']=old['5.2','index.html'].replace(b'__BUILD__',old_build.encode())
 
 SW="""
 self.addEventListener('install',e=>{self.skipWaiting()});
@@ -46,14 +51,14 @@ async def worker(request):return web.Response(text=SW,content_type='text/javascr
 async def change(request):
     global version
     selected=(await request.json())['version']
-    if selected not in ('5.0','5.1','current'):raise web.HTTPBadRequest()
+    if selected not in ('5.0','5.1','5.2','current'):raise web.HTTPBadRequest()
     version=selected
     return web.json_response({'version':version})
 
 async def ingress(request):
     path=request.match_info['path']
-    if version!='current' and (not path or path.startswith('static/')):
-        name=path.removeprefix('static/') or 'index.html'
+    if version!='current' and (not path or path.startswith('static/') or (version=='5.2' and path.startswith('assets/'+old_build+'/'))):
+        name=path.rsplit('/',1)[-1] or 'index.html'
         body=old.get((version,name))
         if body is None:raise web.HTTPNotFound()
         mime={'html':'text/html','css':'text/css','js':'text/javascript','png':'image/png'}[name.rsplit('.',1)[1]]
@@ -61,7 +66,10 @@ async def ingress(request):
     headers={key:request.headers[key] for key in ('Content-Type','X-Boris-Request') if key in request.headers}
     async with aiohttp.ClientSession() as client:
         async with client.request(request.method,UPSTREAM+'/'+path+('?' + request.query_string if request.query_string else ''),data=await request.read(),headers=headers) as response:
-            return web.Response(body=await response.read(),status=response.status,headers={k:v for k,v in response.headers.items() if k.lower() in ('content-type','cache-control','content-security-policy','x-content-type-options')})
+            body=await response.read()
+            if version=='5.2' and path=='api/state':
+                data=json.loads(body);data['version']='5.2';data['ui_build']=old_build;body=json.dumps(data).encode()
+            return web.Response(body=body,status=response.status,headers={k:v for k,v in response.headers.items() if k.lower() in ('content-type','cache-control','content-security-policy','x-content-type-options')})
 
 app=web.Application()
 app.router.add_get('/',shell)

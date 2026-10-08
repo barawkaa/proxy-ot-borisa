@@ -7,7 +7,7 @@ const assert=require('node:assert/strict');
  page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:8099');await page.getByRole('heading',{name:'Выбор сервера'}).waitFor();
  const state=await page.evaluate(()=>fetch('api/state').then(r=>r.json()));
- assert.equal(state.version,'5.2');assert.equal(state.ui_build,await page.locator('html').getAttribute('data-build'));
+ assert.equal(state.version,'5.3');assert.equal(state.ui_build,await page.locator('html').getAttribute('data-build'));
  await page.locator('.brand-icon').evaluate(el=>el.decode());
  const box=await page.locator('.brand-icon').boundingBox();assert.equal(box.width,56);assert.equal(box.height,56);
  assert.equal(await page.locator('#jobs').count(),0);
@@ -19,7 +19,7 @@ const assert=require('node:assert/strict');
  await page.getByText('Клиент: Проверка образа.',{exact:false}).waitFor();
  for(const width of [1440,390]){
   await page.setViewportSize({width,height:1000});
-  for(const hash of ['home','servers','telegram','proxy','history','diagnostics','settings']){
+  for(const hash of ['home','servers','telegram','proxy','access','protection','history','diagnostics','settings']){
    await page.goto('http://127.0.0.1:8099/#'+hash);await page.waitForTimeout(200);
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,hash+' '+width);
   }

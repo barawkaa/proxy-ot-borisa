@@ -110,22 +110,37 @@ class Runtime:
                 for o in self.last_good['outbounds']:
                     if o.get('tag')=='vpn':o['default']=tag or 'unavailable'
 
+    async def close_failed_routes(self,tag):
+        try:
+            data=await self.api('/connections')
+            ids=[x['id'] for x in data.get('connections',[]) if tag in x.get('chains',[])][:2048]
+            semaphore=asyncio.Semaphore(8)
+            async def close(uid):
+                import urllib.parse
+                async with semaphore:
+                    try:await self.api('/connections/'+urllib.parse.quote(uid,safe=''),'DELETE')
+                    except (aiohttp.ClientError,TimeoutError):pass
+            await asyncio.gather(*(close(uid) for uid in ids))
+        except (aiohttp.ClientError,TimeoutError):pass
+
     def mtg_config(self,c):
         s=c['settings'];usage=self.store.usage()
         users=[u for u in c['clients'] if client_enabled(u) and u.get('telegram') and (not u.get('monthly_limit_gb') or sum(usage.get(u['id'],{}).values())<u['monthly_limit_gb']*1024**3)]
         if not s['telegram_enabled'] or not users:return ''
         q=json.dumps
-        lines=[f'bind-to = "0.0.0.0:{s["telegram_port"]}"','api-bind-to = "127.0.0.1:19091"','prefer-ip = "prefer-ipv4"','auto-update = false',
+        lines=['bind-to = "127.0.0.1:12086"','api-bind-to = "127.0.0.1:19091"','prefer-ip = "prefer-ipv4"','auto-update = false',
                '[network]','dns = "https://1.1.1.1/dns-query"','proxies = ["socks5://127.0.0.1:12084"]',
                '[network.timeout]','tcp = "10s"','http = "10s"','idle = "10m"','handshake = "10s"',
                '[defense.blocklist]','enabled = false','[stats.prometheus]','enabled = false',
                '[throttle]',f'max-connections = {s["max_connections"]}','check-interval = "5s"','[secrets]']
+        users=users+[{'username':'__health','telegram_secret':c['telegram_probe']['internal_secret']}]
         lines.extend(q(u['username'])+' = '+q(u['telegram_secret']) for u in users)
         return '\n'.join(lines)+'\n'
 
     async def apply_mtg(self,c,force=False):
         content=self.mtg_config(c)
         if content==self.last_mtg and not force and (not content or self.mtg and self.mtg.returncode is None):return
+        old=self.last_mtg
         await self._stop(self.mtg);self.mtg=None
         if not content:self.last_mtg='';self.tg_error='';return
         path=self.tmp/'mtg.toml';path.write_text(content);path.chmod(0o600)
@@ -137,6 +152,12 @@ class Runtime:
         except (OSError,RuntimeError):
             self.tg_error='MTProxy не запустился. Проверьте порт и секреты клиентов.'
             self.store.event('error',self.tg_error)
+            await self._stop(self.mtg);self.mtg=None
+            if old:
+                path.write_text(old)
+                self.mtg=await self._spawn([self.mtg_binary,'run',str(path)])
+                await asyncio.sleep(.4)
+            raise ValueError(self.tg_error) from None
 
     async def stats(self):
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
@@ -158,8 +179,9 @@ class Runtime:
                 except Exception:
                     self.next_restart=now+min(300,5*2**min(self.failures,6))
                     self.error='Ядро не восстановилось; следующая попытка после паузы'
-        if self.mtg_config(config)!=self.last_mtg:
-            await self.apply_mtg(config)
+        if self.mtg_config(config)!=self.last_mtg and now>=self.tg_next:
+            try:await self.apply_mtg(config)
+            except (ValueError,OSError):self.tg_next=now+60
         if self.mtg_config(config) and now>=self.tg_next:
             try:
                 if not self.mtg or self.mtg.returncode is not None:raise RuntimeError()
@@ -167,7 +189,8 @@ class Runtime:
                 if now-self.tg_started>300:self.tg_failures=0
             except (RuntimeError,aiohttp.ClientError,TimeoutError):
                 self.tg_failures+=1;self.tg_next=now+min(300,5*2**min(self.tg_failures,6))
-                await self.apply_mtg(config,True)
+                try:await self.apply_mtg(config,True)
+                except (ValueError,OSError):pass
 
     def status(self):
         return {'core':bool(self.process and self.process.returncode is None),'telegram':bool(self.mtg and self.mtg.returncode is None),

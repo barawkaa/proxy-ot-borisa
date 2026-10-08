@@ -21,7 +21,7 @@ def defaults():
         'schema': 5, 'sources': [], 'servers': [], 'clients': [],
         'settings': {
             'selection': 'auto', 'manual_server': '', 'http_enabled': True, 'socks_enabled': True,
-            'http_port': 2081, 'socks_port': 2080, 'telegram_port': 2083,
+            'http_auth': 'password', 'socks_auth': 'password', 'http_port': 2081, 'socks_port': 2080, 'telegram_port': 2083,
             'telegram_enabled': False, 'public_host': '', 'front_domain': 'www.google.com',
             'check_interval': 60, 'scan_interval': 60, 'availability_interval': 300,
             'subscription_interval': 3600, 'parallel_checks': 3, 'check_timeout': 8,
@@ -33,13 +33,20 @@ def defaults():
             'foreign_urls': ['https://www.gstatic.com/generate_204', 'https://www.cloudflare.com/cdn-cgi/trace'],
             'russian_urls': ['https://ya.ru/', 'https://www.ozon.ru/'],
             'service_urls': ['https://chatgpt.com/'],
-            'telegram_targets': ['149.154.167.51:443', '149.154.175.100:443'],
+            'telegram_targets': ['149.154.167.51:443', '149.154.167.91:443', '149.154.175.100:443', '91.108.56.130:443'],
         },
         'routing': {'mode': 'all_vpn', 'vpn_domains': [], 'direct_domains': [], 'vpn_ips': [],
                     'direct_ips': [], 'presets': [], 'sources': [], 'update_interval': 86400},
         'security': {'trusted_enabled': False, 'trusted': [], 'deny_cidrs': [], 'allow_cidrs': [],
                      'country_enabled': False, 'country_cidrs': [], 'country_url': 'https://www.ipdeny.com/ipblocks/data/countries/ru.zone',
-                     'autoban_enabled': True, 'max_per_ip': 120, 'new_per_minute': 240, 'ban_seconds': 3600},
+                     'auth_failures': 10, 'autoban_enabled': True, 'max_per_ip': 120, 'new_per_minute': 240, 'ban_seconds': 3600},
+        'access': {'enabled': False, 'port': 2084, 'lan_cidrs': [], 'route_mode': 'default',
+                   'pending_limit': 200, 'pending_hours': 24, 'invite_minutes': 30,
+                   'notify_invited_only': True, 'internal_password': secrets.token_urlsafe(32)},
+        'notifications': {'enabled': False, 'token': '', 'chat_id': '', 'owner_id': '',
+                          'app_url': '', 'poll_callbacks': False},
+        'telegram_probe': {'internal_secret': 'ee'+secrets.token_hex(16)+'www.google.com'.encode().hex(), 'enabled': False, 'api_id': 0, 'api_hash': '', 'bot_token': '',
+                           'file_id': '', 'min_kbps': 128, 'interval': 300, 'sample_kb': 512, 'timeout': 20},
         'legacy': {},
     }
 
@@ -75,8 +82,8 @@ def validate(config):
         s[key] = int(s[key])
         if not lo <= s[key] <= hi:
             raise ValueError(f'{key}: допустимо {lo}–{hi}')
-    ports = [s[k] for k in ('http_port','socks_port','telegram_port')]
-    if len(set(ports)) != 3 or set(ports) & {8099, 19090, 19091, 12080, 12084, 12085}:
+    ports = [s[k] for k in ('http_port','socks_port','telegram_port')]+[int(c['access']['port'])]
+    if len(set(ports)) != 4 or set(ports) & {8099, 19090, 19091, 12080, 12084, 12085, 12086}:
         raise ValueError('Порты должны отличаться друг от друга и от внутренних портов приложения')
     if s['selection'] not in ('auto','manual'):
         raise ValueError('Неизвестный режим выбора сервера')
@@ -139,4 +146,27 @@ def validate(config):
         if not 0<=u['monthly_limit_gb']<=100000:raise ValueError('Недопустимый лимит трафика')
         for key in ('expires_at','blocked_until'):
             u[key]=float(u.get(key) or 0)
+    a=c['access'];n=c['notifications'];t=c['telegram_probe']
+    for k,lo,hi in [('port',1,65535),('pending_limit',10,1000),('pending_hours',1,168),('invite_minutes',5,1440)]:
+        a[k]=int(a[k])
+        if not lo<=a[k]<=hi:raise ValueError('Неверное значение доступа по IP: '+k)
+    for item in a['lan_cidrs']:
+        network=ipaddress.ip_network(item,strict=False)
+        if not network.is_private or network.prefixlen==0 or network.is_loopback or network.is_link_local:
+            raise ValueError('Укажите конкретную домашнюю подсеть, например 192.168.1.0/24')
+    if a['route_mode'] not in (*MODES,'default'):raise ValueError('Неверный маршрут HTTP по IP')
+    if len(a['internal_password'])<24:raise ValueError('Повреждён внутренний ключ доступа')
+    for k in ('http_auth','socks_auth'):
+        if s[k] not in ('password','trusted'):raise ValueError('Неверный режим авторизации')
+    if n['enabled']:
+        if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]{20,}',n['token']):raise ValueError('Неверный токен бота')
+        if not re.fullmatch(r'-?[0-9]+',str(n['chat_id'])) or not str(n['owner_id']).isdigit():raise ValueError('Укажите ID чата и владельца')
+    if n['app_url'] and not n['app_url'].startswith('https://'):raise ValueError('Ссылка приложения должна начинаться с https://')
+    sec['auth_failures']=int(sec['auth_failures'])
+    if not 3<=sec['auth_failures']<=100:raise ValueError('Ошибок входа: от 3 до 100 за минуту')
+    for key,lo,hi in [('interval',60,3600),('sample_kb',64,2048),('timeout',5,60),('min_kbps',16,10000)]:
+        t[key]=int(t[key])
+        if not lo<=t[key]<=hi:raise ValueError('Неверный параметр проверки медиа: '+key)
+    if t['enabled'] and (not int(t['api_id']) or not re.fullmatch(r'[a-fA-F0-9]{32}',t['api_hash']) or not t['bot_token']):
+        raise ValueError('Для проверки медиа нужны API ID, API hash и токен контрольного бота')
     return c

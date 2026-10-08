@@ -18,6 +18,9 @@ const assert=require('node:assert/strict');
  assert(!queryCss.includes('width:56px'),'HA cache policy ignores query version');
  await page.screenshot({path:'/tmp/ui-upgrade-reproduced-5.1.png',fullPage:true});
  // No cache deletion, no unregister, no new browser context.
+ await setVersion('5.2');await page.reload();
+ await frame.getByRole('heading',{name:'Выбор сервера'}).waitFor();
+ assert.equal((await frame.locator('.brand-icon').boundingBox()).width,56);
  await setVersion('current');await page.reload();
  await frame.getByRole('heading',{name:'Выбор сервера'}).waitFor();
  for(const viewport of [{width:1440,height:1000},{width:390,height:844}]){
@@ -37,10 +40,11 @@ const assert=require('node:assert/strict');
  await frame.getByRole('link',{name:'Диагностика',exact:true}).click();
  await frame.locator('.connection').filter({hasText:'Событие для проверки диагностики'}).waitFor();
  await frame.getByRole('link',{name:'Главная',exact:true}).click();
- await page.screenshot({path:'/tmp/ui-upgrade-5.2.png',fullPage:true});
+ await frame.getByRole('heading',{name:'Выбор сервера'}).waitFor();
+ await page.screenshot({path:'/tmp/ui-upgrade-5.3.png',fullPage:true});
  // Even a failed stylesheet cannot enlarge the image.
  await context.route('**/assets/**/style.css',route=>route.abort());
  await page.reload();await frame.locator('img.brand-icon').waitFor();
  const fallback=await frame.locator('.brand-icon').boundingBox();assert.equal(fallback.width,56);assert.equal(fallback.height,56);
- assert.deepEqual(errors,[]);await browser.close();console.log('Upgrade 5.0 → broken 5.1 → 5.2, cached assets, client filters and CSS failure: PASS');
+ assert.deepEqual(errors,[]);await browser.close();console.log('Upgrade 5.0 → broken 5.1 → 5.3, cached assets, client filters and CSS failure: PASS');
 })().catch(e=>{console.error(e);process.exit(1)});

@@ -27,8 +27,12 @@ class Store:
         self.lock = threading.RLock()
         self.path = self.root / 'config-v5.json'
         self.config = json.loads(self.path.read_text()) if self.path.exists() else defaults()
-        # Add 5.1 defaults without overwriting personal choices.
-        for key,value in defaults()['settings'].items():self.config['settings'].setdefault(key,value)
+        # Add nested defaults without overwriting personal choices or secrets.
+        def merge(target, base):
+            for key,value in base.items():
+                if key not in target:target[key]=value
+                elif isinstance(value,dict) and isinstance(target[key],dict):merge(target[key],value)
+        merge(self.config,defaults())
         if not self.config.get('health_revision'):
             if self.config['settings']['scan_interval']==180:self.config['settings']['scan_interval']=60
             self.config['health_revision']=1

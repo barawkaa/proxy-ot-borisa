@@ -8,6 +8,7 @@ import secrets
 import time
 import urllib.parse
 from .model import client_enabled
+from .access import Access, canonical
 
 
 def in_cidrs(ip, items):
@@ -49,24 +50,52 @@ class Gateway:
     def __init__(self,store):
         self.store=store;self.listeners=[];self.ports=None;self.active={};self.tasks={};self.pending=[]
         self.usage_pending=collections.defaultdict(lambda:[0,0]);self.usage_cache=store.usage()
-        self.attempts={};self.bans={};self.accepted=0
+        self.attempts={};self.bans={};self.ban_reasons={};self.auth_attempts={};self.accepted=0;self.ip_count=collections.Counter();self.access=Access(store);self.tg_connections={}
 
     def permitted(self,ip):
         c=self.store.config;sec=c['security'];now=time.time()
         if in_cidrs(ip,sec['deny_cidrs']) or self.bans.get(ip,0)>now:return False
         if sec['allow_cidrs'] and not in_cidrs(ip,sec['allow_cidrs']):return False
         if sec['country_enabled'] and not in_cidrs(ip,sec['country_cidrs']) and not in_cidrs(ip,sec['allow_cidrs']):return False
+        if self.ip_count[ip]>=sec['max_per_ip']:return False
         if sec['autoban_enabled']:
-            if len(self.attempts)>4096:self.attempts={k:v for k,v in self.attempts.items() if v and v[-1]>now-60}
+            if ip not in self.attempts and len(self.attempts)>=4096:
+                self.attempts={k:v for k,v in self.attempts.items() if v and v[-1]>now-60}
+                if len(self.attempts)>=4096:return False
             hits=self.attempts.setdefault(ip,collections.deque(maxlen=1000))
             while hits and hits[0]<now-60:hits.popleft()
             hits.append(now)
             count=sum(1 for x in self.active.values() if x['ip']==ip)
             if len(hits)>sec['new_per_minute'] or count>=sec['max_per_ip']:
-                self.bans[ip]=now+sec['ban_seconds'];self.store.event('security','Временная блокировка источника из-за превышения лимита подключений');return False
+                self.ban(ip,'Слишком частые подключения');return False
         return True
 
+    def ban(self,ip,reason):
+        if len(self.bans)>=4096 and ip not in self.bans:return
+        self.bans[ip]=time.time()+self.store.config['security']['ban_seconds'];self.ban_reasons[ip]=reason
+        self.disconnect_ip(ip)
+        self.store.event('security','Источник '+ip+' временно заблокирован: '+reason)
+
+    def auth_failed(self,ip):
+        if not self.store.config['security']['autoban_enabled']:return
+        now=time.time()
+        if ip not in self.auth_attempts and len(self.auth_attempts)>=4096:return
+        hits=self.auth_attempts.setdefault(ip,collections.deque(maxlen=100))
+        while hits and hits[0]<now-60:hits.popleft()
+        hits.append(now)
+        if len(hits)>=self.store.config['security']['auth_failures']:self.ban(ip,'Ошибки авторизации')
+
+    def disconnect_ip(self,ip):
+        for uid,rec in list(self.active.items())+list(self.tg_connections.items()):
+            if rec['ip']==ip and uid in self.tasks:self.tasks[uid].cancel()
+
+    def security_state(self):
+        return [{'ip':ip,'until':until,'reason':self.ban_reasons.get(ip,'Ограничение подключений')} for ip,until in self.bans.items() if until>time.time()]
+
     def enabled(self,c,protocol):
+        if protocol=='http_ip':return self.store.config['access']['enabled'] and self.access.allowed(self.access.get(c['ip']))
+        c=next((u for u in self.store.config['clients'] if u['id']==c['id']),c)
+
         usage=self.usage_cache.get(c['id'],{})
         current=sum(self.usage_pending.get(c['id'],[0,0]))
         limit=c.get('monthly_limit_gb',0)*1024**3
@@ -81,38 +110,51 @@ class Gateway:
         return None
 
     def authenticate(self,username,password,protocol):
+        if self.store.config['settings'][protocol+'_auth']=='trusted':return None
         for u in self.store.config['clients']:
             if secrets.compare_digest(u['username'],username) and secrets.compare_digest(u['password'],password) and self.enabled(u,protocol):return u
         return None
 
     async def apply(self):
-        s=self.store.config['settings'];ports=(s['http_port'] if s['http_enabled'] else 0,s['socks_port'] if s['socks_enabled'] else 0)
+        s=self.store.config['settings'];ports=(s['http_port'] if s['http_enabled'] else 0,s['socks_port'] if s['socks_enabled'] else 0,self.store.config['access']['port'] if self.store.config['access']['enabled'] else 0,s['telegram_port'] if s['telegram_enabled'] else 0)
         if ports==self.ports:return
         old=self.ports
         await self.stop_listeners()
         try:
-            for protocol,port in zip(('http','socks'),ports):
+            for protocol,port in zip(('http','socks','http_ip','telegram'),ports):
                 if port:self.listeners.append(await asyncio.start_server(lambda r,w,p=protocol: self.accept(r,w,p),'0.0.0.0',port,limit=65536))
             self.ports=ports
         except OSError:
             await self.stop_listeners()
             if old:
-                for protocol,port in zip(('http','socks'),old):
+                for protocol,port in zip(('http','socks','http_ip','telegram'),old):
                     if port:self.listeners.append(await asyncio.start_server(lambda r,w,p=protocol:self.accept(r,w,p),'0.0.0.0',port,limit=65536))
                 self.ports=old
             raise ValueError('Порт прокси занят; прежние порты восстановлены') from None
 
     async def accept(self,r,w,protocol):
-        peer=w.get_extra_info('peername');ip=peer[0] if peer else ''
+        peer=w.get_extra_info('peername');ip=canonical(peer[0]) if peer else ''
+        if protocol=='telegram':return await self.accept_telegram(r,w,ip)
         if self.accepted>=self.store.config['settings']['max_connections'] or not self.permitted(ip):w.close();return
-        self.accepted+=1;uid=secrets.token_hex(12);self.tasks[uid]=asyncio.current_task();upstream=None
+        self.accepted+=1;self.ip_count[ip]+=1;uid=secrets.token_hex(12);self.tasks[uid]=asyncio.current_task();upstream=None
         try:
             async with asyncio.timeout(12):
                 user=self.trusted(ip,protocol)
-                if protocol=='http':
+                if protocol in ('http','http_ip'):
                     header=await r.readuntil(b'\r\n\r\n')
                     if len(header)>32768:raise ValueError('Header too large')
                     lines=header.decode('latin1').split('\r\n');method,target,version=lines[0].split(' ')
+                    if protocol=='http_ip' and method=='GET' and target.startswith('/invite/'):
+                        ok=self.access.redeem(target.removeprefix('/invite/'),ip)
+                        body=('Приглашение принято. Теперь подключите HTTP-прокси из этой же сети и дождитесь одобрения владельца.' if ok else 'Приглашение недействительно или срок истёк.').encode()
+                        w.write((f'HTTP/1.1 {200 if ok else 403} Reply\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n').encode()+body);await w.drain();return
+                    if version not in ('HTTP/1.0','HTTP/1.1') or method not in ('CONNECT','GET','POST','HEAD','PUT','DELETE','OPTIONS','PATCH'):raise ValueError('Malformed request')
+                    if method=='CONNECT':
+                        host,port=target.rsplit(':',1)
+                        if not host or not 1<=int(port)<=65535 or any(x in target for x in '/@?#'):raise ValueError('Malformed target')
+                    else:
+                        parsed=urllib.parse.urlsplit(target)
+                        if parsed.scheme!='http' or not parsed.hostname or parsed.username:raise ValueError('Absolute HTTP URL required')
                     headers=[];credential=''
                     for line in lines[1:]:
                         if not line:continue
@@ -120,10 +162,14 @@ class Gateway:
                         if not sep or line[0].isspace():raise ValueError('Malformed header')
                         if key.lower()=='proxy-authorization':credential=value.strip()
                         else:headers.append(line)
-                    if credential.lower().startswith('basic '):
+                    if protocol=='http_ip':user=self.access.user(ip)
+                    elif credential.lower().startswith('basic '):
                         try:username,password=base64.b64decode(credential[6:],validate=True).decode().split(':',1);user=self.authenticate(username,password,protocol)
                         except (ValueError,UnicodeError):user=None
                     if not user:
+                        if protocol=='http_ip':
+                            w.write(b'HTTP/1.1 403 Owner Approval Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');await w.drain();return
+                        if credential:self.auth_failed(ip)
                         w.write(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="Proxy Boris"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');await w.drain();return
                     # Forward the original absolute request to a mature HTTP proxy.
                     # Connection: close prevents a later unauthenticated HTTP request sharing this tunnel.
@@ -148,7 +194,7 @@ class Gateway:
                         password=(await r.readexactly((await r.readexactly(1))[0])).decode()
                         user=self.authenticate(username,password,protocol)
                         w.write(b'\x01'+(b'\x00' if user else b'\x01'));await w.drain()
-                        if not user:return
+                        if not user:self.auth_failed(ip);return
                     else:w.write(b'\x05\xff');await w.drain();return
                     await w.drain();h=await r.readexactly(4)
                     if h[:3]!=b'\x05\x01\x00':
@@ -172,6 +218,7 @@ class Gateway:
                     if not data:
                         if writer.can_write_eof():writer.write_eof();await writer.drain()
                         break
+                    if not self.enabled(user,protocol):break
                     writer.write(data);await writer.drain();rec[key]+=len(data)
                     self.usage_pending[user['id']][0 if key=='upload' else 1]+=len(data)
             a=asyncio.create_task(pump(r,uw,'upload'));b=asyncio.create_task(pump(ur,w,'download'))
@@ -186,7 +233,8 @@ class Gateway:
                 if rec['result']=='active':rec['result']='closed'
                 # Bound RAM even if storage is temporarily unavailable.
                 self.pending.append(rec);self.pending=self.pending[-1000:]
-            self.tasks.pop(uid,None);self.accepted-=1
+            self.tasks.pop(uid,None);self.accepted-=1;self.ip_count[ip]-=1
+            if not self.ip_count[ip]:del self.ip_count[ip]
             w.close()
             if upstream:upstream.close()
             with contextlib.suppress(Exception):await asyncio.wait_for(w.wait_closed(),1)
@@ -197,12 +245,62 @@ class Gateway:
             self.store.add_usage([(uid,*counts) for uid,counts in self.usage_pending.items()]);self.usage_pending.clear()
         self.usage_cache=self.store.usage()
         self.bans={k:v for k,v in self.bans.items() if v>time.time()}
+        self.ban_reasons={k:v for k,v in self.ban_reasons.items() if k in self.bans}
+        for name in ('attempts','auth_attempts'):
+            setattr(self,name,{k:v for k,v in getattr(self,name).items() if v and v[-1]>time.time()-60})
+        self.access.cleanup()
+        for rec in list(self.active.values()):
+            if rec['protocol']=='http_ip' and not self.access.allowed(self.access.get(rec['ip'])):self.disconnect_ip(rec['ip'])
 
     def disconnect(self,client_id=''):
-        for sid,rec in list(self.active.items()):
-            if not client_id or rec['client_id']==client_id:
+        for sid,rec in list(self.active.items())+list(self.tg_connections.items()):
+            if not client_id or rec.get('client_id')==client_id:
                 task=self.tasks.get(sid)
                 if task:task.cancel()
+
+    async def accept_telegram(self,r,w,ip):
+        # Keep six local monitoring channels possible at the external connection cap.
+        limit=self.store.config['settings']['max_connections']+(8 if ip=='127.0.0.1' else 0)
+        if self.accepted>=limit or (ip!='127.0.0.1' and not self.permitted(ip)):w.close();return
+        self.accepted+=1;self.ip_count[ip]+=1;uid=secrets.token_hex(12);self.tasks[uid]=asyncio.current_task();upstream=None
+        self.tg_connections[uid]={'ip':ip,'started':time.time()}
+        try:
+            # Require an entire bounded TLS record before opening an upstream socket.
+            async with asyncio.timeout(10):
+                head=await r.readexactly(5)
+                size=int.from_bytes(head[3:],'big')
+                if head[:2]!=b'\x16\x03' or not 40<=size<=16384:raise ValueError('Not TLS')
+                hello=await r.readexactly(size)
+                from .telegram_probe import identify_hello
+                users=[u for u in self.store.config['clients'] if self.enabled(u,'telegram')]
+                if ip=='127.0.0.1':users=users+[{'id':'__health','name':'Проверка','telegram_secret':self.store.config['telegram_probe']['internal_secret']}]
+                user=identify_hello(head+hello,users)
+                if not user:raise ValueError('Secret rejected')
+                if ip=='127.0.0.1' and user['id']!='__health' and not self.permitted(ip):raise ValueError('Source rejected')
+                self.tg_connections[uid].update(id=uid,client_id=user['id'],name=user['name'],protocol='telegram',destination='Telegram',ended=0,upload=0,download=0,result='active')
+                ur,upstream=await asyncio.open_connection('127.0.0.1',12086)
+                upstream.write(head+hello);await upstream.drain()
+                first=await ur.read(16384)
+                if not first:raise ValueError('Handshake rejected')
+                w.write(first);await w.drain()
+            async def copy(reader,writer,key):
+                while data:=await asyncio.wait_for(reader.read(65536),self.store.config['settings']['idle_seconds']):
+                    writer.write(data);await writer.drain();self.tg_connections[uid][key]+=len(data)
+            tasks=[asyncio.create_task(copy(r,upstream,'upload')),asyncio.create_task(copy(ur,w,'download'))]
+            try:
+                await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in tasks:task.cancel()
+                await asyncio.gather(*tasks,return_exceptions=True)
+        except (OSError,TimeoutError,ValueError,asyncio.IncompleteReadError):self.auth_failed(ip)
+        finally:
+            rec=self.tg_connections.pop(uid,None)
+            if rec and rec.get('client_id') and rec['client_id']!='__health':
+                rec['ended']=time.time();rec['result']='closed';self.pending.append(rec);self.pending=self.pending[-1000:]
+            self.tasks.pop(uid,None);self.accepted-=1;self.ip_count[ip]-=1
+            if not self.ip_count[ip]:del self.ip_count[ip]
+            w.close()
+            if upstream:upstream.close()
 
     async def stop_listeners(self):
         for s in self.listeners:s.close();await s.wait_closed()

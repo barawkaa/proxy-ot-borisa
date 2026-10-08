@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import logging
 import secrets
 import ssl
 import struct
@@ -11,6 +12,10 @@ from telethon import TelegramClient, functions, utils
 from telethon.sessions import StringSession
 from telethon.network.connection import ConnectionTcpIntermediate, ConnectionTcpMTProxyRandomizedIntermediate
 from .gateway import socks_open
+
+LOGGER=logging.getLogger("boris.telegram")
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.propagate=False
 
 
 def client_hello(secret):
@@ -185,7 +190,7 @@ class TelegramProbe:
             client=next((u for u in self.store.config['clients'] if u.get('enabled') and u.get('telegram')),None)
             if not client:return {'status':'unconfigured'}
             options={'connection':FakeTLSConnection,'proxy':('127.0.0.1',self.store.config['settings']['telegram_port'],self.store.config['telegram_probe']['internal_secret'])}
-        client=TelegramClient(session,int(s['api_id']),s['api_hash'],receive_updates=False,auto_reconnect=False,connection_retries=0,request_retries=0,flood_sleep_threshold=0,timeout=10,**options)
+        client=TelegramClient(session,int(s['api_id']),s['api_hash'],base_logger=LOGGER,receive_updates=False,auto_reconnect=False,connection_retries=0,request_retries=0,flood_sleep_threshold=0,timeout=10,**options)
         try:
             async with asyncio.timeout(s['timeout']):
                 await client.connect()

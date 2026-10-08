@@ -124,7 +124,7 @@ class Health:
     async def scan(self,full=True):
         if self.lock.locked():
             async with self.lock:pass
-            return {'summary':self.scan_summary()}
+            if not full:return {'summary':self.scan_summary()}
         async with self.lock:
             servers=self.candidates();ids={x['id'] for x in servers}
             for mapping in (self.results,self.history,self.probe_locks):

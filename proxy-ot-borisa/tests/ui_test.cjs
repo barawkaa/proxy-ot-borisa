@@ -34,6 +34,7 @@ const assert=require('node:assert/strict');
  await page.getByRole('button',{name:'Приостановить',exact:true}).click();
  await page.getByRole('button',{name:/Запрещённые \/ пауза · 1/}).click();
  await page.getByRole('button',{name:'Запретить',exact:true}).click();
+ await page.locator('.badge').filter({hasText:'Запрещён'}).waitFor();
  await page.screenshot({path:'/tmp/ui-access.png',fullPage:true});
  await page.getByRole('link',{name:'Главная',exact:true}).click();
  await page.getByRole('button',{name:'Проверить сейчас',exact:true}).click();

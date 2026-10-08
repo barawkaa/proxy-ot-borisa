@@ -259,7 +259,9 @@ class Gateway:
                 if task:task.cancel()
 
     async def accept_telegram(self,r,w,ip):
-        if self.accepted>=self.store.config['settings']['max_connections'] or not self.permitted(ip):w.close();return
+        # Keep six local monitoring channels possible at the external connection cap.
+        limit=self.store.config['settings']['max_connections']+(8 if ip=='127.0.0.1' else 0)
+        if self.accepted>=limit or (ip!='127.0.0.1' and not self.permitted(ip)):w.close();return
         self.accepted+=1;self.ip_count[ip]+=1;uid=secrets.token_hex(12);self.tasks[uid]=asyncio.current_task();upstream=None
         self.tg_connections[uid]={'ip':ip,'started':time.time()}
         try:
@@ -274,6 +276,7 @@ class Gateway:
                 if ip=='127.0.0.1':users=users+[{'id':'__health','name':'Проверка','telegram_secret':self.store.config['telegram_probe']['internal_secret']}]
                 user=identify_hello(head+hello,users)
                 if not user:raise ValueError('Secret rejected')
+                if ip=='127.0.0.1' and user['id']!='__health' and not self.permitted(ip):raise ValueError('Source rejected')
                 self.tg_connections[uid].update(id=uid,client_id=user['id'],name=user['name'],protocol='telegram',destination='Telegram',ended=0,upload=0,download=0,result='active')
                 ur,upstream=await asyncio.open_connection('127.0.0.1',12086)
                 upstream.write(head+hello);await upstream.drain()

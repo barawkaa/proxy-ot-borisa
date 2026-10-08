@@ -26,7 +26,7 @@ class Notifications:
         if len(parts)!=3 or parts[0] not in ('allow','deny'):return
         uid,revision=parts[1:];row=next((x for x in self.gateway.access.rows() if x['id']==uid),None)
         text='Запрос уже обработан или истёк'
-        if row and row['status']=='pending' and row['revision']==revision:
+        if row and row['status']=='pending' and row['revision']==revision and time.time()-row['first_seen']<self.store.config['access']['pending_hours']*3600:
             self.gateway.access.update(row['ip'],{'status':'approved' if parts[0]=='allow' else 'blocked'},revision)
             self.gateway.disconnect_ip(row['ip']);text='Доступ разрешён' if parts[0]=='allow' else 'Доступ запрещён'
         await self.call('answerCallbackQuery',{'callback_query_id':item['id'],'text':text})

@@ -110,7 +110,7 @@ class Application:
         result={};services=self.service_status()
         for key,selection in self.health.profiles.items():
             uid=selection.selected;node=next((x for x in self.store.config['servers'] if x['id']==uid),{})
-            reserve=selection.decision.get('reserve_id','')
+            reserve=next((x['id'] for x in selection.ordered() if x['id']!=uid),'')
             metrics=self.health.results.get(uid,{})
             result[key]={**services[key], 'selected_id':uid,'selected_name':node.get('name','Не выбран'),
                 'decision':selection.decision,'reason':selection.reason,'last_switch':selection.last_switch,
@@ -279,7 +279,10 @@ class Application:
         if action=='cleanup':return web.json_response(self.store.cleanup(bool(b.get('clear'))))
         if action=='route-test':
             u=next((x for x in self.store.config['clients'] if x['id']==b.get('client_id')),None)
-            return web.json_response(explain(self.store.config,b['host'],u))
+            profile=b.get('profile','http')
+            if profile not in PROFILES:raise ValueError('Неизвестный прокси')
+            if profile=='http_ip':u=None
+            return web.json_response(explain(self.store.config,b['host'],u,profile))
         async with self.mutation:
             c=self.store.snapshot()
             if action=='select':
@@ -336,9 +339,9 @@ class Application:
 
     async def create_media_file(self):
         async with self.mutation:
-            c=self.store.snapshot();s=c['telegram_probe'];n=c['notifications']
-            if not s['bot_token'] or not n['chat_id']:raise ValueError('Сохраните токен контрольного бота и ID чата в настройках уведомлений')
-            form=aiohttp.FormData();form.add_field('chat_id',str(n['chat_id']))
+            c=self.store.snapshot();s=c['telegram_probe'];chat_id=s['chat_id'] or c['notifications']['chat_id']
+            if not s['bot_token'] or not chat_id:raise ValueError('Сохраните токен контрольного бота и ID чата в настройках проверки файлов Telegram')
+            form=aiohttp.FormData();form.add_field('chat_id',str(chat_id))
             form.add_field('caption','Контрольный файл Proxy от Бориса. Повторные проверки скачивают фрагмент без новых сообщений.')
             form.add_field('document',secrets.token_bytes(1024*1024),filename='proxy-check.bin',content_type='application/octet-stream')
             proxy='http://127.0.0.1:12085' if self.runtime.selected else None

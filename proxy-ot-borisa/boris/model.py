@@ -58,7 +58,7 @@ def defaults():
         'notifications': {'mode':'ha', 'ha_targets':[], 'ha_entry_id':'', 'ha_chat_ids':[], 'enabled': False, 'token': '', 'chat_id': '', 'owner_id': '',
                           'app_url': '', 'poll_callbacks': False},
         'telegram_probe': {'internal_secret': 'ee'+secrets.token_hex(16)+'www.google.com'.encode().hex(), 'enabled': False, 'api_id': 0, 'api_hash': '', 'bot_token': '',
-                           'file_id': '', 'min_kbps': 128, 'interval': 300, 'sample_kb': 512, 'timeout': 20},
+                           'file_id': '', 'chat_id': '', 'min_kbps': 128, 'interval': 300, 'sample_kb': 512, 'timeout': 20},
         'legacy': {},
     }
 

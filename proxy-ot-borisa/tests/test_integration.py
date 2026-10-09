@@ -70,14 +70,30 @@ class RealCoreTests(unittest.IsolatedAsyncioTestCase):
         import copy
         other=copy.deepcopy(self.c['servers'][0]);other['id']='second_path';other['name']='Second';self.c['servers'].append(other)
         await self.runtime.apply(self.c)
-        first=self.c['servers'][0]['id'];await self.runtime.select(first)
+        first=self.c['servers'][0]['id'];await self.runtime.select(first,'socks')
         r,w=await socks_open(2080,'127.0.0.1',18112,self.user['username'],self.user['password'])
         h=Health(self.store,self.runtime)
         check=await h.url_check(other['id'],'http://127.0.0.1:18111/ok')
         self.assertEqual(check['status'],'ok');self.assertEqual(self.runtime.selected,first)
-        await self.runtime.select(other['id'])
+        await self.runtime.select(other['id'],'socks')
         w.write(b'after-switch');await w.drain();self.assertEqual(await asyncio.wait_for(r.readexactly(12),3),b'after-switch')
         w.close();await w.wait_closed()
+
+    async def test_independent_http_and_socks_routes(self):
+        await self.runtime.select('')
+        r,w=await socks_open(2080,'127.0.0.1',18112,self.user['username'],self.user['password'])
+        w.write(b'independent');await w.drain()
+        self.assertEqual(await asyncio.wait_for(r.readexactly(11),3),b'independent')
+        w.close();await w.wait_closed()
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+            async with session.get('http://127.0.0.1:18111/ok',proxy='http://127.0.0.1:2081',proxy_auth=aiohttp.BasicAuth(self.user['username'],self.user['password'])) as response:
+                self.assertNotEqual(response.status,200)
+        await self.runtime.select(self.c['servers'][0]['id'])
+        await self.runtime.select('','socks')
+        with self.assertRaises(OSError):await socks_open(2080,'127.0.0.1',18112,self.user['username'],self.user['password'])
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+            async with session.get('http://127.0.0.1:18111/ok',proxy='http://127.0.0.1:2081',proxy_auth=aiohttp.BasicAuth(self.user['username'],self.user['password'])) as response:
+                self.assertEqual(await response.text(),'BORIS_INTEGRATION_OK')
 
     async def test_mtg_config_and_stats(self):
         self.c['settings']['telegram_enabled']=True;await self.runtime.apply_mtg(self.c)

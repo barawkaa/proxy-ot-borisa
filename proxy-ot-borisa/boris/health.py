@@ -109,7 +109,7 @@ class Health:
             if not full:return {'summary':self.scan_summary()}
         async with self.lock:
             servers=self.candidates();ids={x['id'] for x in servers}
-            for mapping in (self.results,self.history,self.probe_locks):
+            for mapping in (self.results,self.history,self.probe_locks,self.failure_streak,self.next_probe):
                 for tag in list(mapping):
                     if tag not in ids and not (mapping is self.probe_locks and mapping[tag].locked()):mapping.pop(tag,None)
             self.progress={'running':True,'done':0,'total':len(servers)}
@@ -204,6 +204,7 @@ class Selection:
 
     def usable(self,tag):
         r=self.results.get(tag,{})
+        if self.profile=='telegram' and time.time()-r.get('full_at',0)>600:return False
         if self.settings['require_russian'] and (time.time()-r.get('full_at',0)>600 or r.get('russian_status')!='available'):return False
         if self.settings['require_services'] and (time.time()-r.get('full_at',0)>600 or r.get('service_status')!='available'):return False
         return rank(r)[0]<9 and not (self.profile=='telegram' and r.get('telegram',{}).get('media',{}).get('status')=='stalled' and time.time()-r.get('telegram',{}).get('media',{}).get('checked_at',0)<600) and (self.profile!='telegram' or r.get('telegram',{}).get('status') in ('protocol_ok','partial'))

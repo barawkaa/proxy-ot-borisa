@@ -4,6 +4,8 @@ from . import DOMAIN, LABELS
 
 class BorisEntity(CoordinatorEntity):
     _attr_has_entity_name=True
+    # Live diagnostics remain visible without copying every ping into Recorder.
+    _unrecorded_attributes=frozenset({'latency_ms','checked_at','reason','clients','checking'})
     def __init__(self,coordinator,profile,suffix):
         super().__init__(coordinator)
         self.profile=profile

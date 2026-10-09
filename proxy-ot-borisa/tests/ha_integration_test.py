@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from aiohttp import web
 from homeassistant.core import HomeAssistant
+from homeassistant import loader, config_entries
+from homeassistant.bootstrap import async_load_base_functionality
 from homeassistant.setup import async_setup_component
 
 
@@ -29,6 +31,10 @@ async def main():
         runner=web.AppRunner(app);await runner.setup();await web.TCPSite(runner,'127.0.0.1',8099).start()
         hass=HomeAssistant(root)
         try:
+            loader.async_setup(hass)
+            hass.config_entries=config_entries.ConfigEntries(hass,{})
+            assert await async_load_base_functionality(hass)
+            assert await async_setup_component(hass,'network',{})
             assert await async_setup_component(hass,'homeassistant',{})
             result=await hass.config_entries.flow.async_init('boris_proxy',context={'source':'user'})
             assert result['type']=='form',result

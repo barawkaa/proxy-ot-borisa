@@ -116,6 +116,16 @@ class Api54(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(r['expires'],time.time());self.assertLess(r['expires'],time.time()+169*3600)
         r=a.update('203.0.113.1',{'status':'approved','expires':0});self.assertEqual(r['expires'],0)
 
+    async def test_ip_route_settings_and_explanation_agree(self):
+        headers={'X-Boris-Request':'1'}
+        r=await self.client.post('/api/settings',headers=headers,json={'profiles':{'http_ip':{'route_mode':'direct'}}})
+        self.assertEqual(r.status,200);self.assertEqual(self.app.store.config['access']['route_mode'],'direct')
+        r=await self.client.post('/api/route-test',headers=headers,json={'profile':'http_ip','host':'example.com'})
+        self.assertEqual((await r.json())['route'],'direct')
+        r=await self.client.post('/api/settings',headers=headers,json={'access':{'route_mode':'all_vpn'}})
+        self.assertEqual(r.status,200);self.assertEqual(self.app.store.config['profiles']['http_ip']['route_mode'],'all_vpn')
+        self.assertEqual(self.app.store.config['profiles']['http']['route_mode'],'default')
+
 
 class HA54(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -148,5 +158,10 @@ class HA54(unittest.IsolatedAsyncioTestCase):
             await n.test();self.assertEqual(len(self.calls),1);n.call.assert_not_awaited();store.db.close()
     async def test_removed_target_rejected_without_partial_send(self):
         n=defaults()['notifications'];n['ha_targets']=['notify.boris','notify.removed']
+        with self.assertRaises(ValueError):await self.ha.send(n,'test')
+        self.assertEqual(self.calls,[])
+
+    async def test_missing_manual_bot_rejected_before_sending_to_selected_users(self):
+        n=defaults()['notifications'];n.update(ha_targets=['notify.boris'],ha_entry_id='removed',ha_chat_ids=['123'])
         with self.assertRaises(ValueError):await self.ha.send(n,'test')
         self.assertEqual(self.calls,[])

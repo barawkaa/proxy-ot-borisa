@@ -24,11 +24,12 @@ def route_rules(config, user=None, profile=None):
     return rules
 
 
-def explain(config, host, user=None):
+def explain(config, host, user=None, profile=None):
     host=host.strip().lower().strip('.')
     try:ip=ipaddress.ip_address(host)
     except ValueError:ip=None
-    for r in route_rules(config,user):
+    if profile=='telegram':return {'route':'vpn_telegram','reason':'Telegram всегда использует выбранный сервер MTProxy'}
+    for r in route_rules(config,user,profile):
         if 'domain_suffix' in r:
             hits=[x for x in r['domain_suffix'] if host==x or host.endswith('.'+x)]
             if hits:return {'route':r['outbound'],'reason':'Домен из списка: '+hits[0]}

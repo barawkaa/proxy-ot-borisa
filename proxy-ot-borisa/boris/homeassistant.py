@@ -51,6 +51,7 @@ class HomeAssistant:
         return {'targets':targets,'bots':bots}
 
     async def send(self,config,text):
+        if not config['ha_targets'] and not config['ha_chat_ids']:raise ValueError('Выберите получателей Telegram или укажите ID чата')
         known=await self.recipients();ids={x['id'] for x in known['targets']}
         if any(x not in ids for x in config['ha_targets']):raise ValueError('Получатель Telegram удалён или выключен в Home Assistant. Выберите его заново.')
         if config['ha_chat_ids'] and config['ha_entry_id'] not in {x['id'] for x in known['bots']}:raise ValueError('Выбранный бот не найден в Home Assistant')
@@ -73,10 +74,12 @@ def install_companion(config,root=None,source=None):
     shutil.copytree(source,stage);(stage/'.managed-by-proxy-boris').write_text('managed\n')
     if old.exists():shutil.rmtree(old)
     if dest.exists():dest.rename(old)
-    try:stage.rename(dest)
+    try:
+        stage.rename(dest)
+        atomic_json(root/'boris_proxy_link.json',{'url':'http://127.0.0.1:8099','token':config['ha']['token']})
     except Exception:
+        if dest.exists():shutil.rmtree(dest)
         if old.exists():old.rename(dest)
         raise
-    atomic_json(root/'boris_proxy_link.json',{'url':'http://127.0.0.1:8099','token':config['ha']['token']})
     if old.exists():shutil.rmtree(old)
     return {'summary':'Интеграция установлена. Перезапустите Home Assistant в удобное время, затем добавьте интеграцию «Proxy от Бориса». Приложение само HA не перезапускает.'}

@@ -55,10 +55,11 @@ class HomeAssistant:
         known=await self.recipients();ids={x['id'] for x in known['targets']}
         if any(x not in ids for x in config['ha_targets']):raise ValueError('Получатель Telegram удалён или выключен в Home Assistant. Выберите его заново.')
         if config['ha_chat_ids'] and config['ha_entry_id'] not in {x['id'] for x in known['bots']}:raise ValueError('Выбранный бот не найден в Home Assistant')
-        if config['ha_targets']:
-            await self.request('/services/notify/send_message',{'entity_id':config['ha_targets'],'message':text})
+        body={'message':text,'parse_mode':'plain_text'}
+        if config['ha_targets']:body['entity_id']=config['ha_targets']
         if config['ha_chat_ids']:
-            await self.request('/services/telegram_bot/send_message',{'config_entry_id':config['ha_entry_id'],'target':[int(x) for x in config['ha_chat_ids']],'message':text,'parse_mode':'plain_text'})
+            body.update(config_entry_id=config['ha_entry_id'],chat_id=[int(x) for x in config['ha_chat_ids']])
+        await self.request('/services/telegram_bot/send_message',body)
 
 
 def install_companion(config,root=None,source=None):

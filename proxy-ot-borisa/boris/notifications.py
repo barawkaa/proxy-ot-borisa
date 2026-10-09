@@ -11,8 +11,9 @@ class Notifications:
 
     async def call(self,method,body):
         n=self.store.config['notifications']
-        proxy='http://127.0.0.1:12085' if self.runtime.selected else None
-        auth=aiohttp.BasicAuth('__selected',self.runtime.password) if proxy else None
+        username=self.runtime.control_username()
+        proxy='http://127.0.0.1:12085' if username else None
+        auth=aiohttp.BasicAuth(username,self.runtime.password) if proxy else None
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12),trust_env=False) as session:
             async with session.post('https://api.telegram.org/bot'+n['token']+'/'+method,json=body,proxy=proxy,proxy_auth=auth) as response:
                 data=await response.json()

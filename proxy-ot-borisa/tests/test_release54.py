@@ -16,9 +16,20 @@ from boris.health import Health
 from boris.homeassistant import HomeAssistant,install_companion
 from boris.notifications import Notifications
 from boris.gateway import Gateway
+from boris.runtime import Runtime
 
 
 class Model54(unittest.TestCase):
+    def test_service_requests_use_enabled_proxy_when_http_is_off(self):
+        with tempfile.TemporaryDirectory() as root:
+            store=Store(root);runtime=Runtime(store)
+            runtime.selections.update(http='old',socks='working')
+            store.config['settings']['http_enabled']=False
+            self.assertEqual(runtime.control_username(),'__selected_socks')
+            store.config['settings']['socks_enabled']=False
+            self.assertEqual(runtime.control_username(),'')
+            store.db.close()
+
     def test_migrate_all_profiles_without_losing_manual_choice_or_bot(self):
         with tempfile.TemporaryDirectory() as root:
             c=defaults();del c['profiles'];del c['notifications']['mode']
@@ -149,8 +160,8 @@ class HA54(unittest.IsolatedAsyncioTestCase):
         recipients=await self.ha.recipients();self.assertEqual(len(recipients['targets']),1)
         n=defaults()['notifications'];n.update(ha_targets=['notify.boris'],ha_entry_id='bot',ha_chat_ids=['-100123'])
         await self.ha.send(n,'Запрос доступа')
-        self.assertEqual(self.calls[0],('/services/notify/send_message',{'entity_id':['notify.boris'],'message':'Запрос доступа'}))
-        self.assertEqual(self.calls[1][1]['target'],[-100123]);self.assertEqual(self.calls[1][1]['config_entry_id'],'bot')
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.calls[0],('/services/telegram_bot/send_message',{'entity_id':['notify.boris'],'message':'Запрос доступа','parse_mode':'plain_text','chat_id':[-100123],'config_entry_id':'bot'}))
     async def test_no_bot_token_required_in_ha_mode_and_no_updates_consumed(self):
         with tempfile.TemporaryDirectory() as root:
             store=Store(root);c=defaults();c['notifications'].update(enabled=True,ha_targets=['notify.boris']);store.save(validate(c))

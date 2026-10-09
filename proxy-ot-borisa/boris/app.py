@@ -227,7 +227,8 @@ class Application:
         async with self.mutation:
             c=self.store.snapshot();source=next(x for x in c['sources'] if x['id']==source_id)
             self.source_retry[source_id]=time.time()+300
-            proxy=('http://__selected:'+self.runtime.password+'@127.0.0.1:12085') if self.runtime.selected else None
+            username=self.runtime.control_username()
+            proxy=('http://'+username+':'+self.runtime.password+'@127.0.0.1:12085') if username else None
             parsed=await fetch_subscription(source['url'],source_id,proxy)
             await self.runtime.validate_servers(parsed['servers'])
             old={s['id']:s for s in c['servers'] if s['source_id']==source_id}
@@ -344,8 +345,9 @@ class Application:
             form=aiohttp.FormData();form.add_field('chat_id',str(chat_id))
             form.add_field('caption','Контрольный файл Proxy от Бориса. Повторные проверки скачивают фрагмент без новых сообщений.')
             form.add_field('document',secrets.token_bytes(1024*1024),filename='proxy-check.bin',content_type='application/octet-stream')
-            proxy='http://127.0.0.1:12085' if self.runtime.selected else None
-            auth=aiohttp.BasicAuth('__selected',self.runtime.password) if proxy else None
+            username=self.runtime.control_username()
+            proxy='http://127.0.0.1:12085' if username else None
+            auth=aiohttp.BasicAuth(username,self.runtime.password) if proxy else None
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45),trust_env=False) as session:
                 async with session.post('https://api.telegram.org/bot'+s['bot_token']+'/sendDocument',data=form,proxy=proxy,proxy_auth=auth) as response:
                     result=await response.json()

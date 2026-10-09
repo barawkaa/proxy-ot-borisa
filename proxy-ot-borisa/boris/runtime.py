@@ -7,7 +7,7 @@ import time
 from collections import deque
 from pathlib import Path
 import aiohttp
-from .model import client_enabled, PROFILES, selector_tag
+from .model import client_enabled, PROFILES, selector_tag, profile_enabled
 from .routing import core_config
 from .storage import atomic_json
 
@@ -29,6 +29,12 @@ class Runtime:
             async with session.request(method,'http://127.0.0.1:19090'+path,headers={'Authorization':'Bearer '+self.api_secret},json=data) as r:
                 r.raise_for_status()
                 return await r.json(content_type=None) if r.status!=204 else {}
+
+    def control_username(self):
+        for key in PROFILES:
+            if profile_enabled(self.store.config,key) and self.selections[key]:
+                return '__selected'+('' if key=='http' else '_'+key)
+        return ''
 
     async def _read(self, process, name):
         while True:

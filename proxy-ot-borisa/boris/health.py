@@ -184,7 +184,7 @@ class Selection:
         base=rank(r)
         mode=self.settings['route_mode']
         if mode=='default':mode=self.store.config['routing']['mode']
-        if base[0]<9 and mode in ('selected','direct'):base=(0,base[1],base[2])
+        if base[0]<9 and (self.profile=='telegram' or mode in ('selected','direct')):base=(0,base[1],base[2])
         if base[0]>=9:return base
         if self.profile!='telegram':return base
         tg=r.get('telegram',{});media=tg.get('media',{})

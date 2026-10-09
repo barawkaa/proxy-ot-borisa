@@ -1,7 +1,7 @@
 name: Verify complete application
 on:
   push:
-    branches: [main, release/5.3]
+    branches: [main, release/5.4]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -34,7 +34,7 @@ jobs:
           MTG_BIN: ${{ github.workspace }}/engines/mtg-multi-1.12.0-linux-amd64/mtg-multi
         run: |
           python -m compileall -q proxy-ot-borisa/boris
-          ruff check proxy-ot-borisa/boris --select F
+          ruff check proxy-ot-borisa/boris proxy-ot-borisa/ha_integration --select F
           node --check proxy-ot-borisa/ui/app.js
           python -m unittest discover -s proxy-ot-borisa/tests -v
   build-arm64:
@@ -49,14 +49,14 @@ jobs:
           context: proxy-ot-borisa
           platforms: linux/arm64
           push: false
-          tags: proxy-boris:5.3
-          outputs: type=docker,dest=/tmp/proxy-boris-5.3.tar
+          tags: proxy-boris:5.4
+          outputs: type=docker,dest=/tmp/proxy-boris-5.4.tar
       - name: Boot the ARM64 image and check the application
         run: |
-          docker load -i /tmp/proxy-boris-5.3.tar
-          docker run -d --name boris-smoke --network host proxy-boris:5.3
+          docker load -i /tmp/proxy-boris-5.4.tar
+          docker run -d --name boris-smoke --network host proxy-boris:5.4
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8099/api/state -o /tmp/state.json && python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"] and s["version"]=="5.3"'; then break; fi
+            if curl -fsS http://127.0.0.1:8099/api/state -o /tmp/state.json && python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"] and s["version"]=="5.4"'; then break; fi
             sleep 1
           done
           python3 -c 'import json; s=json.load(open("/tmp/state.json")); assert s["booted"] and s["runtime"]["core"]'
@@ -77,8 +77,8 @@ jobs:
           path: /tmp/ui-image-*.png
       - uses: actions/upload-artifact@v4
         with:
-          name: proxy-boris-5.3-arm64
-          path: /tmp/proxy-boris-5.3.tar
+          name: proxy-boris-5.4-arm64
+          path: /tmp/proxy-boris-5.4.tar
           retention-days: 7
   browser:
     runs-on: ubuntu-latest
@@ -107,3 +107,14 @@ jobs:
           name: ui-previews
           path: /tmp/ui-*.png
           retention-days: 7
+  home-assistant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: pip install homeassistant==2026.9.4
+      - name: Real Home Assistant integration and controls
+        run: python proxy-ot-borisa/tests/ha_integration_test.py

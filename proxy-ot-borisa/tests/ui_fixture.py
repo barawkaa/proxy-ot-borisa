@@ -11,7 +11,7 @@ c['servers']=parse_payload('vless://11111111-1111-4111-8111-111111111111@example
 import time
 from boris.model import client_new
 c=app.store.snapshot();c['clients']=[client_new('Борис'),client_new('Гость')];app.store.save(c)
-id=c['servers'][0]['id'];app.runtime.selected=id
+id=c['servers'][0]['id'];app.runtime.selected=id;app.runtime.selections={key:id for key in app.health.profiles}
 app.health.results[id]={'checked_at':time.time(),'full_at':time.time(),'foreign_ok':True,'russian_ok':False,'russian_status':'partial','foreign_status':'available','service_status':'limited','latency_ms':190,'median_ms':210,'samples':6,'failure_rate':0,'telegram':{'status':'protocol_ok'}}
 app.health.url_check=AsyncMock(return_value={'status':'ok','ms':190})
 app.health.describe('Текущий сервер лучший по доступности, стабильности и измеренной задержке')
@@ -21,4 +21,7 @@ app.store.event('test','Событие для проверки диагност�
 app.jobs.update(running={'id':'running','title':'Тестовая текущая задача','state':'running','background':True,'started':time.time()},error={'id':'error','title':'Тестовая ошибка задачи','state':'error','error':'Проверка не выполнена','started':time.time()-30,'ended':time.time()-10})
 app.gateway.active={u['id']:dict(id=u['id'],client_id=u['id'],name=u['name'],protocol='http',ip='192.168.1.10',destination='example-guest' if u['name']=='Гость' else 'example-boris',started=time.time()-20,ended=0,upload=10,download=20,result='active') for u in c['clients']}
 app.gateway.access.observe('203.0.113.25')
+app.notifications.ha.recipients=AsyncMock(return_value={'targets':[{'id':'notify.telegram_boris','name':'Борис','available':True,'bot_id':'bot1'},{'id':'notify.telegram_family','name':'Семья','available':True,'bot_id':'bot1'}],'bots':[{'id':'bot1','name':'Home Assistant'}]})
+app.notifications.ha.send=AsyncMock()
+app.health.scan=AsyncMock(return_value={'summary':'Проверено 1; доступен 1'})
 web.run_app(app.web,host='127.0.0.1',port=18099,access_log=None)

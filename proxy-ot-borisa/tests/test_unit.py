@@ -97,14 +97,14 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):self.store.db.close();self.tmp.cleanup()
     async def test_reserve_lower_ping_not_preferred(self):
         a,b=[x['id'] for x in self.c['servers']];self.health.results={a:{'checked_at':time.time(),'foreign_ok':True,'russian_ok':False,'latency_ms':20},b:{'checked_at':time.time(),'foreign_ok':True,'russian_ok':True,'latency_ms':200}}
-        await self.health.choose();self.runtime.select.assert_awaited_with(b);self.health.results[b]['foreign_ok']=False;await self.health.choose(True);self.runtime.select.assert_awaited_with(a)
+        await self.health.profiles['http'].choose();self.runtime.select.assert_awaited_with(b);self.health.results[b]['foreign_ok']=False;await self.health.profiles['http'].choose(True);self.runtime.select.assert_awaited_with(a)
     async def test_hysteresis(self):
         a,b=[x['id'] for x in self.c['servers']];self.runtime.selected=a;self.health.results={a:{'checked_at':time.time(),'foreign_ok':True,'russian_ok':True,'latency_ms':100},b:{'checked_at':time.time(),'foreign_ok':True,'russian_ok':True,'latency_ms':90}}
-        await self.health.choose();self.runtime.select.assert_not_awaited()
+        await self.health.profiles['http'].choose();self.runtime.select.assert_not_awaited()
     async def test_stale_results(self):self.assertEqual(rank({'foreign_ok':True,'checked_at':time.time()-601})[0],9)
     async def test_manual_does_not_return_to_dead_server(self):
-        a,b=[x['id'] for x in self.c['servers']];self.c['settings'].update(selection='manual',manual_server=a);self.store.save(self.c);self.health.results={a:{'foreign_ok':False,'checked_at':time.time()},b:{'foreign_ok':True,'checked_at':time.time(),'latency_ms':40}}
-        await self.health.choose();self.runtime.select.assert_awaited_with(b)
+        a,b=[x['id'] for x in self.c['servers']];self.c['profiles']['http'].update(selection='manual',manual_server=a);self.store.save(self.c);self.health.results={a:{'foreign_ok':False,'checked_at':time.time()},b:{'foreign_ok':True,'checked_at':time.time(),'latency_ms':40}}
+        await self.health.profiles['http'].choose();self.runtime.select.assert_awaited_with(b)
 
 class AccessTests(unittest.TestCase):
     def test_trusted_is_bound_to_client_and_protocol(self):

@@ -75,7 +75,8 @@ class Access:
         if status not in ('approved','paused','blocked','pending','lan'):raise ValueError('Неизвестный статус доступа')
         if status=='lan' and not self.lan(ip):raise ValueError('Адрес не входит в домашнюю сеть')
         if mode not in (*MODES,'default'):raise ValueError('Неизвестный маршрут')
-        expires=float(body.get('expires',row['expires']) or 0)
+        default_expiry=time.time()+self.store.config['access']['grant_hours']*3600 if status=='approved' and row['status']!='approved' else row['expires']
+        expires=float(body.get('expires',default_expiry) or 0)
         if 'expires' in body and expires and not time.time()<expires<time.time()+86400*3650:raise ValueError('Укажите будущий срок доступа')
         name=str(body.get('name',row['name'])).strip()[:80] or row['ip']
         self.store.db.execute('UPDATE ip_access SET name=?,status=?,expires=?,route_mode=?,revision=? WHERE ip=?',

@@ -1,5 +1,5 @@
 name: Proxy от Бориса
-version: "5.3"
+version: "5.4"
 slug: proxy_ot_borisa
 description: Личный HTTP, SOCKS5 и Telegram MTProxy с проверкой серверов и восстановлением
 arch:
@@ -31,3 +31,7 @@ schema:
   log_level: str?
   production_mode: str?
   servers_json: str?
+homeassistant_api: true
+map:
+  - type: homeassistant_config
+    read_only: false

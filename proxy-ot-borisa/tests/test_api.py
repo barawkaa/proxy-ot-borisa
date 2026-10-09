@@ -14,7 +14,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close();self.app.store.db.close();self.tmp.cleanup()
     async def post(self,path,data,header=True):return await self.client.post('/api/'+path,json=data,headers={'X-Boris-Request':'1'} if header else {})
     async def test_state_and_csrf(self):
-        r=await self.client.get('/api/state');self.assertEqual(r.status,200);s=await r.json();self.assertEqual(s['version'],'5.3')
+        r=await self.client.get('/api/state');self.assertEqual(r.status,200);s=await r.json();self.assertEqual(s['version'],'5.4')
         r=await self.post('client',{'name':'No'},False);self.assertEqual(r.status,403)
     async def test_client_create_secrets_and_delete(self):
         r=await self.post('client',{'name':'Борис'});self.assertEqual(r.status,200)

@@ -7,7 +7,7 @@ import time
 from collections import deque
 from pathlib import Path
 import aiohttp
-from .model import client_enabled
+from .model import client_enabled, PROFILES, selector_tag, profile_enabled
 from .routing import core_config
 from .storage import atomic_json
 
@@ -19,7 +19,7 @@ class Runtime:
         self.binary=os.environ.get('SINGBOX_BIN','/usr/local/bin/sing-box')
         self.mtg_binary=os.environ.get('MTG_BIN','/usr/local/bin/mtg-multi')
         self.password=secrets.token_urlsafe(24);self.api_secret=secrets.token_urlsafe(24)
-        self.process=None; self.mtg=None;self.selected='';self.lock=asyncio.Lock()
+        self.process=None; self.mtg=None;self.selected='';self.selections={key:'' for key in PROFILES};self.lock=asyncio.Lock()
         self.last_good=None;self.last_mtg=None;self.error='';self.tg_error='';self.restarts=0
         self.next_restart=0;self.failures=0;self.tg_failures=0;self.tg_next=0
         self.started=0;self.tg_started=0;self.output=deque(maxlen=80);self.readers=set();self.tg_hash=''
@@ -29,6 +29,12 @@ class Runtime:
             async with session.request(method,'http://127.0.0.1:19090'+path,headers={'Authorization':'Bearer '+self.api_secret},json=data) as r:
                 r.raise_for_status()
                 return await r.json(content_type=None) if r.status!=204 else {}
+
+    def control_username(self):
+        for key in PROFILES:
+            if profile_enabled(self.store.config,key) and self.selections[key]:
+                return '__selected'+('' if key=='http' else '_'+key)
+        return ''
 
     async def _read(self, process, name):
         while True:
@@ -79,7 +85,7 @@ class Runtime:
 
     async def apply(self,config):
         async with self.lock:
-            cfg=core_config(config,self.password,self.api_secret,self.selected)
+            cfg=core_config(config,self.password,self.api_secret,self.selections)
             await self.check(cfg)
             if cfg==self.last_good and self.process and self.process.returncode is None:
                 await self.apply_mtg(config);return
@@ -98,22 +104,25 @@ class Runtime:
                 self.error='Новая конфигурация не запустилась; выполнен возврат к предыдущей'
                 raise RuntimeError(self.error) from None
             self.last_good=cfg;self.started=time.time();self.error='';self.next_restart=0
-            chosen=next(x['default'] for x in cfg['outbounds'] if x['tag']=='vpn')
-            self.selected='' if chosen=='unavailable' else chosen
+            for key in PROFILES:
+                chosen=next(x['default'] for x in cfg['outbounds'] if x['tag']==selector_tag(key))
+                self.selections[key]='' if chosen=='unavailable' else chosen
+            self.selected=self.selections['http']
             await self.apply_mtg(config)
 
-    async def select(self,tag):
+    async def select(self,tag,profile='http'):
         async with self.lock:
-            await self.api('/proxies/vpn','PUT',{'name':tag or 'unavailable'})
-            self.selected=tag
+            await self.api('/proxies/'+selector_tag(profile),'PUT',{'name':tag or 'unavailable'})
+            self.selections[profile]=tag
+            self.selected=self.selections['http']
             if self.last_good:
                 for o in self.last_good['outbounds']:
-                    if o.get('tag')=='vpn':o['default']=tag or 'unavailable'
+                    if o.get('tag')==selector_tag(profile):o['default']=tag or 'unavailable'
 
-    async def close_failed_routes(self,tag):
+    async def close_failed_routes(self,tag,profile=None):
         try:
             data=await self.api('/connections')
-            ids=[x['id'] for x in data.get('connections',[]) if tag in x.get('chains',[])][:2048]
+            ids=[x['id'] for x in data.get('connections',[]) if tag in x.get('chains',[]) and (profile is None or selector_tag(profile) in x.get('chains',[]))][:2048]
             semaphore=asyncio.Semaphore(8)
             async def close(uid):
                 import urllib.parse
@@ -194,7 +203,7 @@ class Runtime:
 
     def status(self):
         return {'core':bool(self.process and self.process.returncode is None),'telegram':bool(self.mtg and self.mtg.returncode is None),
-                'error':self.error,'telegram_error':self.tg_error,'restarts':self.restarts,'selected':self.selected}
+                'error':self.error,'telegram_error':self.tg_error,'restarts':self.restarts,'selected':self.selected,'selections':dict(self.selections),'started':self.started,'telegram_started':self.tg_started}
 
     async def close(self):
         await self._stop(self.mtg);await self._stop(self.process)

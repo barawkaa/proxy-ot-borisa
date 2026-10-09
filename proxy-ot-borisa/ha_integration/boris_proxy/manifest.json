@@ -1,0 +1,13 @@
+{
+  "domain": "boris_proxy",
+  "name": "Proxy от Бориса",
+  "version": "5.4.0",
+  "config_flow": true,
+  "documentation": "https://github.com/barawkaa/proxy-ot-borisa",
+  "issue_tracker": "https://github.com/barawkaa/proxy-ot-borisa/issues",
+  "codeowners": [
+    "@barawkaa"
+  ],
+  "iot_class": "local_polling",
+  "requirements": []
+}

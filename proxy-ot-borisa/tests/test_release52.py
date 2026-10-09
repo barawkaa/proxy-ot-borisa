@@ -29,26 +29,26 @@ class Release52(unittest.IsolatedAsyncioTestCase):
         c['servers']=parse_payload('socks5://example.com:1080#old\nsocks5://example.net:1080#new')['servers']
         self.app.store.save(c)
         old,new=[x['id'] for x in c['servers']]
-        self.app.runtime.selected=old
-        async def select(tag):self.app.runtime.selected=tag
+        self.app.runtime.selected=old;self.app.runtime.selections['http']=old
+        async def select(tag):self.app.runtime.selected=tag;self.app.runtime.selections['http']=tag
         self.app.runtime.select=AsyncMock(side_effect=select)
         return old,new
 
     async def test_manual_failure_restores_previous_without_saving_mode(self):
         old,new=await self.prepare_selection()
         original=self.app.store.snapshot()
-        self.app.health.usable=lambda tag:tag==old
+        self.app.health.profiles['http'].usable=lambda tag:tag==old
         self.app.health.url_check=AsyncMock(side_effect=[{'status':'unreachable'},{'status':'unreachable'},{'status':'ok'}])
         response=await self.post('select',{'id':new})
         self.assertEqual(response.status,400)
-        self.assertIn('восстановлено',(await response.json())['error'])
+        self.assertIn('восстановлен',(await response.json())['error'])
         self.assertEqual(self.app.runtime.selected,old)
         self.assertEqual(self.app.store.config,original)
 
     async def test_manual_failure_without_reserve_closes_route(self):
         old,new=await self.prepare_selection()
         original=self.app.store.snapshot()
-        self.app.health.usable=lambda tag:False
+        self.app.health.profiles['http'].usable=lambda tag:False
         self.app.health.url_check=AsyncMock(return_value={'status':'unreachable'})
         response=await self.post('select',{'id':new})
         self.assertEqual(response.status,400)
@@ -57,7 +57,7 @@ class Release52(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_rollback_also_closes_route(self):
         old,new=await self.prepare_selection()
-        self.app.health.usable=lambda tag:tag==old
+        self.app.health.profiles['http'].usable=lambda tag:tag==old
         self.app.health.url_check=AsyncMock(return_value={'status':'unreachable'})
         self.assertEqual((await self.post('select',{'id':new})).status,400)
         self.assertEqual(self.app.runtime.selected,'')

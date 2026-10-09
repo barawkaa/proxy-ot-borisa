@@ -5,6 +5,16 @@ import re
 import secrets
 import time
 
+PROFILES = ('http', 'socks', 'telegram', 'http_ip')
+PROFILE_LABELS = {'http':'HTTP', 'socks':'SOCKS5', 'telegram':'Telegram MTProxy', 'http_ip':'HTTP по IP'}
+CORE_PORTS = {'http':12080, 'socks':12081, 'http_ip':12082}
+
+def selector_tag(profile):
+    return 'vpn' if profile=='http' else 'vpn_'+profile
+
+def profile_enabled(config, profile):
+    return config['access']['enabled'] if profile=='http_ip' else config['settings'][profile+'_enabled']
+
 MODES = ('all_vpn', 'selected', 'except', 'direct')
 PRESETS = {
     'youtube': ['youtube.com', 'youtu.be', 'googlevideo.com', 'ytimg.com', 'youtubei.googleapis.com'],
@@ -18,6 +28,8 @@ PRESETS = {
 
 def defaults():
     return {
+        'profiles': {p: {'selection':'auto','manual_server':'','manual_failover':True,'route_mode':'default','require_russian':False,'require_services':False} for p in PROFILES},
+        'ha': {'enabled':False, 'token':secrets.token_urlsafe(32)},
         'schema': 5, 'sources': [], 'servers': [], 'clients': [],
         'settings': {
             'selection': 'auto', 'manual_server': '', 'http_enabled': True, 'socks_enabled': True,
@@ -42,11 +54,11 @@ def defaults():
                      'auth_failures': 10, 'autoban_enabled': True, 'max_per_ip': 120, 'new_per_minute': 240, 'ban_seconds': 3600},
         'access': {'enabled': False, 'port': 2084, 'lan_cidrs': [], 'route_mode': 'default',
                    'pending_limit': 200, 'pending_hours': 24, 'invite_minutes': 30,
-                   'notify_invited_only': True, 'internal_password': secrets.token_urlsafe(32)},
-        'notifications': {'enabled': False, 'token': '', 'chat_id': '', 'owner_id': '',
+                   'grant_hours': 168, 'notify_invited_only': True, 'internal_password': secrets.token_urlsafe(32)},
+        'notifications': {'mode':'ha', 'ha_targets':[], 'ha_entry_id':'', 'ha_chat_ids':[], 'enabled': False, 'token': '', 'chat_id': '', 'owner_id': '',
                           'app_url': '', 'poll_callbacks': False},
         'telegram_probe': {'internal_secret': 'ee'+secrets.token_hex(16)+'www.google.com'.encode().hex(), 'enabled': False, 'api_id': 0, 'api_hash': '', 'bot_token': '',
-                           'file_id': '', 'min_kbps': 128, 'interval': 300, 'sample_kb': 512, 'timeout': 20},
+                           'file_id': '', 'chat_id': '', 'min_kbps': 128, 'interval': 300, 'sample_kb': 512, 'timeout': 20},
         'legacy': {},
     }
 
@@ -83,7 +95,7 @@ def validate(config):
         if not lo <= s[key] <= hi:
             raise ValueError(f'{key}: допустимо {lo}–{hi}')
     ports = [s[k] for k in ('http_port','socks_port','telegram_port')]+[int(c['access']['port'])]
-    if len(set(ports)) != 4 or set(ports) & {8099, 19090, 19091, 12080, 12084, 12085, 12086}:
+    if len(set(ports)) != 4 or set(ports) & {8099, 19090, 19091, 12080, 12081, 12082, 12084, 12085, 12086}:
         raise ValueError('Порты должны отличаться друг от друга и от внутренних портов приложения')
     if s['selection'] not in ('auto','manual'):
         raise ValueError('Неизвестный режим выбора сервера')
@@ -158,7 +170,15 @@ def validate(config):
     if len(a['internal_password'])<24:raise ValueError('Повреждён внутренний ключ доступа')
     for k in ('http_auth','socks_auth'):
         if s[k] not in ('password','trusted'):raise ValueError('Неверный режим авторизации')
-    if n['enabled']:
+    if n.get('mode','direct') not in ('ha','direct'):raise ValueError('Неизвестный способ уведомлений')
+    if n['enabled'] and n.get('mode','direct')=='ha':
+        if not n['ha_targets'] and not n['ha_chat_ids']:raise ValueError('Выберите получателей Home Assistant или введите ID чатов')
+        if n['ha_chat_ids'] and not n['ha_entry_id']:raise ValueError('Выберите бота Home Assistant для ручных ID')
+    for entity in n.get('ha_targets',[]):
+        if not re.fullmatch(r'notify\.[a-z0-9_]+',entity):raise ValueError('Неверный получатель уведомлений')
+    for chat in n.get('ha_chat_ids',[]):
+        if not re.fullmatch(r'-?[0-9]+',str(chat)):raise ValueError('Неверный ID чата')
+    if n['enabled'] and n.get('mode','direct')=='direct':
         if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]{20,}',n['token']):raise ValueError('Неверный токен бота')
         if not re.fullmatch(r'-?[0-9]+',str(n['chat_id'])) or not str(n['owner_id']).isdigit():raise ValueError('Укажите ID чата и владельца')
     if n['app_url'] and not n['app_url'].startswith('https://'):raise ValueError('Ссылка приложения должна начинаться с https://')
@@ -169,4 +189,12 @@ def validate(config):
         if not lo<=t[key]<=hi:raise ValueError('Неверный параметр проверки медиа: '+key)
     if t['enabled'] and (not int(t['api_id']) or not re.fullmatch(r'[a-fA-F0-9]{32}',t['api_hash']) or not t['bot_token']):
         raise ValueError('Для проверки медиа нужны API ID, API hash и токен контрольного бота')
+    for profile in PROFILES:
+        v=c['profiles'][profile]
+        if v['selection'] not in ('auto','manual') or v['route_mode'] not in (*MODES,'default'):raise ValueError('Неверные настройки прокси')
+        if v['manual_server'] and v['manual_server'] not in {x['id'] for x in c['servers']}:
+            v['manual_server']='';v['selection']='auto'
+    a['grant_hours']=int(a.get('grant_hours',168))
+    if not 1<=a['grant_hours']<=8760:raise ValueError('Срок разрешения: от 1 до 8760 часов')
+    if len(n.get('ha_targets',[]))+len(n.get('ha_chat_ids',[]))>20:raise ValueError('Не более 20 получателей')
     return c

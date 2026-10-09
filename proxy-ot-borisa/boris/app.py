@@ -15,13 +15,14 @@ from aiohttp import web
 import qrcode
 import qrcode.image.svg
 from . import VERSION
-from .model import validate, client_new
+from .model import validate, client_new, PROFILES, profile_enabled
 from .storage import Store, atomic_json
 from .migration import migrate
 from .runtime import Runtime
 from .gateway import Gateway
 from .health import Health
 from .notifications import Notifications
+from .homeassistant import install_companion
 from .subscriptions import parse_payload, fetch_subscription, read_limited
 from .routing import explain
 
@@ -39,6 +40,9 @@ class Application:
         self.ui_build=VERSION+'-'+digest
         self.web=web.Application(client_max_size=8*1024**2,middlewares=[self.guard])
         self.web.router.add_get('/healthz',self.healthz)
+        self.web.router.add_get('/api/ha/state',self.ha_state)
+        self.web.router.add_post('/api/ha/command',self.ha_command)
+        self.web.router.add_get('/api/ha-recipients',self.ha_recipients)
         self.web.router.add_get('/api/state',self.state)
         self.web.router.add_get('/api/history',self.history)
         self.web.router.add_get('/api/report',self.report)
@@ -54,8 +58,12 @@ class Application:
         # Never trust X-Forwarded-For as authentication. HA's actual Ingress peer only.
         peer=request.transport.get_extra_info('peername') if request.transport else None
         allowed={'172.30.32.2','127.0.0.1','::1'}
-        if not peer or peer[0] not in allowed:return web.json_response({'error':'Откройте приложение через Home Assistant'},status=403)
-        if request.method=='POST' and (request.headers.get('X-Boris-Request')!='1' or request.content_type!='application/json'):
+        ha_request=request.path.startswith('/api/ha/')
+        if ha_request:
+            if not self.store.config['ha']['enabled'] or not secrets.compare_digest(request.headers.get('Authorization',''),'Bearer '+self.store.config['ha']['token']):
+                return web.json_response({'error':'Нет доступа к интеграции'},status=403)
+        if not ha_request and (not peer or peer[0] not in allowed):return web.json_response({'error':'Откройте приложение через Home Assistant'},status=403)
+        if request.method=='POST' and not ha_request and (request.headers.get('X-Boris-Request')!='1' or request.content_type!='application/json'):
             return web.json_response({'error':'Неверный запрос'},status=403)
         try:response=await handler(request)
         except (ValueError,KeyError,TypeError) as e:
@@ -82,20 +90,80 @@ class Application:
         return web.json_response({'alive':not self.stopping,'scheduler':time.time()-self.heartbeat<90},status=200 if time.time()-self.heartbeat<90 else 503)
 
     async def state(self,request):
-        c=self.store.snapshot();s=c['settings']
+        c=self.store.snapshot();s=c['settings'];c['ha'].pop('token',None)
         for u in c['clients']:
             host=s['public_host'];u['tg_url']='tg://proxy?'+urllib.parse.urlencode({'server':host,'port':s['telegram_port'],'secret':u['telegram_secret']}) if host else ''
             u['tme_url']='https://t.me/proxy?'+u['tg_url'].split('?',1)[1] if host else ''
         return web.json_response({'version':VERSION,'ui_build':self.ui_build,'config':c,'runtime':self.runtime.status(),'results':self.health.results,
-            'telegram_check':self.health.chain_result,'selection_reason':self.health.reason,'decision':self.health.decision,'services':self.service_status(),'checks':self.health.progress,'jobs':list(self.jobs.values()),
+            'telegram_check':self.health.chain_result,'selection_reason':self.health.reason,'decision':self.health.decision,'services':self.service_status(),'profiles':self.profile_status(),'checks':self.health.progress,'jobs':list(self.jobs.values()),
             'access':self.gateway.access.rows(),'bans':self.gateway.security_state(),'notifications':{'error':self.notifications.error,'last_ok':self.notifications.last_ok},'active':list(self.gateway.active.values()),'telegram_stats':self.tg_stats,'telegram_active':[r for r in self.gateway.tg_connections.values() if r.get('client_id') and r['client_id']!='__health'],
             'usage':self.store.usage(),'events':self.store.list('events',30),'boot_error':self.boot_error,'booted':self.booted,
             'storage_bytes':(self.store.root/'history-v5.sqlite').stat().st_size})
     def service_status(self):
         s=self.store.config['settings'];runtime=self.runtime.status()
         ports={sock.getsockname()[1] for listener in self.gateway.listeners if listener.is_serving() for sock in listener.sockets or []}
-        return {p:{'enabled':s[p+'_enabled'],'running':runtime['telegram'] if p=='telegram' else s[p+'_port'] in ports,
-                   'port':s[p+'_port']} for p in ('http','socks','telegram')}
+        return {p:{'enabled':profile_enabled(self.store.config,p),
+                   'running':(runtime['telegram'] and s[p+'_port'] in ports) if p=='telegram' else (self.store.config['access']['port'] if p=='http_ip' else s[p+'_port']) in ports,
+                   'port':self.store.config['access']['port'] if p=='http_ip' else s[p+'_port']} for p in PROFILES}
+
+    def profile_status(self):
+        result={};services=self.service_status()
+        for key,selection in self.health.profiles.items():
+            uid=selection.selected;node=next((x for x in self.store.config['servers'] if x['id']==uid),{})
+            reserve=next((x['id'] for x in selection.ordered() if x['id']!=uid),'')
+            metrics=self.health.results.get(uid,{})
+            result[key]={**services[key], 'selected_id':uid,'selected_name':node.get('name','Не выбран'),
+                'decision':selection.decision,'reason':selection.reason,'last_switch':selection.last_switch,
+                'reserve_id':reserve,'reserve_name':next((x['name'] for x in self.store.config['servers'] if x['id']==reserve),'Нет проверенного резерва'),
+                'available':selection.usable(uid) and services[key]['running'],
+                'latency_ms':metrics.get('latency_ms'),'checked_at':metrics.get('checked_at',0),
+                'foreign':metrics.get('foreign_status','unknown'),'russian':metrics.get('russian_status','unknown'),
+                'services':metrics.get('service_status','unknown'),'telegram':metrics.get('telegram',{}).get('status','unknown'),
+                'media':metrics.get('telegram',{}).get('media',{}).get('status','unconfigured'),
+                'selection':self.store.config['profiles'][key]['selection'],
+                'manual_server':self.store.config['profiles'][key]['manual_server']}
+        return result
+
+    async def ha_state(self,request):
+        # Deliberately excludes all credentials, client identities, IPs and URLs.
+        return web.json_response({'version':VERSION,'profiles':self.profile_status(),'core':self.runtime.status()['core'],
+            'started':self.runtime.started,'checking':self.health.progress['running'],
+            'clients':len({x['client_id'] for x in list(self.gateway.active.values())+list(self.gateway.tg_connections.values()) if x.get('client_id') and x['client_id']!='__health'}),
+            'servers':[{'id':x['id'],'name':x['name']} for x in self.health.candidates()]})
+
+    async def ha_recipients(self,request):
+        return web.json_response(await self.notifications.ha.recipients())
+
+    async def ha_command(self,request):
+        body=await request.json();action=body.get('action');profile=body.get('profile','http')
+        if profile not in PROFILES:raise ValueError('Неизвестный прокси')
+        if action=='check':return web.json_response(self.job('Проверка и выбор серверов',lambda:self.health.scan(True)))
+        async with self.mutation:
+            if action=='select':await self.select_profile(profile,body.get('id',''))
+            elif action=='enabled':
+                c=self.store.snapshot()
+                if not isinstance(body.get('enabled'),bool):raise ValueError('Нужен переключатель включения')
+                if profile=='http_ip':c['access']['enabled']=body['enabled']
+                else:c['settings'][profile+'_enabled']=body['enabled']
+                await self.commit(c)
+            else:raise ValueError('Действие не поддерживается интеграцией')
+        return web.json_response({'ok':True})
+
+    async def select_profile(self,profile,tag):
+        if profile not in PROFILES:raise ValueError('Неизвестный прокси')
+        controller=self.health.profiles[profile]
+        if tag and not any(x['id']==tag for x in self.health.candidates()):raise ValueError('Сервер недоступен для выбора')
+        async with controller.decision_lock:
+            if tag:
+                previous=controller.selected
+                if not await controller.switch(tag,'Ручной выбор'):
+                    restored=bool(previous and previous!=tag and controller.usable(previous) and await controller.switch(previous,'Возврат после неудачного выбора'))
+                    if not restored:await controller.select('')
+                    raise ValueError('Проверка ручного сервера не прошла. '+('Прежний маршрут восстановлен.' if restored else 'Поиск рабочего сервера продолжается.'))
+            c=self.store.snapshot();c['profiles'][profile].update(selection='manual' if tag else 'auto',manual_server=tag)
+            if profile=='http':c['settings'].update(selection='manual' if tag else 'auto',manual_server=tag)
+            self.store.save(c)
+        if not tag:await controller.choose()
 
     async def history(self,request):
         uid=request.query.get('client_id') or None
@@ -159,7 +227,8 @@ class Application:
         async with self.mutation:
             c=self.store.snapshot();source=next(x for x in c['sources'] if x['id']==source_id)
             self.source_retry[source_id]=time.time()+300
-            proxy=('http://__selected:'+self.runtime.password+'@127.0.0.1:12085') if self.runtime.selected else None
+            username=self.runtime.control_username()
+            proxy=('http://'+username+':'+self.runtime.password+'@127.0.0.1:12085') if username else None
             parsed=await fetch_subscription(source['url'],source_id,proxy)
             await self.runtime.validate_servers(parsed['servers'])
             old={s['id']:s for s in c['servers'] if s['source_id']==source_id}
@@ -179,6 +248,12 @@ class Application:
 
     async def command(self,request):
         action=request.match_info['action'];b=await request.json()
+        if action=='ha-install':
+            async with self.mutation:
+                c=self.store.snapshot();c['ha']['enabled']=True
+                result=await asyncio.to_thread(install_companion,c)
+                self.store.save(c);self.store.event('settings',result['summary'])
+            return web.json_response({'ok':True,'note':result['summary']})
         if action=='media-file':return web.json_response(self.job('Создание контрольного файла',self.create_media_file))
         if action=='notification-test':return web.json_response(self.job('Проверка уведомлений',self.notifications.test))
         if action=='access-client':
@@ -205,29 +280,28 @@ class Application:
         if action=='cleanup':return web.json_response(self.store.cleanup(bool(b.get('clear'))))
         if action=='route-test':
             u=next((x for x in self.store.config['clients'] if x['id']==b.get('client_id')),None)
-            return web.json_response(explain(self.store.config,b['host'],u))
+            profile=b.get('profile','http')
+            if profile not in PROFILES:raise ValueError('Неизвестный прокси')
+            if profile=='http_ip':u=None
+            return web.json_response(explain(self.store.config,b['host'],u,profile))
         async with self.mutation:
             c=self.store.snapshot()
             if action=='select':
-                tag=b.get('id','');mode='manual' if tag else 'auto'
-                if tag and not any(x['id']==tag for x in self.health.candidates()):raise ValueError('Сервер недоступен для выбора')
-                async with self.health.decision_lock:
-                    if tag:
-                        previous=self.runtime.selected
-                        if not await self.health.switch(tag,'Ручной выбор'):
-                            restored=False
-                            if previous and previous!=tag and self.health.usable(previous):
-                                restored=await self.health.switch(previous,'Возврат после неудачного ручного выбора')
-                            if not restored:
-                                await self.runtime.select('')
-                                self.health.describe('Ручное переключение не подтверждено; поиск рабочего сервера продолжается')
-                            raise ValueError('Сервер не прошёл итоговую проверку. '+('Прежнее подключение восстановлено.' if restored else 'Рабочее подключение не подтверждено. Проверки продолжаются.'))
-                    c['settings'].update(selection=mode,manual_server=tag);self.store.save(c)
-                if not tag:await self.health.choose()
+                await self.select_profile(b.get('profile','http'),b.get('id',''))
                 return web.json_response({'ok':True})
             if action=='settings':
-                for section in ('settings','routing','security','access','notifications','telegram_probe'):
-                    if section in b:c[section].update(b[section])
+                for section in ('settings','routing','security','access','notifications','telegram_probe','ha'):
+                    if section in b:
+                        values=dict(b[section])
+                        if section=='ha':values={k:v for k,v in values.items() if k=='enabled'}
+                        c[section].update(values)
+                for key,value in b.get('profiles',{}).items():
+                    if key not in PROFILES:raise ValueError('Неизвестный прокси')
+                    c['profiles'][key].update(value)
+                if 'route_mode' in b.get('profiles',{}).get('http_ip',{}):
+                    c['access']['route_mode']=c['profiles']['http_ip']['route_mode']
+                elif 'route_mode' in b.get('access',{}):
+                    c['profiles']['http_ip']['route_mode']=c['access']['route_mode']
             elif action=='client':
                 uid=b.get('id');existing=next((u for u in c['clients'] if u['id']==uid),None)
                 if b.get('delete'):
@@ -266,13 +340,14 @@ class Application:
 
     async def create_media_file(self):
         async with self.mutation:
-            c=self.store.snapshot();s=c['telegram_probe'];n=c['notifications']
-            if not s['bot_token'] or not n['chat_id']:raise ValueError('Сохраните токен контрольного бота и ID чата в настройках уведомлений')
-            form=aiohttp.FormData();form.add_field('chat_id',str(n['chat_id']))
+            c=self.store.snapshot();s=c['telegram_probe'];chat_id=s['chat_id'] or c['notifications']['chat_id']
+            if not s['bot_token'] or not chat_id:raise ValueError('Сохраните токен контрольного бота и ID чата в настройках проверки файлов Telegram')
+            form=aiohttp.FormData();form.add_field('chat_id',str(chat_id))
             form.add_field('caption','Контрольный файл Proxy от Бориса. Повторные проверки скачивают фрагмент без новых сообщений.')
             form.add_field('document',secrets.token_bytes(1024*1024),filename='proxy-check.bin',content_type='application/octet-stream')
-            proxy='http://127.0.0.1:12085' if self.runtime.selected else None
-            auth=aiohttp.BasicAuth('__selected',self.runtime.password) if proxy else None
+            username=self.runtime.control_username()
+            proxy='http://127.0.0.1:12085' if username else None
+            auth=aiohttp.BasicAuth(username,self.runtime.password) if proxy else None
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45),trust_env=False) as session:
                 async with session.post('https://api.telegram.org/bot'+s['bot_token']+'/sendDocument',data=form,proxy=proxy,proxy_auth=auth) as response:
                     result=await response.json()
@@ -314,12 +389,11 @@ class Application:
         try:await self.runtime.api('/version');results.append({'name':'Управление ядром','ok':True})
         except Exception:results.append({'name':'Управление ядром','ok':False})
         await self.health.scan(True)
-        results.append({'name':'Проверенный VPN','ok':self.health.usable(self.runtime.selected),'detail':self.health.reason})
-        s=self.store.config['settings']
-        for protocol in ('http','socks'):
-            if not s[protocol+'_enabled']:continue
+        results.append({'name':'Проверенный VPN','ok':all(v['available'] for v in self.profile_status().values() if v['enabled']),'detail':self.health.reason})
+        for protocol in PROFILES:
+            if not profile_enabled(self.store.config,protocol):continue
             try:
-                r,w=await asyncio.wait_for(asyncio.open_connection('127.0.0.1',s[protocol+'_port']),2);w.close();await w.wait_closed()
+                r,w=await asyncio.wait_for(asyncio.open_connection('127.0.0.1',self.service_status()[protocol]['port']),2);w.close();await w.wait_closed()
                 results.append({'name':protocol.upper()+' вход','ok':True,'detail':'Порт принимает соединения'})
             except (OSError,TimeoutError):results.append({'name':protocol.upper()+' вход','ok':False})
         return results
@@ -374,7 +448,7 @@ class Application:
             await asyncio.sleep(10)
 
     async def scheduled_scan(self,full):
-        try:await self.health.scan(full)
+        try:await self.health.scan(full,scheduled=True)
         except asyncio.CancelledError:raise
         except Exception:self.store.event('error','Общая проверка не завершилась; будет повторена')
 

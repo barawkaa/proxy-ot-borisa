@@ -10,6 +10,7 @@ RUN pip3 install --no-cache-dir -r /app/requirements.txt
 COPY boris /app/boris
 COPY backend.py /app/backend.py
 COPY ui /app/ui
+COPY ha_integration /app/ha_integration
 COPY run.sh /run.sh
 RUN chmod 755 /run.sh /usr/local/bin/sing-box /usr/local/bin/mtg-multi
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/healthz', timeout=3)"

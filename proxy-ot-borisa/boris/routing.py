@@ -1,23 +1,26 @@
 """One rule generator is shared by runtime and route explanation."""
 import ipaddress
-from .model import PRESETS, client_enabled
+from .model import PRESETS, client_enabled, PROFILES, CORE_PORTS, selector_tag
 
 
-def route_rules(config, user=None):
+def route_rules(config, user=None, profile=None):
     r=config['routing']; mode=(user or {}).get('route_mode','default')
+    if mode=='default' and profile:mode=config['profiles'][profile]['route_mode']
     if mode=='default':mode=r['mode']
     prefix={'auth_user':[user['username']]} if user else {}
+    if profile:prefix['inbound']=['clients_'+profile]
+    vpn=selector_tag(profile) if profile else 'vpn'
     rules=[]
     def add(field,values,out):
-        if values:rules.append({**prefix,field:values,'action':'route','outbound':out})
+        if values:rules.append({**prefix,field:values,'action':'route','outbound':vpn if out=='vpn' else out})
     if mode=='direct': return [{**prefix,'action':'route','outbound':'direct'}]
-    if mode=='all_vpn':return [{**prefix,'action':'route','outbound':'vpn'}]
+    if mode=='all_vpn':return [{**prefix,'action':'route','outbound':vpn}]
     add('domain_suffix',r['direct_domains'],'direct');add('ip_cidr',r['direct_ips'],'direct')
     includes=list(r['vpn_domains'])
     for p in r['presets']:includes.extend(PRESETS.get(p,[]))
     add('domain_suffix',sorted(set(includes)),'vpn');add('ip_cidr',r['vpn_ips'],'vpn')
     add('rule_set',[x['id'] for x in r['sources'] if x.get('enabled') and x.get('cache_path')],'vpn')
-    rules.append({**prefix,'action':'route','outbound':'vpn' if mode=='except' else 'direct'})
+    rules.append({**prefix,'action':'route','outbound':vpn if mode=='except' else 'direct'})
     return rules
 
 
@@ -48,21 +51,28 @@ def core_config(config, internal_password, api_secret, selected='', log_path=Non
     outbounds=[{**s['outbound'],'tag':s['id']} for s in servers]
     tags=[s['id'] for s in servers]
     # No working VPN is fail-closed. Never silently fall back to home IP.
-    outbounds.extend([{'type':'direct','tag':'direct'},{'type':'block','tag':'unavailable'},
-                      {'type':'selector','tag':'vpn','outbounds':['unavailable']+tags,'default':selected if selected in tags else 'unavailable','interrupt_exist_connections':False}])
-    inbounds=[{'type':'mixed','tag':'clients','listen':'127.0.0.1','listen_port':12080,
-               'users':[{'username':c['username'],'password':c['password']} for c in clients] or [{'username':'__disabled','password':internal_password}]},
-              {'type':'mixed','tag':'probes','listen':'127.0.0.1','listen_port':12085,
-               'users':[{'username':tag,'password':internal_password} for tag in tags]+[{'username':'__selected','password':internal_password}]},
-              {'type':'socks','tag':'telegram','listen':'127.0.0.1','listen_port':12084}]
-    rules=[{'inbound':['telegram'],'action':'route','outbound':'vpn'},
-           {'inbound':['probes'],'auth_user':['__selected'],'action':'route','outbound':'vpn'}]
+    selected = selected if isinstance(selected,dict) else {key:selected for key in PROFILES}
+    outbounds.extend([{'type':'direct','tag':'direct'},{'type':'block','tag':'unavailable'}])
+    for profile in PROFILES:
+        outbounds.append({'type':'selector','tag':selector_tag(profile),'outbounds':['unavailable']+tags,
+            'default':selected.get(profile) if selected.get(profile) in tags else 'unavailable','interrupt_exist_connections':False})
+    inbounds=[]
+    for profile,port in CORE_PORTS.items():
+        users=profiles if profile=='http_ip' else [u for u in clients if u.get(profile)]
+        inbounds.append({'type':'mixed','tag':'clients_'+profile,'listen':'127.0.0.1','listen_port':port,
+            'users':[{'username':u['username'],'password':u['password']} for u in users] or [{'username':'__disabled','password':internal_password}]})
+    inbounds.extend([{'type':'mixed','tag':'probes','listen':'127.0.0.1','listen_port':12085,
+        'users':[{'username':tag,'password':internal_password} for tag in tags]+[{'username':'__selected'+('' if key=='http' else '_'+key),'password':internal_password} for key in PROFILES]},
+        {'type':'socks','tag':'telegram','listen':'127.0.0.1','listen_port':12084}])
+    rules=[{'inbound':['telegram'],'action':'route','outbound':selector_tag('telegram')}]
+    for profile in PROFILES:
+        rules.append({'inbound':['probes'],'auth_user':['__selected'+('' if profile=='http' else '_'+profile)],'action':'route','outbound':selector_tag(profile)})
     for tag in tags:rules.append({'inbound':['probes'],'auth_user':[tag],'action':'route','outbound':tag})
     if profiles:
-        names=[u['username'] for u in profiles]
-        # IP-only grants must never expose HA, the router, or cloud metadata.
-        rules.extend([{'auth_user':names,'action':'resolve'}, {'auth_user':names,'ip_is_private':True,'action':'reject'}])
-    for c in clients:rules.extend(route_rules(config,c))
+        rules.extend([{'inbound':['clients_http_ip'],'action':'resolve'}, {'inbound':['clients_http_ip'],'ip_is_private':True,'action':'reject'}])
+    for profile in CORE_PORTS:
+        for user in (profiles if profile=='http_ip' else [u for u in clients if u.get(profile)]):
+            rules.extend(route_rules(config,user,profile))
     rules.append({'action':'reject'})
     sets=[]
     for x in config['routing']['sources']:

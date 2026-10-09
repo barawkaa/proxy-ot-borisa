@@ -7,7 +7,7 @@ import ipaddress
 import secrets
 import time
 import urllib.parse
-from .model import client_enabled
+from .model import client_enabled, CORE_PORTS
 from .access import Access, canonical
 
 
@@ -178,7 +178,7 @@ class Gateway:
                         headers.append('Connection: close')
                     token=base64.b64encode((user['username']+':'+user['password']).encode()).decode()
                     headers.append('Proxy-Authorization: Basic '+token)
-                    ur,uw=await asyncio.open_connection('127.0.0.1',12080);upstream=uw
+                    ur,uw=await asyncio.open_connection('127.0.0.1',CORE_PORTS[protocol]);upstream=uw
                     uw.write(('\r\n'.join([lines[0]]+headers)+'\r\n\r\n').encode('latin1'));await uw.drain()
                     destination=target[:300] if method=='CONNECT' else (urllib.parse.urlsplit(target).hostname or 'HTTP')
                 else:
@@ -204,7 +204,7 @@ class Gateway:
                     elif h[3]==3:host=(await r.readexactly((await r.readexactly(1))[0])).decode('idna')
                     else:raise ValueError('Address type')
                     port=int.from_bytes(await r.readexactly(2),'big');destination=f'{host}:{port}'
-                    try:ur,uw=await socks_open(12080,host,port,user['username'],user['password'])
+                    try:ur,uw=await socks_open(CORE_PORTS[protocol],host,port,user['username'],user['password'])
                     except OSError:
                         w.write(b'\x05\x04\x00\x01'+b'\x00'*6);await w.drain();return
                     upstream=uw

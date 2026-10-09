@@ -27,12 +27,20 @@ class Store:
         self.lock = threading.RLock()
         self.path = self.root / 'config-v5.json'
         self.config = json.loads(self.path.read_text()) if self.path.exists() else defaults()
+        old_profiles='profiles' not in self.config
+        old_notifications='mode' not in self.config.get('notifications',{})
         # Add nested defaults without overwriting personal choices or secrets.
         def merge(target, base):
             for key,value in base.items():
                 if key not in target:target[key]=value
                 elif isinstance(value,dict) and isinstance(target[key],dict):merge(target[key],value)
         merge(self.config,defaults())
+        if old_profiles:
+            for profile in self.config['profiles'].values():
+                for key in ('selection','manual_server','manual_failover'):profile[key]=self.config['settings'][key]
+            self.config['profiles']['http_ip']['route_mode']=self.config['access']['route_mode']
+        if old_notifications and self.config['notifications']['token']:
+            self.config['notifications']['mode']='direct'
         if not self.config.get('health_revision'):
             if self.config['settings']['scan_interval']==180:self.config['settings']['scan_interval']=60
             self.config['health_revision']=1

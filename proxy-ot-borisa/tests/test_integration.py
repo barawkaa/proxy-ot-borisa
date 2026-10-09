@@ -25,7 +25,7 @@ class RealCoreTests(unittest.IsolatedAsyncioTestCase):
         p=Path(self.tmp.name)/'reference.json';atomic_json(p,reference)
         self.reference=await asyncio.create_subprocess_exec(self.runtime.binary,'run','-c',str(p),stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL)
         await asyncio.sleep(.3)
-        await self.runtime.apply(self.c);await self.runtime.select(self.c['servers'][0]['id']);await self.gateway.apply()
+        await self.runtime.apply(self.c);await self.runtime.select(self.c['servers'][0]['id']);await self.runtime.select(self.c['servers'][0]['id'],'socks');await self.gateway.apply()
         async def ok(request):return web.Response(text='BORIS_INTEGRATION_OK')
         app=web.Application();app.router.add_get('/ok',ok)
         self.runner=web.AppRunner(app);await self.runner.setup();await web.TCPSite(self.runner,'127.0.0.1',18111).start()
@@ -63,7 +63,7 @@ class RealCoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):await self.runtime.apply(bad)
         self.assertEqual(self.runtime.process.pid,old_pid);self.assertIsNone(self.runtime.process.returncode)
     async def test_fail_closed(self):
-        await self.runtime.select('')
+        await self.runtime.select('','socks')
         with self.assertRaises(OSError):await socks_open(2080,'127.0.0.1',18112,self.user['username'],self.user['password'])
     async def test_probe_and_switch_preserve_existing_stream(self):
         from boris.health import Health

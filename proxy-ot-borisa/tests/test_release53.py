@@ -51,7 +51,7 @@ class Access53(unittest.TestCase):
         finally:other.db.close()
     def test_access_internal_routes_and_no_open_anonymous_core(self):
         c=defaults();c['access']['enabled']=True;cfg=core_config(c,'private','secret')
-        users=cfg['inbounds'][0]['users'];self.assertEqual(len(users),5);self.assertTrue(all(u['password'] for u in users))
+        users=next(x for x in cfg['inbounds'] if x['tag']=='clients_http_ip')['users'];self.assertEqual(len(users),5);self.assertTrue(all(u['password'] for u in users))
         self.assertTrue(any(r.get('ip_is_private') and r['action']=='reject' for r in cfg['route']['rules']))
     def test_bad_ports_and_lan_range_rejected(self):
         for cidr in ['0.0.0.0/0','127.0.0.0/8','8.8.8.0/24']:
@@ -78,7 +78,7 @@ class Gateway53(unittest.IsolatedAsyncioTestCase):
                 while data:=await r.read(1024):w.write(data);await w.drain()
             except (OSError,asyncio.IncompleteReadError):pass
             finally:w.close()
-        self.up=await asyncio.start_server(upstream,'127.0.0.1',12080)
+        self.up=await asyncio.start_server(upstream,'127.0.0.1',12082)
         self.listener=await asyncio.start_server(lambda r,w:self.gateway.accept(r,w,'http_ip'),'127.0.0.1',0)
         self.port=self.listener.sockets[0].getsockname()[1]
     async def asyncTearDown(self):
@@ -107,8 +107,8 @@ class Gateway53(unittest.IsolatedAsyncioTestCase):
         user=client_new();self.store.config['clients']=[user];self.store.config['settings']['http_auth']='trusted'
         self.assertIsNone(self.gateway.authenticate(user['username'],user['password'],'http'))
     async def test_bot_shared_mode_never_gets_updates_and_deduplicates(self):
-        n=self.store.config['notifications'];n.update(enabled=True,chat_id='1',owner_id='2')
-        notification=Notifications(self.store,self.gateway,type('Runtime',(),{'selected':''})());notification.call=AsyncMock(return_value={})
+        n=self.store.config['notifications'];n.update(mode='direct',enabled=True,chat_id='1',owner_id='2')
+        notification=Notifications(self.store,self.gateway,type('Runtime',(),{'selected':'','status':lambda self:{}})());notification.call=AsyncMock(return_value={})
         token,_=self.gateway.access.invite('Guest');self.gateway.access.redeem(token,'203.0.113.4')
         await notification.tick();notification.call.assert_not_awaited()
         self.gateway.access.user('203.0.113.4');await notification.tick()
@@ -139,11 +139,11 @@ class Telegram53(unittest.IsolatedAsyncioTestCase):
     async def test_challenge_not_unreachable_and_media_priority(self):
         self.assertEqual(group_status([{'status':'limited'}]),'limited')
         with tempfile.TemporaryDirectory() as path:
-            store=Store(path);runtime=type('Runtime',(),{'selected':''})();h=Health(store,runtime);store.config['settings']['telegram_enabled']=True
+            store=Store(path);runtime=type('Runtime',(),{'selected':'','status':lambda self:{}})();h=Health(store,runtime);store.config['settings']['telegram_enabled']=True
             r={'foreign_ok':True,'checked_at':time.time(),'full_at':time.time(),'russian_status':'available','latency_ms':50,'telegram':{'status':'protocol_ok','media':{'status':'unconfigured'}}}
             h.results['a']=r;h.results['b']=copy.deepcopy(r);h.results['b']['latency_ms']=200
             h.results['b']['telegram']['media']={'status':'media_ok','checked_at':time.time()}
-            self.assertLess(h.node_rank('b'),h.node_rank('a'));store.db.close()
+            self.assertLess(h.profiles['telegram'].node_rank('b'),h.profiles['telegram'].node_rank('a'));store.db.close()
 
 class Media53(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

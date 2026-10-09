@@ -28,20 +28,20 @@ class Selection51(unittest.IsolatedAsyncioTestCase):
         return dict(checked_at=time.time(),full_at=time.time(),foreign_ok=True,russian_ok=ru=='available',russian_status=ru,latency_ms=ms,median_ms=ms,failure_rate=0,telegram={'status':'protocol_ok'})
     async def asyncTearDown(self):self.store.db.close();self.temp.cleanup()
     async def test_big_improvement_does_not_wait_five_minutes(self):
-        self.h.last_switch=time.time();await self.h.choose()
+        self.h.last_switch=time.time();await self.h.profiles['http'].choose()
         self.assertEqual(self.runtime.selected,'b');self.assertEqual(self.h.probe.await_count,3)
         event=self.store.list('events')[0]['message'];self.assertIn('860',event);self.assertIn('250',event)
     async def test_recent_slowdown_not_hidden_by_old_median(self):
         self.h.results['a']['median_ms']=100
-        await self.h.choose();self.assertEqual(self.runtime.selected,'b')
+        await self.h.profiles['http'].choose();self.assertEqual(self.runtime.selected,'b')
     async def test_candidate_loses_universal_access_during_confirmation(self):
         original=self.h.probe.side_effect
         async def probe(node,*args,**kwargs):
             if node['id']=='b':self.h.results['b'].update(russian_ok=False,russian_status='unreachable')
             return await original(node,*args,**kwargs)
-        self.h.probe.side_effect=probe;await self.h.choose();self.runtime.select.assert_not_awaited()
+        self.h.probe.side_effect=probe;await self.h.profiles['http'].choose();self.runtime.select.assert_not_awaited()
     async def test_small_difference_keeps_current(self):
-        self.h.results['a']=self.result(270);await self.h.choose();self.runtime.select.assert_not_awaited()
+        self.h.results['a']=self.result(270);await self.h.profiles['http'].choose();self.runtime.select.assert_not_awaited()
     async def test_spike_candidate_rejected(self):
         original=self.h.probe.side_effect;count=0
         async def probe(node,*args,**kwargs):
@@ -50,39 +50,39 @@ class Selection51(unittest.IsolatedAsyncioTestCase):
                 count+=1
                 if count==2:self.h.results['b']['latency_ms']=850
             return await original(node,*args,**kwargs)
-        self.h.probe.side_effect=probe;await self.h.choose();self.runtime.select.assert_not_awaited()
+        self.h.probe.side_effect=probe;await self.h.profiles['http'].choose();self.runtime.select.assert_not_awaited()
     async def test_failed_confirmation_keeps_current(self):
         async def probe(node,*args,**kwargs):
             if node['id']=='b':self.h.results['b']['foreign_ok']=False
             return self.h.results[node['id']]
-        self.h.probe.side_effect=probe;await self.h.choose();self.runtime.select.assert_not_awaited()
+        self.h.probe.side_effect=probe;await self.h.profiles['http'].choose();self.runtime.select.assert_not_awaited()
     async def test_reserve_does_not_displace_universal(self):
         self.h.results['b']=self.result(20,'unreachable');self.h.results['c']=self.result(30,'restricted')
-        await self.h.choose();self.runtime.select.assert_not_awaited()
+        await self.h.profiles['http'].choose();self.runtime.select.assert_not_awaited()
     async def test_telegram_requirement_respected(self):
-        self.store.config['settings']['telegram_enabled']=True;self.h.results['b']['telegram']={'status':'unreachable'}
-        await self.h.choose();self.assertEqual(self.runtime.selected,'c')
+        self.h.profiles['http'].profile='telegram';self.runtime.selections={'telegram':'a'};self.runtime.select=AsyncMock(side_effect=lambda tag,profile: self.runtime.selections.update({profile:tag}));self.h.results['b']['telegram']={'status':'unreachable'}
+        await self.h.profiles['http'].choose();self.assertEqual(self.runtime.selections['telegram'],'c')
     async def test_failure_bypasses_switch_limiter(self):
         self.h.switches.extend([time.time()]*3);self.h.results['a']['foreign_ok']=False
-        await self.h.choose(True);self.assertEqual(self.runtime.selected,'b')
+        await self.h.profiles['http'].choose(True);self.assertEqual(self.runtime.selected,'b')
     async def test_final_route_failure_tries_next(self):
         self.h.results['a']['foreign_ok']=False
         self.h.url_check=AsyncMock(side_effect=[{'status':'unreachable'},{'status':'unreachable'},{'status':'ok'}])
-        await self.h.choose(True);self.assertEqual(self.runtime.selected,'c');self.assertFalse(self.h.results['b']['foreign_ok'])
+        await self.h.profiles['http'].choose(True);self.assertEqual(self.runtime.selected,'c');self.assertFalse(self.h.results['b']['foreign_ok'])
     async def test_healthy_current_still_optimizes(self):
-        await self.h.current_check();self.assertEqual(self.runtime.selected,'b')
+        await self.h.profiles['http'].current_check();self.assertEqual(self.runtime.selected,'b')
     async def test_manual_not_optimized(self):
-        self.store.config['settings'].update(selection='manual',manual_server='a')
-        await self.h.current_check();self.runtime.select.assert_not_awaited()
+        self.store.config['profiles']['http'].update(selection='manual',manual_server='a')
+        await self.h.profiles['http'].current_check();self.runtime.select.assert_not_awaited()
     async def test_disabled_source_excluded(self):
         self.store.config['sources']=[{'id':'off','enabled':True,'auto':False}]
-        self.store.config['servers'][1]['source_id']='off';await self.h.choose();self.assertEqual(self.runtime.selected,'c')
+        self.store.config['servers'][1]['source_id']='off';await self.h.profiles['http'].choose();self.assertEqual(self.runtime.selected,'c')
     async def test_services_no_hidden_latency_penalty(self):
-        self.h.results['b']['services']=[{'status':'restricted'}];await self.h.choose();self.assertEqual(self.runtime.selected,'b')
+        self.h.results['b']['services']=[{'status':'restricted'}];await self.h.profiles['http'].choose();self.assertEqual(self.runtime.selected,'b')
     async def test_no_confirmed_telegram_fail_closed(self):
-        self.store.config['settings']['telegram_enabled']=True
+        self.h.profiles['http'].profile='telegram';self.runtime.selections={'telegram':'a'};self.runtime.select=AsyncMock(side_effect=lambda tag,profile: self.runtime.selections.update({profile:tag}))
         for r in self.h.results.values():r['telegram']={'status':'unreachable'}
-        await self.h.choose(True);self.assertEqual(self.runtime.selected,'')
+        await self.h.profiles['http'].choose(True);self.assertEqual(self.runtime.selections['telegram'],'')
 
 class Measurements51(unittest.IsolatedAsyncioTestCase):
     async def test_rolling_median_and_failure_window(self):
